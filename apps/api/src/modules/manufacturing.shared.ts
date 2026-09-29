@@ -17,6 +17,7 @@ import {
   boms,
   productionOrderMaterials,
   productionOrderOperations,
+  filaments,
   productionOrders,
   products,
   routingOperations,
@@ -45,12 +46,27 @@ export interface BomIndex {
 
 export async function loadProducts(db: Db): Promise<Map<string, ProductInfo>> {
   const rows = await db.select().from(products);
-  return new Map(
+  const rolls = await db.select().from(filaments);
+  const catalog = new Map<string, ProductInfo>(
     rows.map((row: ProductInfo & { costMinor: bigint | string | null }) => [
       row.id,
       { ...row, uomFactor: String(row.uomFactor), costMinor: row.costMinor === null ? null : BigInt(row.costMinor) },
     ]),
   );
+  for (const row of rolls) {
+    catalog.set(row.id, {
+      id: row.id,
+      sku: row.sku,
+      name: row.name,
+      productType: "filament",
+      stockUom: "G",
+      purchaseUom: "KG",
+      uomFactor: "1000",
+      costMinor: row.costMinor === null ? null : BigInt(row.costMinor),
+      qcRigor: "off",
+    });
+  }
+  return catalog;
 }
 
 export async function loadBomIndex(db: Db): Promise<BomIndex> {
@@ -65,7 +81,7 @@ export async function loadBomIndex(db: Db): Promise<BomIndex> {
     for (const line of lines) {
       const list = byBom.get(line.bomId) ?? [];
       list.push({
-        componentId: line.componentProductId,
+        componentId: line.componentFilamentId ?? line.componentProductId,
         quantity: qtyFromDb(line.quantity),
         scrapPct: parseQty(String(line.scrapPct)),
       });
@@ -171,8 +187,7 @@ export interface NewProductionOrder {
   priority?: number;
   notes?: string | null;
   salesOrderId?: string | null;
-  plannedOrderId?: string | null;
-  source: "manual" | "sales_order" | "mrp_planned";
+  source: "manual" | "sales_order";
   kind: "make_to_order" | "make_to_stock";
 }
 
@@ -216,7 +231,6 @@ export async function createProductionOrder(db: Db, tenant: TenantActor, input: 
       productId: product.id,
       locationId: input.locationId,
       salesOrderId: input.salesOrderId ?? null,
-      plannedOrderId: input.plannedOrderId ?? null,
       source: input.source,
       kind: input.kind,
       status: "draft",
@@ -236,7 +250,8 @@ export async function createProductionOrder(db: Db, tenant: TenantActor, input: 
       materials.map((item) => ({
         tenantId: tenant.tenantId,
         productionOrderId: order.id,
-        componentProductId: item.componentId,
+        componentProductId: catalog.get(item.componentId)?.productType === "filament" ? null : item.componentId,
+        componentFilamentId: catalog.get(item.componentId)?.productType === "filament" ? item.componentId : null,
         requiredQty: formatQty(item.required),
         unitCostMinor: item.unit.toFixed(6),
       })),

@@ -38,6 +38,9 @@ export interface QuotePdfInput {
   vatRate: string;
   total: string | null;
   currency: string;
+  title?: string;
+  dateLabel?: string;
+  kindLabel?: string;
   issuer: string;
   issuerRfc: string;
   issuerRegime: string;
@@ -132,7 +135,8 @@ export function renderQuotePdf(input: QuotePdfInput): Uint8Array {
   };
 
   textAt(input.issuer, 14, LEFT, y);
-  textAt("COTIZACIÓN", 14, RIGHT - textWidth("COTIZACIÓN", 14), y);
+  const title = input.title ?? "COTIZACIÓN";
+  textAt(title, 14, RIGHT - textWidth(title, 14), y);
   y -= 18;
   textAt(`RFC ${input.issuerRfc}`, 9, LEFT, y);
   textAt(input.folio, 11, RIGHT - textWidth(input.folio, 11), y);
@@ -140,7 +144,8 @@ export function renderQuotePdf(input: QuotePdfInput): Uint8Array {
   textAt(`Régimen ${input.issuerRegime} · C.P. ${input.issuerPostalCode}`, 9, LEFT, y);
   textAt(`Fecha ${input.issuedAt}`, 9, RIGHT - textWidth(`Fecha ${input.issuedAt}`, 9), y);
   y -= 12;
-  textAt(`Vigente hasta ${input.validUntil}`, 9, RIGHT - textWidth(`Vigente hasta ${input.validUntil}`, 9), y);
+  const dateLine = `${input.dateLabel ?? "Vigente hasta"} ${input.validUntil}`;
+  textAt(dateLine, 9, RIGHT - textWidth(dateLine, 9), y);
   y -= 16;
   rule(LEFT, RIGHT, y);
   y -= 16;
@@ -152,7 +157,8 @@ export function renderQuotePdf(input: QuotePdfInput): Uint8Array {
   textAt(`${input.currency} · ${input.paymentTerms}`, 9, 320, y);
   y -= 13;
   textAt(input.customerRfc ? `RFC ${input.customerRfc}` : "Sin RFC", 9, LEFT, y);
-  textAt(`${vatLabel(input.vatRate)} · ${input.mode === "prints" ? "Impresiones" : "Productos"}`, 9, 320, y);
+  const kind = input.kindLabel ?? (input.mode === "prints" ? "Impresiones" : "Productos");
+  textAt(`${vatLabel(input.vatRate)} · ${kind}`, 9, 320, y);
   y -= 18;
 
   columnHeader();

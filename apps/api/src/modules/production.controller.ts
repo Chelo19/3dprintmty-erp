@@ -6,13 +6,11 @@ import {
   maxQty,
   minQty,
   parseQty,
-  QTY_SCALE,
   qtyFromDb,
   QC_GATES,
   qcOutcome,
   requiresInspection,
   roundDiv,
-  spoolStateAfterUse,
   transitionProductionOrder,
   type ProductionOrderState,
   type QcGate,
@@ -26,6 +24,7 @@ import { services } from "../container";
 import {
   companyProfiles,
   defectTypes,
+  filaments,
   inspections,
   locations,
   productionConsumptions,
@@ -34,8 +33,6 @@ import {
   productionOrders,
   products,
   salesOrders,
-  spoolEvents,
-  spools,
   workCenters,
 } from "../db/schema";
 import { assertRole, CurrentUser, requireTenant, type Actor, type TenantActor } from "../http/actor";
@@ -87,7 +84,6 @@ const transitionSchema = z.object({
 const consumeSchema = z.object({
   materialId: z.string().uuid(),
   quantity: z.string(),
-  spoolId: z.string().uuid().optional(),
 });
 
 const operationSchema = z.object({
@@ -299,39 +295,7 @@ export class ProductionController {
       if (material.productionOrderId !== order.id) {
         throw new AppError("not_found", "Ese material no pertenece a la orden.", 404);
       }
-      let lotId: string | null = null;
-      if (input.spoolId) {
-        const spool = await one(db, spools, spools.id, input.spoolId, "No encontramos ese rollo.");
-        if (spool.productId !== material.componentProductId) {
-          throw new AppError("spool_mismatch", "Ese rollo es de otro material.", 409);
-        }
-        if (spool.locationId !== order.locationId) {
-          throw new AppError("spool_mismatch", "Ese rollo está en otra sucursal.", 409);
-        }
-        if (spool.status === "empty" || spool.status === "scrapped") {
-          throw new AppError("spool_closed", "Ese rollo ya está vacío o dado de baja.", 409);
-        }
-        const current = qtyFromDb(spool.currentGrams);
-        if (current < quantity) {
-          throw new AppError("spool_insufficient", `Al rollo ${spool.spoolNumber} solo le quedan ${formatQty(current)} g.`, 409);
-        }
-        const remaining = current - quantity;
-        await db
-          .update(spools)
-          .set({ currentGrams: formatQty(remaining), status: spoolStateAfterUse(remaining, QTY_SCALE), updatedAt: new Date() })
-          .where(eq(spools.id, spool.id));
-        await db.insert(spoolEvents).values({
-          tenantId: tenant.tenantId,
-          spoolId: spool.id,
-          kind: "consume",
-          grams: formatQty(-quantity),
-          reason: `Consumo en ${order.folio}`,
-          productionOrderId: order.id,
-          createdBy: tenant.userId,
-        });
-        lotId = spool.lotId;
-      }
-      await issueMaterial(db, tenant, order, material, quantity, input.spoolId ? "spool" : "backflush", input.spoolId ?? null, lotId);
+      await issueMaterial(db, tenant, order, material, quantity);
       if (order.status !== "in_progress") {
         await db
           .update(productionOrders)
@@ -408,7 +372,7 @@ export class ProductionController {
       for (const material of materials) {
         const expected = roundDiv(qtyFromDb(material.requiredQty) * minQty(produced, ordered), ordered);
         const missing = expected - qtyFromDb(material.consumedQty);
-        if (missing > 0n) await issueMaterial(db, tenant, order, material, missing, "backflush", null, null);
+        if (missing > 0n) await issueMaterial(db, tenant, order, material, missing);
       }
       await releaseAllocations(db, tenant, order, "Sobrante al terminar OP");
       const operations = await db
@@ -656,11 +620,11 @@ async function reserveMaterials(db: Db, tenant: TenantActor, order: OrderRow) {
   for (const material of materials) {
     const need = qtyFromDb(material.requiredQty) - qtyFromDb(material.consumedQty) - qtyFromDb(material.allocatedQty);
     if (need <= 0n) continue;
-    const available = maxQty(0n, await availableAt(db, material.componentProductId, order.locationId));
+    const available = maxQty(0n, await availableAt(db, materialStock(material), order.locationId));
     const reserve = minQty(need, available);
     if (reserve > 0n) {
       await reserveStock(db, tenant, {
-        productId: material.componentProductId,
+        ...materialStock(material),
         locationId: order.locationId,
         quantity: reserve,
         reason: `Apartado para ${order.folio}`,
@@ -672,8 +636,11 @@ async function reserveMaterials(db: Db, tenant: TenantActor, order: OrderRow) {
         .where(eq(productionOrderMaterials.id, material.id));
     }
     if (reserve < need) {
-      const [product] = await db.select({ sku: products.sku }).from(products).where(eq(products.id, material.componentProductId)).limit(1);
-      shortages.push({ productId: material.componentProductId, sku: product?.sku ?? "", short: formatQty(need - reserve) });
+      const stockId = material.componentFilamentId ?? material.componentProductId;
+      const [named] = material.componentFilamentId
+        ? await db.select({ sku: filaments.sku }).from(filaments).where(eq(filaments.id, material.componentFilamentId)).limit(1)
+        : await db.select({ sku: products.sku }).from(products).where(eq(products.id, material.componentProductId as string)).limit(1);
+      shortages.push({ productId: stockId ?? "", sku: named?.sku ?? "", short: formatQty(need - reserve) });
     }
   }
   return shortages;
@@ -688,7 +655,7 @@ async function releaseAllocations(db: Db, tenant: TenantActor, order: OrderRow, 
     const allocated = qtyFromDb(material.allocatedQty);
     if (allocated <= 0n) continue;
     await reserveStock(db, tenant, {
-      productId: material.componentProductId,
+      ...materialStock(material),
       locationId: order.locationId,
       quantity: -allocated,
       reason: `${reason} ${order.folio}`,
@@ -704,15 +671,12 @@ async function issueMaterial(
   order: OrderRow,
   material: MaterialRow,
   quantity: bigint,
-  source: "spool" | "backflush",
-  spoolId: string | null,
-  lotId: string | null,
 ) {
   const allocated = qtyFromDb(material.allocatedQty);
   const release = minQty(allocated, quantity);
   const value = extendCostMinor(quantity, new Decimal(String(material.unitCostMinor)));
   await postStock(db, tenant, {
-    productId: material.componentProductId,
+    ...materialStock(material),
     locationId: order.locationId,
     kind: "issue",
     delta: -quantity,
@@ -720,18 +684,17 @@ async function issueMaterial(
     releaseAllocated: release,
     valueMinor: value,
     reference: { type: "production_order", id: order.id },
-    lotId,
   });
   await db.insert(productionConsumptions).values({
     tenantId: tenant.tenantId,
     productionOrderId: order.id,
     materialId: material.id,
-    productId: material.componentProductId,
-    spoolId,
-    lotId,
+    ...(material.componentFilamentId
+      ? { filamentId: material.componentFilamentId, productId: null }
+      : { productId: material.componentProductId, filamentId: null }),
     quantity: formatQty(quantity),
     valueMinor: value,
-    source,
+    source: "backflush",
     createdBy: tenant.userId,
   });
   const [fresh] = await db
@@ -785,14 +748,8 @@ async function loadDetail(db: Db, id: string) {
   const order = await one(db, productionOrders, productionOrders.id, id, "No encontramos esa orden de producción.");
   const [product] = await db.select().from(products).where(eq(products.id, order.productId)).limit(1);
   const materials = await db
-    .select({
-      material: productionOrderMaterials,
-      sku: products.sku,
-      name: products.name,
-      stockUom: products.stockUom,
-    })
+    .select()
     .from(productionOrderMaterials)
-    .innerJoin(products, eq(products.id, productionOrderMaterials.componentProductId))
     .where(eq(productionOrderMaterials.productionOrderId, order.id));
   const operations = await db
     .select({ operation: productionOrderOperations, workCenterName: workCenters.name })
@@ -800,10 +757,8 @@ async function loadDetail(db: Db, id: string) {
     .innerJoin(workCenters, eq(workCenters.id, productionOrderOperations.workCenterId))
     .where(eq(productionOrderOperations.productionOrderId, order.id));
   const consumptions = await db
-    .select({ consumption: productionConsumptions, spoolNumber: spools.spoolNumber, sku: products.sku })
+    .select()
     .from(productionConsumptions)
-    .innerJoin(products, eq(products.id, productionConsumptions.productId))
-    .leftJoin(spools, eq(spools.id, productionConsumptions.spoolId))
     .where(eq(productionConsumptions.productionOrderId, order.id))
     .orderBy(desc(productionConsumptions.createdAt));
   const checks = await db
@@ -817,24 +772,28 @@ async function loadDetail(db: Db, id: string) {
     : [];
 
   const materialRows = [];
-  for (const row of materials as Array<{ material: MaterialRow; sku: string; name: string; stockUom: string }>) {
-    const required = qtyFromDb(row.material.requiredQty);
-    const consumed = qtyFromDb(row.material.consumedQty);
-    const allocated = qtyFromDb(row.material.allocatedQty);
-    const available = await availableAt(db, row.material.componentProductId, order.locationId);
+  for (const material of materials as MaterialRow[]) {
+    const required = qtyFromDb(material.requiredQty);
+    const consumed = qtyFromDb(material.consumedQty);
+    const allocated = qtyFromDb(material.allocatedQty);
+    const available = await availableAt(db, materialStock(material), order.locationId);
     const open = maxQty(0n, required - consumed);
+    const named = material.componentFilamentId
+      ? await db.select({ sku: filaments.sku, name: filaments.name }).from(filaments).where(eq(filaments.id, material.componentFilamentId)).limit(1)
+      : await db.select({ sku: products.sku, name: products.name }).from(products).where(eq(products.id, material.componentProductId as string)).limit(1);
+    const info = named[0];
     materialRows.push({
-      id: row.material.id,
-      componentProductId: row.material.componentProductId,
-      sku: row.sku,
-      name: row.name,
-      stockUom: row.stockUom,
+      id: material.id,
+      componentProductId: material.componentFilamentId ?? material.componentProductId,
+      sku: info?.sku ?? "",
+      name: info?.name ?? "",
+      stockUom: material.componentFilamentId ? "G" : "EA",
       required: formatQty(required),
       allocated: formatQty(allocated),
       consumed: formatQty(consumed),
       available: formatQty(available),
       shortage: formatQty(maxQty(0n, open - allocated - maxQty(0n, available))),
-      unitCostMinor: String(row.material.unitCostMinor),
+      unitCostMinor: String(material.unitCostMinor),
     });
   }
 
@@ -855,17 +814,14 @@ async function loadDetail(db: Db, id: string) {
         status: operation.status,
       }))
       .sort((a, b) => a.sequence - b.sequence),
-    consumptions: (consumptions as Array<{ consumption: ConsumptionRow; spoolNumber: string | null; sku: string }>).map(
-      ({ consumption, spoolNumber, sku }) => ({
+    consumptions: (consumptions as ConsumptionRow[]).map((consumption) => ({
         id: consumption.id,
-        sku,
-        spoolNumber,
+        sku: "",
         quantity: formatQty(qtyFromDb(consumption.quantity)),
         value: minorToMajor(consumption.valueMinor),
         source: consumption.source,
         createdAt: consumption.createdAt,
-      }),
-    ),
+      })),
     inspections: (checks as Array<{ inspection: InspectionRow; defect: string | null }>).map(({ inspection, defect }) => ({
       id: inspection.id,
       result: inspection.result,
@@ -889,7 +845,6 @@ function mapOrder(row: OrderRow, product?: { sku?: string; name?: string; stockU
     stockUom: product?.stockUom ?? null,
     locationId: row.locationId,
     salesOrderId: row.salesOrderId,
-    plannedOrderId: row.plannedOrderId,
     source: row.source,
     kind: row.kind,
     status: row.status,
@@ -917,7 +872,6 @@ interface OrderRow {
   productId: string;
   locationId: string;
   salesOrderId: string | null;
-  plannedOrderId: string | null;
   source: string;
   kind: string;
   status: string;
@@ -938,10 +892,17 @@ interface OrderRow {
   createdAt: Date;
 }
 
+function materialStock(material: { componentProductId: string | null; componentFilamentId: string | null }) {
+  return material.componentFilamentId
+    ? { filamentId: material.componentFilamentId }
+    : { productId: material.componentProductId as string };
+}
+
 interface MaterialRow {
   id: string;
   productionOrderId: string;
-  componentProductId: string;
+  componentProductId: string | null;
+  componentFilamentId: string | null;
   requiredQty: string;
   allocatedQty: string;
   consumedQty: string;

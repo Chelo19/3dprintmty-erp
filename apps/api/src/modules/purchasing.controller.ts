@@ -19,25 +19,24 @@ import { z } from "zod";
 import { services } from "../container";
 import {
   companyProfiles,
+  filaments,
   locations,
+  materialLots,
   products,
   purchaseOrderLines,
   purchaseOrders,
   receiptLines,
   receipts,
-  spoolEvents,
-  spools,
   stockBalances,
   vendors,
 } from "../db/schema";
 import { assertRole, CurrentUser, requireTenant, type Actor, type TenantActor } from "../http/actor";
 import { roundMinor } from "./manufacturing.shared";
-import { ensureLot } from "./spools.controller";
 import {
   allocateFolio,
-  allocateFolios,
   audit,
   defaultLocationId,
+  ensureLot,
   minorToMajor,
   one,
   postStock,
@@ -47,8 +46,6 @@ import {
 } from "./support";
 
 const BUYERS = ["owner", "admin", "warehouse"] as const;
-/** Tolerancia de báscula al comparar la suma de rollos contra lo recibido: 0.1 g. */
-const SPOOL_TOLERANCE = 1_000n;
 
 const vendorSchema = z.object({
   name: z.string().trim().min(2).max(160),
@@ -91,7 +88,6 @@ const receiveSchema = z.object({
         quantity: z.string(),
         lotNumber: z.string().trim().max(60).optional(),
         vendorLot: z.string().trim().max(60).optional(),
-        spoolWeights: z.array(z.string()).max(200).optional(),
       }),
     )
     .min(1),
@@ -248,12 +244,52 @@ export class PurchasingController {
     );
   }
 
+  @Get("lots")
+  async lots(@CurrentUser() actor: Actor, @Query("productId") productId?: string) {
+    const tenant = requireTenant(actor);
+    const rows = await this.database.asUser(tenant, async (db) => {
+      const goods = await db
+        .select({
+          id: materialLots.id,
+          lotNumber: materialLots.lotNumber,
+          vendorLot: materialLots.vendorLot,
+          source: materialLots.source,
+          productId: materialLots.productId,
+          sku: products.sku,
+          name: products.name,
+          receivedQty: materialLots.receivedQty,
+          receivedAt: materialLots.receivedAt,
+          purchaseOrderId: materialLots.purchaseOrderId,
+        })
+        .from(materialLots)
+        .innerJoin(products, eq(products.id, materialLots.productId))
+        .where(productId ? eq(materialLots.productId, productId) : undefined);
+      const filamentsLots = await db
+        .select({
+          id: materialLots.id,
+          lotNumber: materialLots.lotNumber,
+          vendorLot: materialLots.vendorLot,
+          source: materialLots.source,
+          productId: materialLots.filamentId,
+          sku: filaments.sku,
+          name: filaments.name,
+          receivedQty: materialLots.receivedQty,
+          receivedAt: materialLots.receivedAt,
+          purchaseOrderId: materialLots.purchaseOrderId,
+        })
+        .from(materialLots)
+        .innerJoin(filaments, eq(filaments.id, materialLots.filamentId))
+        .where(productId ? eq(materialLots.filamentId, productId) : undefined);
+      return [...goods, ...filamentsLots].sort((a, b) => +new Date(b.receivedAt) - +new Date(a.receivedAt));
+    });
+    return {
+      data: rows.map((row: { receivedQty: string }) => ({ ...row, receivedQty: formatQty(qtyFromDb(row.receivedQty)) })),
+    };
+  }
+
   private async doReceive(tenant: TenantActor, id: string, input: z.infer<typeof receiveSchema>) {
-    const spoolCount = input.lines.reduce((sum, line) => sum + (line.spoolWeights?.length ?? 0), 0);
     await this.database.asUser(tenant, (db) => prepareReceipt(db, id, input));
     const receiptFolio = await allocateFolio(this.database, tenant.tenantId, "receipt", "REC");
-    const firstSpool = await allocateFolios(this.database, tenant.tenantId, "spool", "R", spoolCount);
-    let nextSpool = firstSpool;
     return this.database.asUser(tenant, async (db) => {
       const { order, lines: prepared } = await prepareReceipt(db, id, input);
       const [receipt] = await db
@@ -267,13 +303,12 @@ export class PurchasingController {
           createdBy: tenant.userId,
         })
         .returning();
-      const created: Array<{ spoolNumber: string; grams: string }> = [];
-      for (const [position, { entry, line, product, quantity, stockQty, value, weights }] of prepared.entries()) {
+      for (const [position, { entry, line, product, quantity, stockQty, value }] of prepared.entries()) {
         await updateAverageCost(db, product, stockQty, value);
         const lotId = await ensureLot(
           db,
           tenant,
-          product.id,
+          product.kind === "filament" ? { filamentId: product.id } : { productId: product.id },
           entry.lotNumber || `${receipt.folio}-${position + 1}`,
           stockQty,
           {
@@ -285,7 +320,7 @@ export class PurchasingController {
           },
         );
         await postStock(db, tenant, {
-          productId: product.id,
+          ...(product.kind === "filament" ? { filamentId: product.id } : { productId: product.id }),
           locationId: order.locationId,
           kind: "receipt",
           delta: stockQty,
@@ -298,7 +333,7 @@ export class PurchasingController {
           tenantId: tenant.tenantId,
           receiptId: receipt.id,
           purchaseOrderLineId: line.id,
-          productId: product.id,
+          ...(product.kind === "filament" ? { filamentId: product.id, productId: null } : { productId: product.id, filamentId: null }),
           quantity: formatQty(quantity),
           stockQuantity: formatQty(stockQty),
           lotId,
@@ -308,33 +343,6 @@ export class PurchasingController {
           .update(purchaseOrderLines)
           .set({ receivedQty: formatQty(qtyFromDb(line.receivedQty) + quantity) })
           .where(eq(purchaseOrderLines.id, line.id));
-        for (const grams of weights) {
-          const spoolNumber = `R-${nextSpool}`;
-          nextSpool += 1;
-          const [spool] = await db
-            .insert(spools)
-            .values({
-              tenantId: tenant.tenantId,
-              spoolNumber,
-              productId: product.id,
-              locationId: order.locationId,
-              lotId,
-              initialGrams: formatQty(grams),
-              currentGrams: formatQty(grams),
-              status: "available",
-              createdBy: tenant.userId,
-            })
-            .returning();
-          await db.insert(spoolEvents).values({
-            tenantId: tenant.tenantId,
-            spoolId: spool.id,
-            kind: "receipt",
-            grams: formatQty(grams),
-            reason: `Recepción ${receipt.folio}`,
-            createdBy: tenant.userId,
-          });
-          created.push({ spoolNumber, grams: formatQty(grams) });
-        }
       }
       const lines = await db.select().from(purchaseOrderLines).where(eq(purchaseOrderLines.purchaseOrderId, order.id));
       const complete = lines.every((line: LineRow) => qtyFromDb(line.receivedQty) >= qtyFromDb(line.quantity));
@@ -347,11 +355,9 @@ export class PurchasingController {
         .where(eq(purchaseOrders.id, order.id));
       await audit(db, tenant, "purchase_order.received", "receipt", receipt.id, {
         purchaseOrder: order.folio,
-        spools: created.length,
       });
       return {
         receipt: { id: receipt.id, folio: receipt.folio },
-        spools: created,
         purchaseOrder: await loadPurchaseOrder(db, order.id),
       };
     });
@@ -378,28 +384,10 @@ async function prepareReceipt(db: Db, id: string, input: z.infer<typeof receiveS
     if (quantity > pending) {
       throw new AppError("over_receipt", `Solo quedan ${formatQty(pending)} ${line.purchaseUom} por recibir de ${line.description}.`, 409);
     }
-    const product = await one(db, products, products.id, line.productId, "No encontramos ese producto.");
+    const product = await purchasedItem(db, (line.filamentId ?? line.productId) as string);
     const stockQty = mulQty(quantity, parseQty(String(line.uomFactor)));
     const value = extendCostMinor(quantity, new Decimal(String(line.unitCostMinor)));
-    const weights = (entry.spoolWeights ?? []).map((weight) => {
-      const grams = parseQty(weight);
-      if (grams <= 0n) throw new AppError("invalid_quantity", "Cada rollo necesita un peso mayor a cero.");
-      return grams;
-    });
-    if (weights.length) {
-      if (product.stockUom !== "G") {
-        throw new AppError("not_filament", "Solo los filamentos se reciben por rollo.", 409);
-      }
-      const total = weights.reduce((sum, grams) => sum + grams, 0n);
-      const diff = total > stockQty ? total - stockQty : stockQty - total;
-      if (diff > SPOOL_TOLERANCE) {
-        throw new AppError(
-          "spool_weights_mismatch",
-          `Los rollos suman ${formatQty(total)} g pero se reciben ${formatQty(stockQty)} g.`,
-        );
-      }
-    }
-    lines.push({ entry, line, product, quantity, stockQty, value, weights });
+    lines.push({ entry, line, product, quantity, stockQty, value });
   }
   return { order, lines };
 }
@@ -407,11 +395,14 @@ async function prepareReceipt(db: Db, id: string, input: z.infer<typeof receiveS
 /** Costo promedio ponderado por unidad de compra (lo que el catálogo guarda: MXN/kg, MXN/pieza). */
 async function updateAverageCost(
   db: Db,
-  product: { id: string; costMinor: bigint | string | null; uomFactor: string },
+  product: { id: string; kind: "product" | "filament"; costMinor: bigint | string | null; uomFactor: string },
   receivedStockQty: bigint,
   receivedValueMinor: bigint,
 ) {
-  const balances = await db.select({ onHand: stockBalances.onHand }).from(stockBalances).where(eq(stockBalances.productId, product.id));
+  const balances = await db
+    .select({ onHand: stockBalances.onHand })
+    .from(stockBalances)
+    .where(product.kind === "filament" ? eq(stockBalances.filamentId, product.id) : eq(stockBalances.productId, product.id));
   const onHand = balances.reduce((sum: bigint, row: { onHand: string }) => sum + qtyFromDb(row.onHand), 0n);
   const factor = new Decimal(String(product.uomFactor));
   const currentCost = product.costMinor === null ? null : BigInt(product.costMinor);
@@ -424,10 +415,12 @@ async function updateAverageCost(
       .add(receivedValueMinor.toString())
       .div(new Decimal(formatQty(onHand + receivedStockQty)));
   }
-  await db
-    .update(products)
-    .set({ costMinor: roundMinor(perStock.mul(factor)), updatedAt: new Date() })
-    .where(eq(products.id, product.id));
+  const costMinor = roundMinor(perStock.mul(factor));
+  if (product.kind === "filament") {
+    await db.update(filaments).set({ costMinor, updatedAt: new Date() }).where(eq(filaments.id, product.id));
+    return;
+  }
+  await db.update(products).set({ costMinor, updatedAt: new Date() }).where(eq(products.id, product.id));
 }
 
 export async function createPurchaseOrder(
@@ -439,7 +432,6 @@ export async function createPurchaseOrder(
     locationId?: string;
     expectedDate?: string | null;
     notes?: string | null;
-    plannedOrderId?: string | null;
     lines: NewPurchaseLine[];
   },
 ) {
@@ -451,8 +443,10 @@ export async function createPurchaseOrder(
   const prepared = [];
   for (const line of input.lines) {
     if (line.quantity <= 0n) throw new AppError("invalid_quantity", "Cada línea necesita cantidad mayor a cero.");
-    const product = await one(db, products, products.id, line.productId, "No encontramos ese producto.");
-    if (product.productType === "service") throw new AppError("invalid_product", "Los servicios no se compran a inventario.", 409);
+    const product = await purchasedItem(db, line.productId);
+    if (product.kind === "product" && product.productType === "service") {
+      throw new AppError("invalid_product", "Los servicios no se compran a inventario.", 409);
+    }
     const unit = line.unitCostMinor ?? (product.costMinor === null ? 0n : BigInt(product.costMinor));
     if (unit < 0n) throw new AppError("invalid_money", "El costo no puede ser negativo.");
     prepared.push({
@@ -479,7 +473,6 @@ export async function createPurchaseOrder(
       subtotalMinor: subtotal,
       vatMinor: vat,
       totalMinor: subtotal + vat,
-      plannedOrderId: input.plannedOrderId ?? null,
       notes: input.notes ?? null,
       createdBy: tenant.userId,
     })
@@ -488,7 +481,9 @@ export async function createPurchaseOrder(
     prepared.map((line) => ({
       tenantId: tenant.tenantId,
       purchaseOrderId: order.id,
-      productId: line.product.id,
+      ...(line.product.kind === "filament"
+        ? { filamentId: line.product.id, productId: null }
+        : { productId: line.product.id, filamentId: null }),
       description: line.description,
       purchaseUom: line.product.purchaseUom,
       uomFactor: String(line.product.uomFactor),
@@ -503,28 +498,29 @@ export async function createPurchaseOrder(
 
 async function loadPurchaseOrder(db: Db, id: string) {
   const order = await one(db, purchaseOrders, purchaseOrders.id, id, "No encontramos esa orden de compra.");
-  const lines = await db
-    .select({ line: purchaseOrderLines, sku: products.sku, stockUom: products.stockUom })
-    .from(purchaseOrderLines)
-    .innerJoin(products, eq(products.id, purchaseOrderLines.productId))
-    .where(eq(purchaseOrderLines.purchaseOrderId, order.id));
+  const lines = await db.select().from(purchaseOrderLines).where(eq(purchaseOrderLines.purchaseOrderId, order.id));
   const history = await db.select().from(receipts).where(eq(receipts.purchaseOrderId, order.id)).orderBy(desc(receipts.createdAt));
-  return {
-    ...mapPurchaseOrder(order),
-    lines: (lines as Array<{ line: LineRow; sku: string; stockUom: string }>).map(({ line, sku, stockUom }) => ({
+  const mapped = [];
+  for (const line of lines as LineRow[]) {
+    const item = await purchasedItem(db, (line.filamentId ?? line.productId) as string);
+    mapped.push({
       id: line.id,
-      productId: line.productId,
-      sku,
+      productId: item.id,
+      sku: item.sku,
       description: line.description,
       purchaseUom: line.purchaseUom,
-      stockUom,
+      stockUom: item.stockUom,
       uomFactor: formatQty(qtyFromDb(line.uomFactor)),
       quantity: formatQty(qtyFromDb(line.quantity)),
       receivedQty: formatQty(qtyFromDb(line.receivedQty)),
       pendingQty: formatQty(qtyFromDb(line.quantity) - qtyFromDb(line.receivedQty)),
       unitCost: minorToMajor(line.unitCostMinor),
       lineTotal: minorToMajor(line.lineTotalMinor),
-    })),
+    });
+  }
+  return {
+    ...mapPurchaseOrder(order),
+    lines: mapped,
     receipts: history.map((receipt: { id: string; folio: string; createdAt: Date; notes: string | null }) => ({
       id: receipt.id,
       folio: receipt.folio,
@@ -547,7 +543,6 @@ function mapPurchaseOrder(row: {
   subtotalMinor: bigint;
   vatMinor: bigint;
   totalMinor: bigint;
-  plannedOrderId: string | null;
   notes: string | null;
   createdAt: Date;
 }) {
@@ -565,7 +560,6 @@ function mapPurchaseOrder(row: {
     vat: minorToMajor(row.vatMinor),
     total: minorToMajor(row.totalMinor),
     currency: "MXN",
-    plannedOrderId: row.plannedOrderId,
     notes: row.notes,
     createdAt: row.createdAt,
   };
@@ -595,10 +589,40 @@ function mapVendor(row: {
   };
 }
 
+async function purchasedItem(db: Db, id: string) {
+  const [filament] = await db.select().from(filaments).where(eq(filaments.id, id)).limit(1);
+  if (filament) {
+    return {
+      id: filament.id,
+      kind: "filament" as const,
+      sku: filament.sku as string,
+      name: filament.name as string,
+      productType: "filament",
+      stockUom: "G",
+      purchaseUom: "KG",
+      uomFactor: "1000",
+      costMinor: filament.costMinor as bigint | null,
+    };
+  }
+  const product = await one(db, products, products.id, id, "No encontramos ese producto.");
+  return {
+    id: product.id as string,
+    kind: "product" as const,
+    sku: product.sku as string,
+    name: product.name as string,
+    productType: product.productType as string,
+    stockUom: product.stockUom as string,
+    purchaseUom: product.purchaseUom as string,
+    uomFactor: String(product.uomFactor),
+    costMinor: product.costMinor as bigint | null,
+  };
+}
+
 interface LineRow {
   id: string;
   purchaseOrderId: string;
-  productId: string;
+  productId: string | null;
+  filamentId: string | null;
   description: string;
   purchaseUom: string;
   uomFactor: string;

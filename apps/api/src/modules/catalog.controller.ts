@@ -5,7 +5,7 @@ import { AppError } from "@3dprintmty/shared";
 import { count, desc, eq, ilike, or } from "drizzle-orm";
 import { z } from "zod";
 import { services } from "../container";
-import { products, productsVisible, serviceOfferings } from "../db/schema";
+import { filaments, products, productsVisible, serviceOfferings } from "../db/schema";
 import { assertRole, CurrentUser, requireTenant, type Actor, type TenantActor } from "../http/actor";
 import { one, withIdempotency } from "./support";
 
@@ -26,6 +26,26 @@ const productPatchSchema = z.object({
   cost: z.string().nullable().optional(),
   salePrice: z.string().nullable().optional(),
   qcRigor: z.enum(QC_RIGOR).optional(),
+  status: z.enum(["active", "inactive"]).optional(),
+});
+
+const filamentSchema = z.object({
+  sku: z.string().trim().min(1).max(40),
+  name: z.string().trim().min(1).max(160),
+  material: z.string().trim().min(1).max(40),
+  color: z.string().trim().min(1).max(40),
+  diameterMm: z.enum(["1.75", "2.85"]),
+  cost: z.string().optional(),
+  salePrice: z.string().optional(),
+});
+
+const filamentPatchSchema = z.object({
+  name: z.string().trim().min(1).max(160).optional(),
+  material: z.string().trim().min(1).max(40).optional(),
+  color: z.string().trim().min(1).max(40).optional(),
+  cost: z.string().nullable().optional(),
+  salePrice: z.string().nullable().optional(),
+  diameterMm: z.enum(["1.75", "2.85"]).optional(),
   status: z.enum(["active", "inactive"]).optional(),
 });
 
@@ -115,6 +135,9 @@ export class CatalogController {
     if (input.productType === "service") {
       throw new AppError("use_service_catalog", "Los servicios se capturan en el catálogo de servicios.", 409);
     }
+    if (input.productType === "raw_material") {
+      throw new AppError("use_filament_catalog", "Los filamentos se capturan en el catálogo de filamentos.", 409);
+    }
     return withIdempotency(this.database, tenant.userId, idempotencyKey, { route: "products", input }, async () => {
       const values = productValues(tenant.tenantId, tenant.userId, input);
       const [created] = await this.database.asUser(tenant, (db) =>
@@ -145,6 +168,78 @@ export class CatalogController {
     return this.load(tenant, id);
   }
 
+  @Get("filaments")
+  async listFilaments(@CurrentUser() actor: Actor) {
+    const tenant = requireTenant(actor);
+    const rows = await this.database.asUser(tenant, (db) =>
+      db.select().from(filaments).orderBy(desc(filaments.createdAt)),
+    );
+    return { data: rows.map((row: FilamentRow) => mapFilament(row, tenant.role)) };
+  }
+
+  @Get("filaments/:id")
+  async getFilament(@CurrentUser() actor: Actor, @Param("id") id: string) {
+    const tenant = requireTenant(actor);
+    const row = await this.database.asUser(tenant, (db) =>
+      one(db, filaments, filaments.id, id, "No encontramos ese filamento."),
+    );
+    return mapFilament(row, tenant.role);
+  }
+
+  @Post("filaments")
+  async createFilament(
+    @CurrentUser() actor: Actor,
+    @Body() body: unknown,
+    @Headers("idempotency-key") idempotencyKey?: string,
+  ) {
+    const tenant = this.writer(actor);
+    const input = filamentSchema.parse(body);
+    return withIdempotency(this.database, tenant.userId, idempotencyKey, { route: "filaments", input }, async () => {
+      const [created] = await this.database.asUser(tenant, (db) =>
+        db
+          .insert(filaments)
+          .values({
+            tenantId: tenant.tenantId,
+            sku: input.sku.toUpperCase(),
+            name: input.name,
+            material: input.material,
+            color: input.color,
+            diameterMm: input.diameterMm,
+            costMinor: input.cost ? majorOrNull(input.cost) : null,
+            salePriceMinor: input.salePrice ? Money.fromMajor(input.salePrice).minor : null,
+            createdBy: tenant.userId,
+          })
+          .returning(),
+      );
+      return mapFilament(created, tenant.role);
+    });
+  }
+
+  @Patch("filaments/:id")
+  async updateFilament(@CurrentUser() actor: Actor, @Param("id") id: string, @Body() body: unknown) {
+    const tenant = this.writer(actor);
+    const input = filamentPatchSchema.parse(body);
+    const updated = await this.database.asUser(tenant, async (db) => {
+      const filament = await one(db, filaments, filaments.id, id, "No encontramos ese filamento.");
+      const [row] = await db
+        .update(filaments)
+        .set({
+          ...(input.name !== undefined ? { name: input.name } : {}),
+          ...(input.material !== undefined ? { material: input.material } : {}),
+          ...(input.color !== undefined ? { color: input.color } : {}),
+          ...(input.diameterMm !== undefined ? { diameterMm: input.diameterMm } : {}),
+          ...(input.cost !== undefined ? { costMinor: majorOrNull(input.cost) } : {}),
+          ...(input.salePrice !== undefined ? { salePriceMinor: input.salePrice === null ? null : Money.fromMajor(input.salePrice).minor } : {}),
+          ...(input.status !== undefined ? { status: input.status } : {}),
+          updatedAt: new Date(),
+        })
+        .where(eq(filaments.id, filament.id))
+        .returning();
+      return row;
+    });
+    return mapFilament(updated, tenant.role);
+  }
+
   @Get("services")
   async listServices(@CurrentUser() actor: Actor) {
     const tenant = requireTenant(actor);
@@ -152,6 +247,15 @@ export class CatalogController {
       db.select().from(serviceOfferings).orderBy(desc(serviceOfferings.createdAt)),
     );
     return { data: rows.map((row: ServiceRow) => mapService(row, tenant.role)) };
+  }
+
+  @Get("services/:id")
+  async getService(@CurrentUser() actor: Actor, @Param("id") id: string) {
+    const tenant = requireTenant(actor);
+    const row = await this.database.asUser(tenant, (db) =>
+      one(db, serviceOfferings, serviceOfferings.id, id, "No encontramos ese servicio."),
+    );
+    return mapService(row, tenant.role);
   }
 
   @Post("services")
@@ -301,19 +405,49 @@ function majorOrNull(value: string | null): bigint | null {
   return minor;
 }
 
+function mapFilament(row: FilamentRow, role: TenantRole) {
+  const hidePrice = role === "production";
+  return {
+    id: row.id,
+    sku: row.sku,
+    name: row.name,
+    material: row.material,
+    color: row.color,
+    diameterMm: row.diameterMm,
+    status: row.status,
+    stockUom: "G",
+    purchaseUom: "KG",
+    cost: moneyOrNull(row.costMinor),
+    salePrice: hidePrice ? null : moneyOrNull(row.salePriceMinor),
+    pricesHidden: hidePrice,
+    currency: "MXN",
+  };
+}
+
+interface FilamentRow {
+  id: string;
+  sku: string;
+  name: string;
+  material: string;
+  color: string;
+  diameterMm: string;
+  costMinor: bigint | number | string | null;
+  salePriceMinor: bigint | number | string | null;
+  status: string;
+}
+
 function productValues(tenantId: string, createdBy: string, input: z.infer<typeof productSchema>) {
-  const filament = input.productType === "raw_material";
   return {
     tenantId,
     sku: input.sku.toUpperCase(),
     name: input.name,
     productType: input.productType,
-    material: input.material || null,
-    color: input.color || null,
-    diameterMm: input.diameterMm ?? null,
-    stockUom: filament ? "G" : "EA",
-    purchaseUom: filament ? "KG" : "EA",
-    uomFactor: filament ? "1000.0000" : "1.0000",
+    material: null,
+    color: null,
+    diameterMm: null,
+    stockUom: "EA",
+    purchaseUom: "EA",
+    uomFactor: "1.0000",
     costMinor: input.cost ? majorOrNull(input.cost) : null,
     salePriceMinor: input.salePrice ? Money.fromMajor(input.salePrice).minor : null,
     qcRigor: input.qcRigor ?? (input.productType === "finished_good" ? "basic" : "off"),

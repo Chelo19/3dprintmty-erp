@@ -27,19 +27,16 @@ describe("operación — compras, manufactura, calidad y prefacturas", () => {
     await app?.close();
   });
 
-  it("compra filamento en rollos, fabrica un pedido con calidad y lo prefactura", async () => {
+  it("compra filamento, fabrica un pedido con calidad y lo prefactura", async () => {
     const owner = await onboard(app, "rosa@taller-rosa.test", "TRO010101AAA", "Taller Rosa");
     const other = await onboard(app, "sol@taller-sol.test", "TSO010101AAA", "Taller Sol");
-    const locationId = (await api.get(owner, "/locations")).body[0].id as string;
-
     const centers = await api.get(owner, "/work-centers");
     expect(centers.body.data.map((row: { code: string }) => row.code)).toEqual(["EMP", "IMP", "POST", "QC"]);
     const printer = centers.body.data.find((row: { code: string }) => row.code === "IMP");
 
-    const pla = await api.post(owner, "/products", {
+    const pla = await api.post(owner, "/filaments", {
       sku: "FIL-PLA-ROJ",
       name: "PLA rojo 1.75 mm",
-      productType: "raw_material",
       material: "PLA",
       color: "Rojo",
       diameterMm: "1.75",
@@ -107,12 +104,6 @@ describe("operación — compras, manufactura, calidad y prefacturas", () => {
     });
     expect(confirmed.status).toBe(201);
 
-    const buyList = await api.get(owner, "/mrp/requirements?kind=buy");
-    expect(buyList.body.data).toHaveLength(1);
-    expect(buyList.body.data[0].sku).toBe("FIL-PLA-ROJ");
-    expect(buyList.body.data[0].netShortage).toBe("252");
-    expect(buyList.body.data[0].purchaseQuantity).toBe("0.252");
-
     const vendor = await api.post(owner, "/vendors", { name: "Filamentos del Norte", leadTimeDays: 3 });
     const po = await api.post(owner, "/purchase-orders", {
       vendorId: vendor.body.id,
@@ -123,29 +114,21 @@ describe("operación — compras, manufactura, calidad y prefacturas", () => {
     expect(po.body.total).toBe("290.00");
     const ordered = await api.post(owner, `/purchase-orders/${po.body.id}/transition`, { to: "ordered" });
     expect(ordered.body.status).toBe("ordered");
-    const covered = await api.get(owner, "/mrp/requirements?kind=buy");
-    expect(covered.body.data.filter((row: { netShortage: string }) => row.netShortage !== "0")).toEqual([]);
 
     const lineId = po.body.lines[0].id as string;
-    const mismatch = await api.post(owner, `/purchase-orders/${po.body.id}/receive`, {
-      lines: [{ lineId, quantity: "1", spoolWeights: ["600", "300"] }],
-    });
-    expect(mismatch.status).toBe(400);
-    expect(mismatch.body.code).toBe("spool_weights_mismatch");
     const receipt = await api.post(
       owner,
       `/purchase-orders/${po.body.id}/receive`,
-      { lines: [{ lineId, quantity: "1", vendorLot: "FN-2026-09", spoolWeights: ["600", "400"] }] },
+      { lines: [{ lineId, quantity: "1", vendorLot: "FN-2026-09" }] },
       { "Idempotency-Key": "recepcion-oc-1" },
     );
     expect(receipt.status).toBe(201);
     expect(receipt.body.receipt.folio).toBe("REC-1");
-    expect(receipt.body.spools.map((spool: { spoolNumber: string }) => spool.spoolNumber)).toEqual(["R-1", "R-2"]);
     expect(receipt.body.purchaseOrder.status).toBe("received");
     const replay = await api.post(
       owner,
       `/purchase-orders/${po.body.id}/receive`,
-      { lines: [{ lineId, quantity: "1", vendorLot: "FN-2026-09", spoolWeights: ["600", "400"] }] },
+      { lines: [{ lineId, quantity: "1", vendorLot: "FN-2026-09" }] },
       { "Idempotency-Key": "recepcion-oc-1" },
     );
     expect(replay.body.receipt.folio).toBe("REC-1");
@@ -161,14 +144,6 @@ describe("operación — compras, manufactura, calidad y prefacturas", () => {
     const orderAfter = await api.get(owner, "/orders");
     expect(orderAfter.body.data[0].status).toBe("in_production");
 
-    const mrp = await api.post(owner, "/mrp/run", { horizonDays: 30 });
-    expect(mrp.status).toBe(201);
-    const finished = mrp.body.rows.find((row: { sku: string }) => row.sku === "LLAV-01");
-    expect(finished).toMatchObject({ grossDemand: "2", scheduledOutput: "2", netShortage: "0" });
-    const material = mrp.body.rows.find((row: { sku: string }) => row.sku === "FIL-PLA-ROJ");
-    expect(material).toMatchObject({ grossDemand: "252", onHand: "1000", netShortage: "0" });
-    expect(mrp.body.planned).toEqual([]);
-
     const floor = await invite(app, owner, "piso@taller-rosa.test", "production");
     const released = await api.post(floor, `/production-orders/${opId}/release`, {});
     expect(released.status).toBe(201);
@@ -178,26 +153,14 @@ describe("operación — compras, manufactura, calidad y prefacturas", () => {
     const noPrefacturas = await api.get(floor, "/prefacturas");
     expect(noPrefacturas.status).toBe(403);
 
-    const spools = await api.get(floor, "/spools");
-    const first = spools.body.data.find((spool: { spoolNumber: string }) => spool.spoolNumber === "R-1");
     const materialId = released.body.materials[0].id as string;
     const consumed = await api.post(floor, `/production-orders/${opId}/consume`, {
       materialId,
       quantity: "200",
-      spoolId: first.id,
     });
     expect(consumed.status).toBe(201);
     expect(consumed.body.status).toBe("in_progress");
     expect(consumed.body.materials[0]).toMatchObject({ consumed: "200", allocated: "52" });
-    const tooMuch = await api.post(floor, `/production-orders/${opId}/consume`, {
-      materialId,
-      quantity: "500",
-      spoolId: first.id,
-    });
-    expect(tooMuch.status).toBe(409);
-    expect(tooMuch.body.code).toBe("spool_insufficient");
-    const spool = await api.get(floor, `/spools/${first.id}`);
-    expect(spool.body).toMatchObject({ currentGrams: "400", status: "in_use" });
 
     const completed = await api.post(floor, `/production-orders/${opId}/complete`, { quantityGood: "2" });
     expect(completed.status).toBe(201);
@@ -267,97 +230,12 @@ describe("operación — compras, manufactura, calidad y prefacturas", () => {
     expect(reissued.body.number).toBe("A-2");
 
     expect((await api.get(other, "/production-orders")).body.data).toEqual([]);
-    expect((await api.get(other, "/spools")).body.data).toEqual([]);
     expect((await api.get(other, "/prefacturas")).body.data).toEqual([]);
     expect((await api.get(other, "/purchase-orders")).body.data).toEqual([]);
     expect((await api.get(other, `/production-orders/${opId}`)).status).toBe(404);
-    expect((await api.get(other, "/mrp/requirements")).body.data).toEqual([]);
-
-    const preview = await api.post(owner, "/cycle-counts", {
-      locationId,
-      reference: "Conteo semanal",
-      dryRun: true,
-      lines: [{ productId: pla.body.id, countedQty: "740" }],
-    });
-    expect(preview.status).toBe(201);
-    expect(preview.body).toMatchObject({ dryRun: true, adjustments: 1, varianceValue: "-2.00", folio: null });
-    expect(await plaBalance(owner, pla.body.id)).toMatchObject({ onHand: "748" });
-    const count = await api.post(owner, "/cycle-counts", {
-      locationId,
-      reference: "Conteo semanal",
-      lines: [{ productId: pla.body.id, countedQty: "740", reason: "Purga de boquilla" }],
-    });
-    expect(count.body.folio).toBe("CC-1");
-    expect(await plaBalance(owner, pla.body.id)).toMatchObject({ onHand: "740" });
 
     const dashboard = await api.get(owner, "/dashboard");
-    expect(dashboard.body.operations).toMatchObject({ spoolsActive: 2, qcHold: 0, productionOpen: 0, prefacturasThisMonth: 1 });
-  });
-
-  it("MRP planea fabricar y comprar sin contar dos veces, y libera las órdenes", async () => {
-    const owner = await onboard(app, "vera@taller-vera.test", "TVE010101AAA", "Taller Vera");
-    const petg = await api.post(owner, "/products", {
-      sku: "FIL-PETG",
-      name: "PETG negro",
-      productType: "raw_material",
-      material: "PETG",
-      cost: "300.00",
-    });
-    const part = await api.post(owner, "/products", { sku: "PIEZA-1", name: "Pieza", productType: "finished_good", salePrice: "90.00" });
-    await api.post(owner, "/boms", { productId: part.body.id, lines: [{ componentProductId: petg.body.id, quantity: "50" }] });
-    const customer = await api.post(owner, "/customers", {
-      kind: "b2c",
-      legalName: "Ana Pérez",
-      paymentTerms: "pue",
-      fiscal: { line1: "Calle 1", neighborhood: "Centro", postalCode: "44100", state: "Jalisco" },
-    });
-    const order = await api.post(owner, "/orders", {
-      customerId: customer.body.id,
-      lines: [{ productId: part.body.id, description: "Pieza", quantity: "10", unitPrice: "90.00" }],
-    });
-    await api.post(owner, `/orders/${order.body.id}/submit`, {});
-    await api.post(owner, `/orders/${order.body.id}/confirm`, { creditOverrideReason: "Anticipo" });
-
-    const run = await api.post(owner, "/mrp/run", {});
-    const planned = run.body.planned as Array<{ id: string; sku: string; kind: string; quantity: string; purchaseQuantity: string | null }>;
-    expect(planned.map((row) => [row.sku, row.kind, row.quantity]).sort()).toEqual([
-      ["FIL-PETG", "buy", "500"],
-      ["PIEZA-1", "make", "10"],
-    ]);
-    const make = planned.find((row) => row.kind === "make")!;
-    const buy = planned.find((row) => row.kind === "buy")!;
-    expect(buy.purchaseQuantity).toBe("0.5");
-
-    const firmed = await api.post(owner, `/mrp/planned-orders/${make.id}/firm`, {});
-    expect(firmed.body.status).toBe("firmed");
-    const rerun = await api.post(owner, "/mrp/run", {});
-    const statuses = (rerun.body.planned as Array<{ sku: string; kind: string; status: string; quantity: string }>).map((row) => [row.sku, row.status, row.quantity]).sort();
-    expect(statuses).toEqual([
-      ["FIL-PETG", "planned", "500"],
-      ["PIEZA-1", "firmed", "10"],
-    ]);
-
-    const noVendor = await api.post(owner, `/mrp/planned-orders/${rerun.body.planned.find((row: { kind: string }) => row.kind === "buy").id}/release`, {});
-    expect(noVendor.status).toBe(400);
-    const vendor = await api.post(owner, "/vendors", { name: "Proveedor PETG" });
-    const releaseBuy = await api.post(
-      owner,
-      `/mrp/planned-orders/${rerun.body.planned.find((row: { kind: string }) => row.kind === "buy").id}/release`,
-      { vendorId: vendor.body.id },
-    );
-    expect(releaseBuy.body).toMatchObject({ releasedType: "purchase_order", folio: "OC-1" });
-    const releaseMake = await api.post(owner, `/mrp/planned-orders/${make.id}/release`, {});
-    expect(releaseMake.body).toMatchObject({ releasedType: "production_order", folio: "OP-1" });
-
-    const po = await api.get(owner, `/purchase-orders/${releaseBuy.body.releasedId}`);
-    expect(po.body.lines[0]).toMatchObject({ quantity: "0.5", purchaseUom: "KG", lineTotal: "150.00" });
-    await api.post(owner, `/purchase-orders/${po.body.id}/transition`, { to: "ordered" });
-
-    const after = await api.get(owner, "/mrp/requirements");
-    const partRow = after.body.data.find((row: { sku: string }) => row.sku === "PIEZA-1");
-    const petgRow = after.body.data.find((row: { sku: string }) => row.sku === "FIL-PETG");
-    expect(partRow).toMatchObject({ grossDemand: "10", scheduledOutput: "10", netShortage: "0" });
-    expect(petgRow).toMatchObject({ grossDemand: "500", incoming: "500", netShortage: "0" });
+    expect(dashboard.body.operations).toMatchObject({ qcHold: 0, productionOpen: 0, prefacturasThisMonth: 1 });
   });
 
   async function plaBalance(token: string, productId: string) {

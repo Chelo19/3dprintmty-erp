@@ -7,20 +7,16 @@ import {
   commercialDocuments,
   companyProfiles,
   locations,
-  mrpPlannedOrders,
   payments,
   productionOrders,
   productsVisible,
   purchaseOrders,
   salesOrders,
-  spools,
   stockBalances,
   tenantMemberships,
 } from "../db/schema";
 import { CurrentUser, requireTenant, type Actor } from "../http/actor";
 
-/** Un rollo con menos de esta fracción restante se reporta como por acabarse. */
-const LOW_SPOOL_PERCENT = 20n;
 const OPEN_ORDER_STATES = ["pending", "confirmed", "in_production", "ready_to_ship", "on_hold"];
 
 @Controller("dashboard")
@@ -67,13 +63,9 @@ export class DashboardController {
         .select({ status: productionOrders.status, dueDate: productionOrders.dueDate })
         .from(productionOrders);
       const purchases = await db.select({ status: purchaseOrders.status }).from(purchaseOrders);
-      const rolls = await db
-        .select({ status: spools.status, initialGrams: spools.initialGrams, currentGrams: spools.currentGrams })
-        .from(spools);
       const balances = await db
         .select({ onHand: stockBalances.onHand, reorderPoint: stockBalances.reorderPoint })
         .from(stockBalances);
-      const planned = await db.select({ status: mrpPlannedOrders.status }).from(mrpPlannedOrders);
       const monthStart = new Date();
       monthStart.setUTCDate(1);
       monthStart.setUTCHours(6, 0, 0, 0);
@@ -100,17 +92,10 @@ export class DashboardController {
         productionOpen: production.filter((row: { status: string }) => isOpenProductionOrder(row.status as ProductionOrderState)).length,
         qcHold: production.filter((row: { status: string }) => row.status === "qc_hold").length,
         purchasesIncoming: purchases.filter((row: { status: string }) => countsAsIncoming(row.status as PurchaseOrderState)).length,
-        spoolsActive: rolls.filter((row: { status: string }) => row.status === "available" || row.status === "in_use").length,
-        spoolsLow: rolls.filter((row: { status: string; initialGrams: string; currentGrams: string }) => {
-          if (row.status !== "available" && row.status !== "in_use") return false;
-          const initial = qtyFromDb(row.initialGrams);
-          return initial > 0n && qtyFromDb(row.currentGrams) * 100n < initial * LOW_SPOOL_PERCENT;
-        }).length,
         lowStock: balances.filter((row: { onHand: string; reorderPoint: string }) => {
           const reorder = qtyFromDb(row.reorderPoint);
           return reorder > 0n && qtyFromDb(row.onHand) <= reorder;
         }).length,
-        mrpPlanned: planned.filter((row: { status: string }) => row.status === "planned" || row.status === "firmed").length,
         prefacturasThisMonth: documents.filter((row: { status: string }) => row.status === "issued").length,
       };
     });

@@ -2,19 +2,18 @@ import { MX_STATES, MX_TAX_REGIMES, Money } from "@3dprintmty/domain";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { Link, Navigate, Outlet, Route, Routes, useNavigate, useParams } from "react-router-dom";
+import { Link, NavLink, Navigate, Outlet, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
 import { ApiError, api } from "./api";
 import { useAuth, type SessionUser } from "./auth";
 import {
-  CycleCountsPage,
   ManufacturingPage,
   ProductionDetailPage,
   ProductionPage,
   QualityPage,
-  SpoolsPage,
 } from "./factory";
-import { CollectionsPage, CustomersPage, OrdersPage, QuoteDetailPage, QuoteNewPage, QuotesPage, ServicesPage } from "./operations";
-import { MrpPage, PrefacturaPage, PrefacturasPage, PurchaseOrderPage, PurchasingPage } from "./purchasing";
+import { CollectionsPage, CustomerDetailPage, CustomerEditPage, CustomerNewPage, CustomersPage, EditLink, OrderDetailPage, OrderNewPage, OrdersPage, PaymentNewPage, QuoteDetailPage, QuoteNewPage, QuotesPage, RecordActions, ServiceDetailPage, ServiceEditPage, ServiceNewPage, ServicesPage } from "./operations";
+import { PrefacturaPage, PrefacturasPage, PurchaseOrderPage, PurchasingPage } from "./purchasing";
+import { CardsSkeleton, DetailSkeleton, FormSkeleton, TableSkeleton } from "./skeleton";
 import { authErrorMessage, registerWithPassword, signInWithGoogle, signInWithPassword, supabase } from "./supabase";
 
 export function App() {
@@ -30,25 +29,37 @@ export function App() {
       <Route path="/app" element={<Shell />}>
         <Route index element={<DashboardPage />} />
         <Route path="productos" element={<ProductsPage />} />
+        <Route path="productos/nuevo" element={<ProductNewPage />} />
+        <Route path="productos/:id/editar" element={<ProductEditPage />} />
+        <Route path="productos/:id" element={<ProductDetailPage />} />
         <Route path="filamentos" element={<FilamentsPage />} />
+        <Route path="filamentos/nuevo" element={<FilamentNewPage />} />
+        <Route path="filamentos/:id/editar" element={<FilamentEditPage />} />
+        <Route path="filamentos/:id" element={<FilamentDetailPage />} />
         <Route path="servicios" element={<ServicesPage />} />
+        <Route path="servicios/nuevo" element={<ServiceNewPage />} />
+        <Route path="servicios/:id/editar" element={<ServiceEditPage />} />
+        <Route path="servicios/:id" element={<ServiceDetailPage />} />
         <Route path="clientes" element={<CustomersPage />} />
+        <Route path="clientes/nuevo" element={<CustomerNewPage />} />
+        <Route path="clientes/:id/editar" element={<CustomerEditPage />} />
+        <Route path="clientes/:id" element={<CustomerDetailPage />} />
         <Route path="cotizaciones" element={<QuotesPage />} />
         <Route path="cotizaciones/nueva" element={<QuoteNewPage />} />
         <Route path="cotizaciones/:id" element={<QuoteDetailPage />} />
         <Route path="pedidos" element={<OrdersPage />} />
+        <Route path="pedidos/nuevo" element={<OrderNewPage />} />
+        <Route path="pedidos/:id" element={<OrderDetailPage />} />
         <Route path="cobranza" element={<CollectionsPage />} />
+        <Route path="cobranza/nuevo" element={<PaymentNewPage />} />
         <Route path="prefacturas" element={<PrefacturasPage />} />
         <Route path="prefacturas/:id" element={<PrefacturaPage />} />
-        <Route path="rollos" element={<SpoolsPage />} />
-        <Route path="conteos" element={<CycleCountsPage />} />
         <Route path="manufactura" element={<ManufacturingPage />} />
         <Route path="produccion" element={<ProductionPage />} />
         <Route path="produccion/:id" element={<ProductionDetailPage />} />
         <Route path="calidad" element={<QualityPage />} />
         <Route path="compras" element={<PurchasingPage />} />
         <Route path="compras/:id" element={<PurchaseOrderPage />} />
-        <Route path="mrp" element={<MrpPage />} />
         <Route path="sucursales" element={<LocationsPage />} />
         <Route path="equipo" element={<TeamPage />} />
         <Route path="configuracion" element={<SettingsPage />} />
@@ -401,10 +412,12 @@ function OnboardingPage() {
 function Shell() {
   const { t } = useTranslation();
   const auth = useAuth();
+  const location = useLocation();
+  const formCanvas = /\/(nuevo|nueva|editar)(\/|$)/.test(location.pathname);
   if (!auth.token || !auth.user) return <Navigate to="/entrar" replace />;
   if (!auth.user.tenantId && !auth.user.platformAdmin) return <Navigate to="/alta" replace />;
   return (
-    <div className="shell">
+    <div className={formCanvas ? "shell form-canvas" : "shell"}>
       <aside className="sidebar">
         <div>
           <p className="brand">{t("app.name")}</p>
@@ -424,9 +437,6 @@ function Shell() {
           <Nav to="/app/produccion">{t("nav.production")}</Nav>
           <Nav to="/app/calidad">{t("nav.quality")}</Nav>
           <Nav to="/app/compras">{t("nav.purchasing")}</Nav>
-          <Nav to="/app/mrp">{t("nav.mrp")}</Nav>
-          <Nav to="/app/rollos">{t("nav.spools")}</Nav>
-          <Nav to="/app/conteos">{t("nav.counts")}</Nav>
           <Nav to="/app/sucursales">{t("nav.locations")}</Nav>
           <Nav to="/app/equipo">{t("nav.team")}</Nav>
           <Nav to="/app/configuracion">{t("nav.settings")}</Nav>
@@ -447,7 +457,7 @@ function Shell() {
 }
 
 function Nav({ to, children }: { to: string; children: ReactNode }) {
-  return <Link className="nav-link" to={to}>{children}</Link>;
+  return <NavLink className="nav-link" to={to} end={to === "/app"}>{children}</NavLink>;
 }
 
 function SupportBanner() {
@@ -499,7 +509,20 @@ function DashboardPage() {
       operations: Record<OperationMetric, number>;
     }>("/dashboard"),
   });
-  if (!query.data) return <p>{t("common.loading")}</p>;
+  if (query.isPending) {
+    return (
+      <section style={{ display: "grid", gap: 16 }}>
+        <header>
+          <h1>{t("dashboard.title")}</h1>
+          <span className="skeleton" style={{ width: 320, height: 16 }} />
+        </header>
+        <CardsSkeleton count={5} />
+        <h2 style={{ margin: 0 }}>{t("dashboard.operations")}</h2>
+        <CardsSkeleton count={4} />
+      </section>
+    );
+  }
+  if (!query.data) return <p className="error">No se pudo cargar el inicio.</p>;
   const { company, counts, operations } = query.data;
   const gate: Record<string, string> = { off: "apagado", warn: "avisa", block: "bloquea" };
   return (
@@ -532,22 +555,12 @@ function DashboardPage() {
   );
 }
 
-type OperationMetric =
-  | "productionOpen"
-  | "qcHold"
-  | "purchasesIncoming"
-  | "spoolsActive"
-  | "spoolsLow"
-  | "mrpPlanned"
-  | "prefacturasThisMonth";
+type OperationMetric = "productionOpen" | "qcHold" | "purchasesIncoming" | "prefacturasThisMonth";
 
 const OPERATION_METRICS: Array<[OperationMetric, string]> = [
   ["productionOpen", "/app/produccion"],
   ["qcHold", "/app/calidad"],
   ["purchasesIncoming", "/app/compras"],
-  ["mrpPlanned", "/app/mrp"],
-  ["spoolsActive", "/app/rollos"],
-  ["spoolsLow", "/app/rollos"],
   ["prefacturasThisMonth", "/app/prefacturas"],
 ];
 
@@ -562,19 +575,352 @@ function Metric({ label, value }: { label: string; value: number | string }) {
 
 function ProductsPage() {
   const { t } = useTranslation();
-  const client = useQueryClient();
-  const [error, setError] = useState<string | null>(null);
-  const [productType, setProductType] = useState("finished_good");
   const query = useQuery({
     queryKey: ["products"],
     queryFn: () => api<{ data: Product[]; total: number }>("/products?limit=100"),
   });
+  return (
+    <section style={{ display: "grid", gap: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+        <h1 style={{ margin: 0 }}>{t("products.title")}</h1>
+        <Link className="primary" to="/app/productos/nuevo">{t("products.create")}</Link>
+      </div>
+      <p>{t("products.hint")}</p>
+      {query.isPending ? <TableSkeleton columns={7} /> : (() => {
+        const goods = (query.data?.data ?? []).filter((product) => product.productType === "component" || product.productType === "finished_good");
+        if (!goods.length) return <p>{t("products.empty")}</p>;
+        return (
+        <table>
+          <thead>
+            <tr>
+              <th>{t("products.sku")}</th>
+              <th>{t("products.name")}</th>
+              <th>UOM</th>
+              <th>{t("products.cost")}</th>
+              <th>{t("products.sale")}</th>
+              <th>{t("products.margin")}</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {goods.map((product) => (
+              <tr key={product.id}>
+                <td>{product.sku}</td>
+                <td>{product.name}</td>
+                <td>{product.stockUom}/{product.purchaseUom}</td>
+                <td>{product.cost ? Money.fromMajor(product.cost).format("es-MX") : "—"}</td>
+                <td>{product.pricesHidden ? t("products.hidden") : product.salePrice ? Money.fromMajor(product.salePrice).format("es-MX") : "—"}</td>
+                <td>{product.pricesHidden ? t("products.hidden") : <MarginValue cost={product.cost} price={product.salePrice} />}</td>
+                <td><RecordActions detailTo={`/app/productos/${product.id}`} editTo={`/app/productos/${product.id}/editar`} /></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        );
+      })()}
+    </section>
+  );
+}
+
+function FilamentsPage() {
+  const query = useQuery({
+    queryKey: ["filaments"],
+    queryFn: () => api<{ data: Product[] }>("/filaments"),
+  });
+  const filaments = query.data?.data ?? [];
+
+  return (
+    <section style={{ display: "grid", gap: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+        <h1 style={{ margin: 0 }}>Filamentos</h1>
+        <Link className="primary" to="/app/filamentos/nuevo">Nuevo filamento</Link>
+      </div>
+      <p>Se guardan en gramos y se compran por kilogramo. El precio de venta es por gramo usado: 10 g a $0.48 son $4.80 antes de IVA.</p>
+      {query.isPending ? <TableSkeleton columns={9} /> : !filaments.length ? <p>Todavía no hay filamentos.</p> : (
+        <table>
+          <thead>
+            <tr>
+              <th>SKU</th>
+              <th>Nombre</th>
+              <th>Material</th>
+              <th>Color</th>
+              <th>Diámetro</th>
+              <th>Costo por kg</th>
+              <th>Precio por gramo</th>
+              <th>Margen de utilidad</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {filaments.map((product) => (
+              <tr key={product.id}>
+                <td>{product.sku}</td>
+                <td>{product.name}</td>
+                <td>{product.material ?? "—"}</td>
+                <td>{product.color ?? "—"}</td>
+                <td>{product.diameterMm ?? "—"}</td>
+                <td>{product.cost ? Money.fromMajor(product.cost).format("es-MX") : "—"}</td>
+                <td>{product.pricesHidden ? "Oculto para tu rol" : product.salePrice ? Money.fromMajor(product.salePrice).format("es-MX") : "—"}</td>
+                <td>{product.pricesHidden ? "Oculto para tu rol" : <MarginValue cost={product.cost} price={product.salePrice} divisor={1000} />}</td>
+                <td><RecordActions detailTo={`/app/filamentos/${product.id}`} editTo={`/app/filamentos/${product.id}/editar`} /></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </section>
+  );
+}
+
+interface Product {
+  id: string;
+  sku: string;
+  name: string;
+  productType: string;
+  status?: string;
+  material: string | null;
+  color: string | null;
+  diameterMm: string | null;
+  stockUom: string;
+  purchaseUom: string;
+  cost: string | null;
+  salePrice: string | null;
+  pricesHidden: boolean;
+}
+
+/** Margen sobre el precio: (precio − costo) / precio. En filamento el costo está por kg y el precio por gramo. */
+function marginPercent(cost: string | null | undefined, price: string | null | undefined, costDivisor = 1): number | null {
+  const costAmount = Number(cost);
+  const priceAmount = Number(price);
+  if (!cost || !price || !Number.isFinite(costAmount) || !Number.isFinite(priceAmount) || priceAmount <= 0) return null;
+  return ((priceAmount - costAmount / costDivisor) / priceAmount) * 100;
+}
+
+function marginLabel(percent: number | null): string {
+  if (percent === null) return "—";
+  return `${percent.toLocaleString("es-MX", { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`;
+}
+
+function marginColor(percent: number | null): string | undefined {
+  if (percent === null || percent === 0) return undefined;
+  return percent > 0 ? "var(--color-pine)" : "var(--color-danger)";
+}
+
+function MarginValue({ cost, price, divisor = 1 }: { cost: string | null | undefined; price: string | null | undefined; divisor?: number }) {
+  const percent = marginPercent(cost, price, divisor);
+  return <span style={{ color: marginColor(percent), fontWeight: percent === null ? undefined : 600 }}>{marginLabel(percent)}</span>;
+}
+
+function CostPriceFields({
+  costLabel,
+  priceLabel,
+  costPlaceholder,
+  pricePlaceholder,
+  initialCost = "",
+  initialPrice = "",
+  costRequired = false,
+  divisor = 1,
+}: {
+  costLabel: string;
+  priceLabel: string;
+  costPlaceholder?: string;
+  pricePlaceholder?: string;
+  initialCost?: string;
+  initialPrice?: string;
+  costRequired?: boolean;
+  divisor?: number;
+}) {
+  const [cost, setCost] = useState(initialCost);
+  const [price, setPrice] = useState(initialPrice);
+  const percent = marginPercent(cost, price, divisor);
+  return (
+    <>
+      <label>
+        {costLabel}
+        <input name="cost" required={costRequired} placeholder={costPlaceholder} value={cost} onChange={(event) => setCost(event.target.value)} />
+      </label>
+      <label>
+        {priceLabel}
+        <input name="salePrice" placeholder={pricePlaceholder} value={price} onChange={(event) => setPrice(event.target.value)} />
+      </label>
+      <label>
+        Margen de utilidad
+        <input value={marginLabel(percent)} readOnly style={{ color: marginColor(percent), fontWeight: 600 }} />
+      </label>
+    </>
+  );
+}
+
+const PRODUCT_TYPE: Record<string, string> = {
+  component: "Insumo o herraje",
+  finished_good: "Producto terminado",
+};
+
+function ProductDetailPage() {
+  const { id } = useParams();
+  const product = useQuery({ queryKey: ["product", id], queryFn: () => api<Product>(`/products/${id}`) });
+  if (product.isPending) return <DetailSkeleton />;
+  if (!product.data) return <p className="error">No se pudo cargar el producto.</p>;
+  const data = product.data;
+  return (
+    <section style={{ display: "grid", gap: 16 }}>
+      <p><Link to="/app/productos">Productos</Link></p>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+        <h1 style={{ margin: 0 }}>{data.name}</h1>
+        <EditLink to={`/app/productos/${data.id}/editar`} />
+      </div>
+      <article className="card">
+        <p>SKU {data.sku} · {PRODUCT_TYPE[data.productType] ?? data.productType} · {data.status === "inactive" ? "Inactivo" : "Activo"}</p>
+        <p>Unidad {data.stockUom} / compra {data.purchaseUom}</p>
+        <p>Costo {data.cost ? Money.fromMajor(data.cost).format("es-MX") : "—"}</p>
+        <p>Precio {data.pricesHidden ? "Oculto para tu rol" : data.salePrice ? Money.fromMajor(data.salePrice).format("es-MX") : "—"}</p>
+        <p style={{ margin: 0 }}>Margen de utilidad {data.pricesHidden ? "Oculto para tu rol" : <MarginValue cost={data.cost} price={data.salePrice} />}</p>
+      </article>
+    </section>
+  );
+}
+
+function ProductEditPage() {
+  const { id } = useParams();
+  const client = useQueryClient();
+  const navigate = useNavigate();
+  const [error, setError] = useState<string | null>(null);
+  const product = useQuery({ queryKey: ["product", id], queryFn: () => api<Product>(`/products/${id}`) });
+  const save = useMutation({
+    mutationFn: (body: unknown) => api(`/products/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  });
+  if (product.isPending) return <FormSkeleton fields={6} />;
+  if (!product.data) return <p className="error">No se pudo cargar el producto.</p>;
+  const data = product.data;
+  return (
+    <section style={{ display: "grid", gap: 16 }}>
+      <p><Link to={`/app/productos/${id}`}>Producto</Link></p>
+      <h1>Editar producto</h1>
+      <form
+        className="card"
+        style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10 }}
+        onSubmit={(event) => {
+          event.preventDefault();
+          const form = new FormData(event.currentTarget);
+          setError(null);
+          void save.mutateAsync({
+            name: form.get("name"),
+            cost: String(form.get("cost") || "") || null,
+            salePrice: String(form.get("salePrice") || "") || null,
+            status: form.get("status"),
+          }).then(async () => {
+            await client.invalidateQueries({ queryKey: ["products"] });
+            await client.invalidateQueries({ queryKey: ["product", id] });
+            navigate(`/app/productos/${id}`);
+          }).catch((caught) => setError(caught instanceof ApiError ? caught.message : "No se pudo guardar."));
+        }}
+      >
+        <label>SKU<input value={data.sku} readOnly /></label>
+        <label>Nombre<input name="name" required defaultValue={data.name} /></label>
+        <CostPriceFields costLabel="Costo" priceLabel="Precio de venta" initialCost={data.cost ?? ""} initialPrice={data.salePrice ?? ""} />
+        <label>
+          Estado
+          <select name="status" defaultValue={data.status ?? "active"}>
+            <option value="active">Activo</option>
+            <option value="inactive">Inactivo</option>
+          </select>
+        </label>
+        <button className="primary" type="submit">Guardar cambios</button>
+        {error ? <p className="error">{error}</p> : null}
+      </form>
+    </section>
+  );
+}
+
+function FilamentDetailPage() {
+  const { id } = useParams();
+  const filament = useQuery({ queryKey: ["filament", id], queryFn: () => api<Product>(`/filaments/${id}`) });
+  if (filament.isPending) return <DetailSkeleton />;
+  if (!filament.data) return <p className="error">No se pudo cargar el filamento.</p>;
+  const data = filament.data;
+  return (
+    <section style={{ display: "grid", gap: 16 }}>
+      <p><Link to="/app/filamentos">Filamentos</Link></p>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+        <h1 style={{ margin: 0 }}>{data.name}</h1>
+        <EditLink to={`/app/filamentos/${data.id}/editar`} />
+      </div>
+      <article className="card">
+        <p>SKU {data.sku} · {data.material} · {data.color} · {data.diameterMm} mm · {data.status === "inactive" ? "Inactivo" : "Activo"}</p>
+        <p>Costo por kg {data.cost ? Money.fromMajor(data.cost).format("es-MX") : "—"}</p>
+        <p>Precio por gramo {data.pricesHidden ? "Oculto para tu rol" : data.salePrice ? Money.fromMajor(data.salePrice).format("es-MX") : "—"}</p>
+        <p style={{ margin: 0 }}>Margen de utilidad {data.pricesHidden ? "Oculto para tu rol" : <MarginValue cost={data.cost} price={data.salePrice} divisor={1000} />}</p>
+      </article>
+    </section>
+  );
+}
+
+function FilamentEditPage() {
+  const { id } = useParams();
+  const client = useQueryClient();
+  const navigate = useNavigate();
+  const [error, setError] = useState<string | null>(null);
+  const filament = useQuery({ queryKey: ["filament", id], queryFn: () => api<Product>(`/filaments/${id}`) });
+  if (filament.isPending) return <FormSkeleton fields={8} />;
+  if (!filament.data) return <p className="error">No se pudo cargar el filamento.</p>;
+  const data = filament.data;
+  return (
+    <section style={{ display: "grid", gap: 16 }}>
+      <p><Link to={`/app/filamentos/${id}`}>Filamento</Link></p>
+      <h1>Editar filamento</h1>
+      <form
+        className="card"
+        style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10 }}
+        onSubmit={(event) => {
+          event.preventDefault();
+          const form = new FormData(event.currentTarget);
+          setError(null);
+          void api(`/filaments/${id}`, {
+            method: "PATCH",
+            body: JSON.stringify({
+              name: form.get("name"),
+              material: form.get("material"),
+              color: form.get("color"),
+              diameterMm: form.get("diameterMm"),
+              cost: String(form.get("cost") || "") || null,
+              salePrice: String(form.get("salePrice") || "") || null,
+              status: form.get("status"),
+            }),
+          }).then(async () => {
+            await client.invalidateQueries({ queryKey: ["filaments"] });
+            await client.invalidateQueries({ queryKey: ["filament", id] });
+            navigate(`/app/filamentos/${id}`);
+          }).catch((caught) => setError(caught instanceof ApiError ? caught.message : "No se pudo guardar."));
+        }}
+      >
+        <label>SKU<input value={data.sku} readOnly /></label>
+        <label>Nombre<input name="name" required defaultValue={data.name} /></label>
+        <label>Material<input name="material" required defaultValue={data.material ?? ""} /></label>
+        <label>Color<input name="color" required defaultValue={data.color ?? ""} /></label>
+        <label>Diámetro<select name="diameterMm" defaultValue={data.diameterMm ?? "1.75"}><option>1.75</option><option>2.85</option></select></label>
+        <CostPriceFields costLabel="Costo por kg" priceLabel="Precio por gramo" initialCost={data.cost ?? ""} initialPrice={data.salePrice ?? ""} divisor={1000} />
+        <label>
+          Estado
+          <select name="status" defaultValue={data.status ?? "active"}>
+            <option value="active">Activo</option>
+            <option value="inactive">Inactivo</option>
+          </select>
+        </label>
+        <button className="primary" type="submit">Guardar cambios</button>
+        {error ? <p className="error">{error}</p> : null}
+      </form>
+    </section>
+  );
+}
+
+function ProductNewPage() {
+  const { t } = useTranslation();
+  const client = useQueryClient();
+  const navigate = useNavigate();
+  const [error, setError] = useState<string | null>(null);
+  const [productType, setProductType] = useState("finished_good");
   const create = useMutation({
     mutationFn: (body: unknown) => api("/products", { method: "POST", body: JSON.stringify(body) }),
-    onSuccess: async () => {
-      await client.invalidateQueries({ queryKey: ["products"] });
-      await client.invalidateQueries({ queryKey: ["dashboard"] });
-    },
   });
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
@@ -590,7 +936,9 @@ function ProductsPage() {
         cost: String(data.get("cost")),
         salePrice: String(data.get("salePrice") || "") || undefined,
       });
-      form.reset();
+      await client.invalidateQueries({ queryKey: ["products"] });
+      await client.invalidateQueries({ queryKey: ["dashboard"] });
+      navigate("/app/productos");
     } catch (caught) {
       setError(caught instanceof ApiError ? caught.message : "No se pudo guardar.");
     }
@@ -598,8 +946,8 @@ function ProductsPage() {
 
   return (
     <section style={{ display: "grid", gap: 16 }}>
-      <h1>{t("products.title")}</h1>
-      <p>{t("products.hint")}</p>
+      <p><Link to="/app/productos">{t("products.title")}</Link></p>
+      <h1>Nuevo producto</h1>
       <form className="card" onSubmit={onSubmit} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10 }}>
         <label>{t("products.sku")}<input name="sku" required /></label>
         <label>{t("products.name")}<input name="name" required /></label>
@@ -610,57 +958,21 @@ function ProductsPage() {
             <option value="finished_good">Producto terminado</option>
           </select>
         </label>
-        <label>Costo por pieza<input name="cost" required placeholder="35.00" /></label>
-        <label>{t("products.sale")}<input name="salePrice" placeholder="480.00" /></label>
+        <CostPriceFields costLabel="Costo" priceLabel={t("products.sale")} costPlaceholder="35.00" pricePlaceholder="480.00" costRequired />
         <button className="primary" type="submit">{t("products.create")}</button>
         {error ? <p className="error">{error}</p> : null}
       </form>
-      {(() => {
-        const goods = (query.data?.data ?? []).filter((product) => product.productType === "component" || product.productType === "finished_good");
-        if (!goods.length) return <p>{t("products.empty")}</p>;
-        return (
-        <table>
-          <thead>
-            <tr>
-              <th>{t("products.sku")}</th>
-              <th>{t("products.name")}</th>
-              <th>UOM</th>
-              <th>{t("products.cost")}</th>
-              <th>{t("products.sale")}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {goods.map((product) => (
-              <tr key={product.id}>
-                <td>{product.sku}</td>
-                <td>{product.name}</td>
-                <td>{product.stockUom}/{product.purchaseUom}</td>
-                <td>{product.cost ? Money.fromMajor(product.cost).format("es-MX") : "—"}</td>
-                <td>{product.pricesHidden ? t("products.hidden") : product.salePrice ? Money.fromMajor(product.salePrice).format("es-MX") : "—"}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        );
-      })()}
     </section>
   );
 }
 
-function FilamentsPage() {
+function FilamentNewPage() {
   const client = useQueryClient();
+  const navigate = useNavigate();
   const [error, setError] = useState<string | null>(null);
-  const query = useQuery({
-    queryKey: ["products", "filaments"],
-    queryFn: () => api<{ data: Product[]; total: number }>("/products?limit=100"),
-  });
   const create = useMutation({
-    mutationFn: (body: unknown) => api("/products", { method: "POST", body: JSON.stringify(body) }),
-    onSuccess: async () => {
-      await client.invalidateQueries({ queryKey: ["products"] });
-    },
+    mutationFn: (body: unknown) => api("/filaments", { method: "POST", body: JSON.stringify(body) }),
   });
-  const filaments = (query.data?.data ?? []).filter((product) => product.productType === "raw_material");
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -671,14 +983,14 @@ function FilamentsPage() {
       await create.mutateAsync({
         sku: String(data.get("sku")),
         name: String(data.get("name")),
-        productType: "raw_material",
         material: String(data.get("material")),
         color: String(data.get("color")),
         diameterMm: String(data.get("diameterMm")),
         cost: String(data.get("cost")),
         salePrice: String(data.get("salePrice") || "") || undefined,
       });
-      form.reset();
+      await client.invalidateQueries({ queryKey: ["filaments"] });
+      navigate("/app/filamentos");
     } catch (caught) {
       setError(caught instanceof ApiError ? caught.message : "No se pudo guardar.");
     }
@@ -686,64 +998,21 @@ function FilamentsPage() {
 
   return (
     <section style={{ display: "grid", gap: 16 }}>
-      <h1>Filamentos</h1>
-      <p>Se guardan en gramos y se compran por kilogramo. El precio de venta es por gramo usado: 10 g a $0.48 son $4.80 antes de IVA.</p>
+      <p><Link to="/app/filamentos">Filamentos</Link></p>
+      <h1>Nuevo filamento</h1>
+      <p>Se guarda en gramos y se compra por kilogramo. El precio de venta es por gramo usado.</p>
       <form className="card" onSubmit={onSubmit} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10 }}>
         <label>SKU<input name="sku" required /></label>
         <label>Nombre<input name="name" required /></label>
         <label>Material<input name="material" defaultValue="PLA" required /></label>
         <label>Color<input name="color" required /></label>
         <label>Diámetro<select name="diameterMm" defaultValue="1.75"><option>1.75</option><option>2.85</option></select></label>
-        <label>Costo por kg<input name="cost" required placeholder="250.00" /></label>
-        <label>Precio de venta por gramo<input name="salePrice" placeholder="0.48" /></label>
-        <button className="primary" type="submit">Agregar filamento</button>
+        <CostPriceFields costLabel="Costo por kg" priceLabel="Precio de venta por gramo" costPlaceholder="250.00" pricePlaceholder="0.48" costRequired divisor={1000} />
+        <button className="primary" type="submit">Guardar filamento</button>
         {error ? <p className="error">{error}</p> : null}
       </form>
-      {!filaments.length ? <p>Todavía no hay filamentos.</p> : (
-        <table>
-          <thead>
-            <tr>
-              <th>SKU</th>
-              <th>Nombre</th>
-              <th>Material</th>
-              <th>Color</th>
-              <th>Diámetro</th>
-              <th>Costo por kg</th>
-              <th>Precio por gramo</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filaments.map((product) => (
-              <tr key={product.id}>
-                <td>{product.sku}</td>
-                <td>{product.name}</td>
-                <td>{product.material ?? "—"}</td>
-                <td>{product.color ?? "—"}</td>
-                <td>{product.diameterMm ?? "—"}</td>
-                <td>{product.cost ? Money.fromMajor(product.cost).format("es-MX") : "—"}</td>
-                <td>{product.pricesHidden ? "Oculto para tu rol" : product.salePrice ? Money.fromMajor(product.salePrice).format("es-MX") : "—"}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
     </section>
   );
-}
-
-interface Product {
-  id: string;
-  sku: string;
-  name: string;
-  productType: string;
-  material: string | null;
-  color: string | null;
-  diameterMm: string | null;
-  stockUom: string;
-  purchaseUom: string;
-  cost: string | null;
-  salePrice: string | null;
-  pricesHidden: boolean;
 }
 
 function LocationsPage() {
@@ -784,11 +1053,13 @@ function LocationsPage() {
         <label>{t("onboarding.postalCode")}<input name="postalCode" required pattern="\d{5}" /></label>
         <button className="primary" type="submit">{t("common.save")}</button>
       </form>
+      {query.isPending ? <TableSkeleton columns={1} rows={4} /> : (
       <ul>
         {query.data?.map((location) => (
           <li key={location.id}>{location.name} · {location.state} · CP {location.postalCode}</li>
         ))}
       </ul>
+      )}
     </section>
   );
 }
@@ -832,11 +1103,13 @@ function TeamPage() {
         <button className="primary" type="submit">{t("team.invite")}</button>
       </form>
       {link ? <p className="banner">{t("team.link")} <a href={link}>{link}</a></p> : null}
+      {query.isPending ? <TableSkeleton columns={1} rows={4} /> : (
       <ul>
         {query.data?.members.map((member) => (
           <li key={member.userId}>{member.email} · {member.role}</li>
         ))}
       </ul>
+      )}
     </section>
   );
 }
@@ -856,7 +1129,8 @@ function SettingsPage() {
       vatRate: string;
     }>("/company"),
   });
-  if (!company.data) return <p>{t("common.loading")}</p>;
+  if (company.isPending) return <FormSkeleton fields={6} />;
+  if (!company.data) return <p className="error">No se pudo cargar la configuración.</p>;
   const initialVat = company.data.vatRate.startsWith("0.08") ? "0.08" : company.data.vatRate.startsWith("0.00") ? "0" : "0.16";
   return (
     <section style={{ display: "grid", gap: 16 }}>
@@ -944,7 +1218,7 @@ function PlatformPage() {
   return (
     <section style={{ display: "grid", gap: 12 }}>
       <h1>{t("platform.title")}</h1>
-      {query.data?.data.map((tenant) => (
+      {query.isPending ? <CardsSkeleton count={3} /> : query.data?.data.map((tenant) => (
         <article key={tenant.id} className="card" style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
           <div>
             <strong>{tenant.legalName}</strong>

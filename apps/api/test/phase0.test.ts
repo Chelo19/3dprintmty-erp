@@ -54,14 +54,14 @@ describe("fase 0 — tenancy", () => {
     expect(onboardB.status).toBe(201);
     const tokenB = onboardB.body.token as string;
 
-    const productsA = await request(app.getHttpServer()).get("/api/v1/products").set(bearer(tokenA));
-    const productsB = await request(app.getHttpServer()).get("/api/v1/products").set(bearer(tokenB));
-    expect(productsA.body.total).toBe(2);
-    expect(productsB.body.total).toBe(0);
+    const productsA = await request(app.getHttpServer()).get("/api/v1/filaments").set(bearer(tokenA));
+    const productsB = await request(app.getHttpServer()).get("/api/v1/filaments").set(bearer(tokenB));
+    expect(productsA.body.data).toHaveLength(2);
+    expect(productsB.body.data).toHaveLength(0);
     expect(productsA.body.data[0].salePrice).toBeTruthy();
 
     const leaked = await request(app.getHttpServer())
-      .get(`/api/v1/products/${productsA.body.data[0].id}`)
+      .get(`/api/v1/filaments/${productsA.body.data[0].id}`)
       .set(bearer(tokenB));
     expect(leaked.status).toBe(404);
 
@@ -109,7 +109,7 @@ describe("fase 0 — tenancy", () => {
       .send({ token, password });
     expect(accepted.status).toBe(201);
     const productionProducts = await request(app.getHttpServer())
-      .get("/api/v1/products")
+      .get("/api/v1/filaments")
       .set(bearer(accepted.body.token));
     expect(productionProducts.body.data).toHaveLength(2);
     expect(productionProducts.body.data.every((item: { salePrice: null }) => item.salePrice === null)).toBe(true);
@@ -135,13 +135,12 @@ describe("fase 0 — tenancy", () => {
     expect(forbidden.status).toBe(403);
 
     const created = await request(app.getHttpServer())
-      .post("/api/v1/products")
+      .post("/api/v1/filaments")
       .set(bearer(tokenA))
       .set("Idempotency-Key", "pla-extra")
       .send({
         sku: "FIL-ABS-ROJ-175",
         name: "ABS rojo 1.75 mm",
-        productType: "raw_material",
         material: "ABS",
         color: "Rojo",
         diameterMm: "1.75",
@@ -150,13 +149,12 @@ describe("fase 0 — tenancy", () => {
       });
     expect(created.status).toBe(201);
     const replay = await request(app.getHttpServer())
-      .post("/api/v1/products")
+      .post("/api/v1/filaments")
       .set(bearer(tokenA))
       .set("Idempotency-Key", "pla-extra")
       .send({
         sku: "FIL-ABS-ROJ-175",
         name: "ABS rojo 1.75 mm",
-        productType: "raw_material",
         material: "ABS",
         color: "Rojo",
         diameterMm: "1.75",
@@ -164,8 +162,8 @@ describe("fase 0 — tenancy", () => {
         salePrice: "610.00",
       });
     expect(replay.body.id).toBe(created.body.id);
-    const after = await request(app.getHttpServer()).get("/api/v1/products").set(bearer(tokenA));
-    expect(after.body.total).toBe(3);
+    const after = await request(app.getHttpServer()).get("/api/v1/filaments").set(bearer(tokenA));
+    expect(after.body.data).toHaveLength(3);
 
     const preview = await request(app.getHttpServer())
       .post("/api/v1/tax/preview")
@@ -195,9 +193,9 @@ describe("fase 0 — tenancy", () => {
       .send({ tenantId: onboardA.body.tenant.id });
     expect(entered.status).toBe(201);
     const asSupport = await request(app.getHttpServer())
-      .get("/api/v1/products")
+      .get("/api/v1/filaments")
       .set(bearer(entered.body.token));
-    expect(asSupport.body.total).toBe(3);
+    expect(asSupport.body.data).toHaveLength(3);
     const audit = await request(app.getHttpServer())
       .get("/api/v1/platform/audit")
       .set(bearer(supportAccount.token));

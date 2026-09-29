@@ -304,8 +304,10 @@ async function writeBom(db: Db, tenant: TenantActor, productId: string, lines: B
     throw new AppError("duplicate_component", "Un componente aparece dos veces; suma las cantidades en una línea.");
   }
   if (ids.includes(product.id)) throw new AppError("bom_cycle", "Un producto no puede ser componente de sí mismo.", 409);
+  const catalog = await loadProducts(db);
   for (const id of ids) {
-    const component = await one(db, products, products.id, id, "No encontramos un componente.");
+    const component = catalog.get(id);
+    if (!component) throw new AppError("not_found", "No encontramos un componente.", 404);
     if (component.productType === "service") {
       throw new AppError("invalid_component", "Los servicios no pueden ser componentes.", 409);
     }
@@ -336,7 +338,8 @@ async function writeBom(db: Db, tenant: TenantActor, productId: string, lines: B
     lines.map((line, position) => ({
       tenantId: tenant.tenantId,
       bomId: bom.id,
-      componentProductId: line.componentId,
+      componentProductId: catalog.get(line.componentId)?.productType === "filament" ? null : line.componentId,
+      componentFilamentId: catalog.get(line.componentId)?.productType === "filament" ? line.componentId : null,
       quantity: formatQty(line.quantity),
       scrapPct: formatQty(line.scrapPct),
       sequence: position + 1,

@@ -17,10 +17,10 @@ import {
   auditEvents,
   companyProfiles,
   defectTypes,
+  filaments,
   locations,
   numberSequences,
   paymentMethodSettings,
-  products,
   taxRates,
   tenantMemberships,
   tenants,
@@ -164,7 +164,7 @@ export class OnboardingController {
         STARTER_DEFECTS.map(([code, name]) => ({ tenantId: tenant.id, code, name, createdBy: actor.userId })),
       );
       if (input.seedDemo) {
-        await db.insert(products).values([
+        await db.insert(filaments).values([
           demoProduct(tenant.id, actor.userId, {
             sku: "FIL-PLA-NEG-175",
             name: "PLA negro 1.75 mm",
@@ -212,14 +212,10 @@ function demoProduct(
     tenantId,
     sku: input.sku,
     name: input.name,
-    productType: "raw_material",
     status: "active",
     material: input.material,
     color: input.color,
     diameterMm: "1.75",
-    stockUom: "G",
-    purchaseUom: "KG",
-    uomFactor: "1000.0000",
     costMinor: Money.fromMajor(input.cost).minor,
     salePriceMinor: Money.fromMajor(input.salePrice).minor,
     createdBy,

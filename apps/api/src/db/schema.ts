@@ -146,6 +146,25 @@ export const products = pgTable("products", {
   ...timestamps,
 });
 
+export const filaments = pgTable(
+  "filaments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id").notNull().references(() => tenants.id),
+    sku: text("sku").notNull(),
+    name: text("name").notNull(),
+    material: text("material").notNull(),
+    color: text("color").notNull(),
+    diameterMm: numeric("diameter_mm", { precision: 4, scale: 2 }).notNull(),
+    costMinor: bigint("cost_minor", { mode: "bigint" }),
+    salePriceMinor: bigint("sale_price_minor", { mode: "bigint" }),
+    status: text("status").notNull().default("active"),
+    createdBy: uuid("created_by").notNull(),
+    ...timestamps,
+  },
+  (table) => [unique("filaments_sku_unique").on(table.tenantId, table.sku)],
+);
+
 export const productsVisible = pgView("products_visible", {
   id: uuid("id"),
   tenantId: uuid("tenant_id"),
@@ -193,7 +212,8 @@ export const invitations = pgTable("invitations", {
 export const stockBalances = pgTable("stock_balances", {
   id: uuid("id").primaryKey().defaultRandom(),
   tenantId: uuid("tenant_id").notNull().references(() => tenants.id),
-  productId: uuid("product_id").notNull().references(() => products.id),
+  productId: uuid("product_id").references(() => products.id),
+  filamentId: uuid("filament_id").references(() => filaments.id),
   locationId: uuid("location_id").notNull().references(() => locations.id),
   onHand: numeric("on_hand", { precision: 14, scale: 4 }).notNull().default("0"),
   allocated: numeric("allocated", { precision: 14, scale: 4 }).notNull().default("0"),
@@ -206,7 +226,8 @@ export const stockBalances = pgTable("stock_balances", {
 export const stockLedgers = pgTable("stock_ledgers", {
   id: uuid("id").primaryKey().defaultRandom(),
   tenantId: uuid("tenant_id").notNull().references(() => tenants.id),
-  productId: uuid("product_id").notNull().references(() => products.id),
+  productId: uuid("product_id").references(() => products.id),
+  filamentId: uuid("filament_id").references(() => filaments.id),
   locationId: uuid("location_id").notNull().references(() => locations.id),
   kind: text("kind").notNull(),
   quantity: numeric("quantity", { precision: 14, scale: 4 }).notNull(),
@@ -283,6 +304,7 @@ export const quotes = pgTable("quotes", {
   vatMinor: bigint("vat_minor", { mode: "bigint" }).notNull(),
   totalMinor: bigint("total_minor", { mode: "bigint" }).notNull(),
   serviceTerms: text("service_terms"),
+  paymentTerms: text("payment_terms").notNull().default("pue"),
   mode: text("mode").notNull().default("products"),
   createdBy: uuid("created_by").notNull(),
   ...timestamps,
@@ -304,8 +326,8 @@ export const quoteLines = pgTable("quote_lines", {
   quoteId: uuid("quote_id").notNull().references(() => quotes.id),
   printId: uuid("print_id").references(() => quotePrints.id),
   position: integer("position").notNull().default(0),
-  productId: uuid("product_id").references(() => products.id),
-  serviceId: uuid("service_id").references(() => serviceOfferings.id),
+  catalogId: uuid("catalog_id"),
+  sku: text("sku").notNull().default(""),
   lineKind: text("line_kind").notNull().default("product"),
   terms: text("terms"),
   description: text("description").notNull(),
@@ -359,6 +381,7 @@ export const salesOrderLines = pgTable("sales_order_lines", {
   tenantId: uuid("tenant_id").notNull().references(() => tenants.id),
   salesOrderId: uuid("sales_order_id").notNull().references(() => salesOrders.id),
   productId: uuid("product_id").references(() => products.id),
+  filamentId: uuid("filament_id").references(() => filaments.id),
   serviceId: uuid("service_id").references(() => serviceOfferings.id),
   lineKind: text("line_kind").notNull().default("product"),
   terms: text("terms"),
@@ -423,7 +446,8 @@ const createdAt = () => timestamp("created_at", { withTimezone: true }).notNull(
 export const materialLots = pgTable("material_lots", {
   id: uuid("id").primaryKey().defaultRandom(),
   tenantId: tenantId(),
-  productId: uuid("product_id").notNull().references(() => products.id),
+  productId: uuid("product_id").references(() => products.id),
+  filamentId: uuid("filament_id").references(() => filaments.id),
   lotNumber: text("lot_number").notNull(),
   vendorLot: text("vendor_lot"),
   source: text("source").notNull().default("manual"),
@@ -434,57 +458,6 @@ export const materialLots = pgTable("material_lots", {
   receiptId: uuid("receipt_id"),
   createdBy: uuid("created_by").notNull(),
   createdAt: createdAt(),
-});
-
-export const spools = pgTable("spools", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  tenantId: tenantId(),
-  spoolNumber: text("spool_number").notNull(),
-  productId: uuid("product_id").notNull().references(() => products.id),
-  locationId: uuid("location_id").notNull().references(() => locations.id),
-  lotId: uuid("lot_id"),
-  initialGrams: qty("initial_grams").notNull(),
-  currentGrams: qty("current_grams").notNull(),
-  status: text("status").notNull().default("available"),
-  notes: text("notes"),
-  createdBy: uuid("created_by").notNull(),
-  ...timestamps,
-});
-
-export const spoolEvents = pgTable("spool_events", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  tenantId: tenantId(),
-  spoolId: uuid("spool_id").notNull().references(() => spools.id),
-  kind: text("kind").notNull(),
-  grams: qty("grams").notNull(),
-  reason: text("reason").notNull(),
-  productionOrderId: uuid("production_order_id"),
-  createdBy: uuid("created_by").notNull(),
-  createdAt: createdAt(),
-});
-
-export const cycleCounts = pgTable("cycle_counts", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  tenantId: tenantId(),
-  folio: text("folio").notNull(),
-  locationId: uuid("location_id").notNull().references(() => locations.id),
-  reference: text("reference").notNull(),
-  adjustments: integer("adjustments").notNull().default(0),
-  varianceValueMinor: bigint("variance_value_minor", { mode: "bigint" }).notNull().default(0n),
-  createdBy: uuid("created_by").notNull(),
-  createdAt: createdAt(),
-});
-
-export const cycleCountLines = pgTable("cycle_count_lines", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  tenantId: tenantId(),
-  cycleCountId: uuid("cycle_count_id").notNull().references(() => cycleCounts.id),
-  productId: uuid("product_id").notNull().references(() => products.id),
-  systemQty: qty("system_qty").notNull(),
-  countedQty: qty("counted_qty").notNull(),
-  variance: qty("variance").notNull(),
-  reason: text("reason").notNull(),
-  valueMinor: bigint("value_minor", { mode: "bigint" }).notNull().default(0n),
 });
 
 export const workCenters = pgTable("work_centers", {
@@ -537,7 +510,8 @@ export const bomLines = pgTable("bom_lines", {
   id: uuid("id").primaryKey().defaultRandom(),
   tenantId: tenantId(),
   bomId: uuid("bom_id").notNull().references(() => boms.id),
-  componentProductId: uuid("component_product_id").notNull().references(() => products.id),
+  componentProductId: uuid("component_product_id").references(() => products.id),
+  componentFilamentId: uuid("component_filament_id").references(() => filaments.id),
   quantity: qty("quantity").notNull(),
   scrapPct: numeric("scrap_pct", { precision: 6, scale: 2 }).notNull().default("0"),
   sequence: integer("sequence").notNull().default(1),
@@ -550,7 +524,6 @@ export const productionOrders = pgTable("production_orders", {
   productId: uuid("product_id").notNull().references(() => products.id),
   locationId: uuid("location_id").notNull().references(() => locations.id),
   salesOrderId: uuid("sales_order_id"),
-  plannedOrderId: uuid("planned_order_id"),
   source: text("source").notNull().default("manual"),
   kind: text("kind").notNull().default("make_to_stock"),
   status: text("status").notNull().default("draft"),
@@ -580,7 +553,8 @@ export const productionOrderMaterials = pgTable("production_order_materials", {
   id: uuid("id").primaryKey().defaultRandom(),
   tenantId: tenantId(),
   productionOrderId: uuid("production_order_id").notNull().references(() => productionOrders.id),
-  componentProductId: uuid("component_product_id").notNull().references(() => products.id),
+  componentProductId: uuid("component_product_id").references(() => products.id),
+  componentFilamentId: uuid("component_filament_id").references(() => filaments.id),
   requiredQty: qty("required_qty").notNull(),
   allocatedQty: qty("allocated_qty").notNull().default("0"),
   consumedQty: qty("consumed_qty").notNull().default("0"),
@@ -609,8 +583,8 @@ export const productionConsumptions = pgTable("production_consumptions", {
   tenantId: tenantId(),
   productionOrderId: uuid("production_order_id").notNull().references(() => productionOrders.id),
   materialId: uuid("material_id").notNull().references(() => productionOrderMaterials.id),
-  productId: uuid("product_id").notNull().references(() => products.id),
-  spoolId: uuid("spool_id"),
+  productId: uuid("product_id").references(() => products.id),
+  filamentId: uuid("filament_id").references(() => filaments.id),
   lotId: uuid("lot_id"),
   quantity: qty("quantity").notNull(),
   valueMinor: bigint("value_minor", { mode: "bigint" }).notNull().default(0n),
@@ -675,7 +649,6 @@ export const purchaseOrders = pgTable("purchase_orders", {
   subtotalMinor: bigint("subtotal_minor", { mode: "bigint" }).notNull().default(0n),
   vatMinor: bigint("vat_minor", { mode: "bigint" }).notNull().default(0n),
   totalMinor: bigint("total_minor", { mode: "bigint" }).notNull().default(0n),
-  plannedOrderId: uuid("planned_order_id"),
   notes: text("notes"),
   createdBy: uuid("created_by").notNull(),
   ...timestamps,
@@ -685,7 +658,8 @@ export const purchaseOrderLines = pgTable("purchase_order_lines", {
   id: uuid("id").primaryKey().defaultRandom(),
   tenantId: tenantId(),
   purchaseOrderId: uuid("purchase_order_id").notNull().references(() => purchaseOrders.id),
-  productId: uuid("product_id").notNull().references(() => products.id),
+  productId: uuid("product_id").references(() => products.id),
+  filamentId: uuid("filament_id").references(() => filaments.id),
   description: text("description").notNull(),
   purchaseUom: text("purchase_uom").notNull(),
   uomFactor: numeric("uom_factor", { precision: 12, scale: 4 }).notNull(),
@@ -712,37 +686,12 @@ export const receiptLines = pgTable("receipt_lines", {
   tenantId: tenantId(),
   receiptId: uuid("receipt_id").notNull().references(() => receipts.id),
   purchaseOrderLineId: uuid("purchase_order_line_id").notNull().references(() => purchaseOrderLines.id),
-  productId: uuid("product_id").notNull().references(() => products.id),
+  productId: uuid("product_id").references(() => products.id),
+  filamentId: uuid("filament_id").references(() => filaments.id),
   quantity: qty("quantity").notNull(),
   stockQuantity: qty("stock_quantity").notNull(),
   lotId: uuid("lot_id"),
   valueMinor: bigint("value_minor", { mode: "bigint" }).notNull().default(0n),
-});
-
-export const mrpRuns = pgTable("mrp_runs", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  tenantId: tenantId(),
-  horizonDays: integer("horizon_days").notNull(),
-  stats: jsonb("stats").notNull().default({}),
-  createdBy: uuid("created_by").notNull(),
-  createdAt: createdAt(),
-});
-
-export const mrpPlannedOrders = pgTable("mrp_planned_orders", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  tenantId: tenantId(),
-  runId: uuid("run_id").notNull().references(() => mrpRuns.id),
-  productId: uuid("product_id").notNull().references(() => products.id),
-  kind: text("kind").notNull(),
-  quantity: qty("quantity").notNull(),
-  needBy: date("need_by", { mode: "string" }),
-  releaseBy: date("release_by", { mode: "string" }),
-  status: text("status").notNull().default("planned"),
-  sources: jsonb("sources").notNull().default([]),
-  releasedType: text("released_type"),
-  releasedId: uuid("released_id"),
-  createdBy: uuid("created_by").notNull(),
-  ...timestamps,
 });
 
 export const commercialDocuments = pgTable("commercial_documents", {

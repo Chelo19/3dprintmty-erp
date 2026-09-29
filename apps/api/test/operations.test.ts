@@ -41,7 +41,7 @@ describe("operación — inventario y ventas", () => {
       .send(workshop("TLZ010101AAA", "Taller Luz", false));
     const tokenOther = onboardOther.body.token as string;
 
-    const products = await request(app.getHttpServer()).get("/api/v1/products").set(bearer(token));
+    const products = await request(app.getHttpServer()).get("/api/v1/filaments").set(bearer(token));
     const locations = await request(app.getHttpServer()).get("/api/v1/locations").set(bearer(token));
     const productId = products.body.data[0].id as string;
     const locationId = locations.body[0].id as string;
@@ -158,7 +158,7 @@ describe("operación — inventario y ventas", () => {
       .set(bearer(owner.token))
       .send(workshop("TNO010101AAA", "Taller Nora", true));
     const token = onboard.body.token as string;
-    const products = await request(app.getHttpServer()).get("/api/v1/products").set(bearer(token));
+    const products = await request(app.getHttpServer()).get("/api/v1/filaments").set(bearer(token));
     const locations = await request(app.getHttpServer()).get("/api/v1/locations").set(bearer(token));
     const productId = products.body.data[0].id as string;
     const locationId = locations.body[0].id as string;

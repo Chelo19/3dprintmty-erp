@@ -2,8 +2,9 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, download, idempotencyHeader, postJson } from "./api";
-import { Action, useProducts } from "./factory";
+import { Action, useFilaments, useProducts } from "./factory";
 import { money, useError } from "./operations";
+import { DetailSkeleton, TableSkeleton } from "./skeleton";
 
 const grid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 } as const;
 
@@ -25,12 +26,16 @@ export function PurchasingPage() {
   const { error, run } = useError();
   const vendors = useVendors();
   const products = useProducts();
+  const filaments = useFilaments();
   const orders = useQuery({ queryKey: ["purchase-orders"], queryFn: () => api<{ data: PurchaseOrder[] }>("/purchase-orders") });
-  const buyable = (products.data?.data ?? []).filter((product) => product.productType !== "service" && product.productType !== "finished_good");
+  const buyable = [
+    ...(filaments.data?.data ?? []),
+    ...(products.data?.data ?? []).filter((product) => product.productType === "component"),
+  ];
   return (
     <section style={{ display: "grid", gap: 16 }}>
       <h1>Compras</h1>
-      <p>El filamento se compra en kilogramos y entra al inventario en gramos, por rollo y con lote.</p>
+      <p>El filamento se compra en kilogramos y entra al inventario en gramos, con lote.</p>
       <form
         className="card"
         style={grid}
@@ -102,6 +107,7 @@ export function PurchasingPage() {
         <button className="primary" type="submit">Crear orden de compra</button>
         {error ? <p className="error">{error}</p> : null}
       </form>
+      {orders.isPending ? <TableSkeleton columns={5} /> : (
       <table>
         <thead><tr><th>Folio</th><th>Proveedor</th><th>Estado</th><th>Llega</th><th>Total</th></tr></thead>
         <tbody>
@@ -116,6 +122,7 @@ export function PurchasingPage() {
           ))}
         </tbody>
       </table>
+      )}
     </section>
   );
 }
@@ -126,13 +133,13 @@ export function PurchaseOrderPage() {
   const { error, run } = useError();
   const [result, setResult] = useState<string | null>(null);
   const order = useQuery({ queryKey: ["purchase-order", id], queryFn: () => api<PurchaseOrderDetail>(`/purchase-orders/${id}`) });
-  if (!order.data) return <p>Cargando…</p>;
+  if (order.isPending) return <DetailSkeleton />;
+  if (!order.data) return <p className="error">No se pudo cargar la compra.</p>;
   const data = order.data;
   const refresh = async () => {
     await client.invalidateQueries({ queryKey: ["purchase-order", id] });
     await client.invalidateQueries({ queryKey: ["purchase-orders"] });
     await client.invalidateQueries({ queryKey: ["inventory"] });
-    await client.invalidateQueries({ queryKey: ["spools"] });
   };
   const move = (to: string, reason?: string) =>
     run(async () => {
@@ -185,12 +192,8 @@ export function PurchaseOrderPage() {
             event.preventDefault();
             const form = event.currentTarget;
             const values = new FormData(form);
-            const weights = String(values.get("spoolWeights") || "")
-              .split(/[\s,]+/)
-              .map((value) => value.trim())
-              .filter(Boolean);
             void run(async () => {
-              const response = await postJson<{ receipt: { folio: string }; spools: Array<{ spoolNumber: string }> }>(
+              const response = await postJson<{ receipt: { folio: string } }>(
                 `/purchase-orders/${id}/receive`,
                 {
                   lines: [
@@ -199,13 +202,12 @@ export function PurchaseOrderPage() {
                       quantity: values.get("quantity"),
                       lotNumber: String(values.get("lotNumber") || "") || undefined,
                       vendorLot: String(values.get("vendorLot") || "") || undefined,
-                      spoolWeights: weights.length ? weights : undefined,
                     },
                   ],
                 },
                 idempotencyHeader(),
               );
-              setResult(`Recepción ${response.receipt.folio}${response.spools.length ? ` · rollos ${response.spools.map((spool) => spool.spoolNumber).join(", ")}` : ""}`);
+              setResult(`Recepción ${response.receipt.folio}`);
               form.reset();
               await refresh();
             });
@@ -221,12 +223,8 @@ export function PurchaseOrderPage() {
           <label>Cantidad (unidad de compra)<input name="quantity" required placeholder="1" /></label>
           <label>Lote interno<input name="lotNumber" placeholder="Automático" /></label>
           <label>Lote del proveedor<input name="vendorLot" /></label>
-          <label style={{ gridColumn: "span 2" }}>
-            Peso neto de cada rollo en gramos (opcional)
-            <input name="spoolWeights" placeholder="1000, 1000, 998" />
-          </label>
           <button className="primary" type="submit">Registrar recepción</button>
-          <p style={{ margin: 0, gridColumn: "1 / -1" }}>La suma de los rollos debe cuadrar con lo recibido (tolerancia de 0.1 g). El costo del catálogo se actualiza con promedio ponderado.</p>
+          <p style={{ margin: 0, gridColumn: "1 / -1" }}>El filamento entra al inventario en gramos. El costo del catálogo se actualiza con promedio ponderado.</p>
         </form>
       ) : null}
       {data.receipts.length ? (
@@ -235,112 +233,6 @@ export function PurchaseOrderPage() {
           <ul>{data.receipts.map((receipt) => <li key={receipt.id}>{receipt.folio} · {new Date(receipt.createdAt).toLocaleString("es-MX")}</li>)}</ul>
         </>
       ) : null}
-    </section>
-  );
-}
-
-export function MrpPage() {
-  const client = useQueryClient();
-  const { error, run } = useError();
-  const vendors = useVendors();
-  const requirements = useQuery({ queryKey: ["mrp-requirements"], queryFn: () => api<{ data: MrpRow[] }>("/mrp/requirements") });
-  const planned = useQuery({ queryKey: ["mrp-planned"], queryFn: () => api<{ data: PlannedOrder[] }>("/mrp/planned-orders?status=planned,firmed") });
-  const latest = useQuery({ queryKey: ["mrp-latest"], queryFn: () => api<{ createdAt: string } | null>("/mrp/runs/latest") });
-  const [vendorId, setVendorId] = useState("");
-  const refresh = async () => {
-    await client.invalidateQueries({ queryKey: ["mrp-requirements"] });
-    await client.invalidateQueries({ queryKey: ["mrp-planned"] });
-    await client.invalidateQueries({ queryKey: ["mrp-latest"] });
-  };
-  const rows = requirements.data?.data ?? [];
-  const buyList = rows.filter((row) => row.kind === "buy" && row.netShortage !== "0");
-  return (
-    <section style={{ display: "grid", gap: 16 }}>
-      <h1>MRP</h1>
-      <p>
-        Demanda de pedidos confirmados y órdenes abiertas contra existencia, compras en camino y producción programada.
-        Un pedido que ya tiene orden de producción no se cuenta dos veces.
-      </p>
-      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-        <button className="primary" type="button" onClick={() => void run(async () => { await postJson("/mrp/run", { horizonDays: 30 }); await refresh(); })}>
-          Correr MRP y generar órdenes planeadas
-        </button>
-        <span>{latest.data ? `Última corrida: ${new Date(latest.data.createdAt).toLocaleString("es-MX")}` : "Sin corridas todavía"}</span>
-      </div>
-      {error ? <p className="error">{error}</p> : null}
-      <h2>Lista de compra</h2>
-      {!buyList.length ? <p>No falta material para lo comprometido.</p> : (
-        <table>
-          <thead><tr><th>SKU</th><th>Material</th><th>Falta</th><th>Comprar</th><th>Pedir antes de</th></tr></thead>
-          <tbody>
-            {buyList.map((row) => (
-              <tr key={row.productId}>
-                <td>{row.sku}</td>
-                <td>{row.name}</td>
-                <td>{row.netShortage} {row.stockUom}</td>
-                <td>{row.purchaseQuantity} {row.purchaseUom}</td>
-                <td>{row.releaseBy ?? "—"}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-      <h2>Órdenes planeadas</h2>
-      <label style={{ maxWidth: 320 }}>
-        Proveedor para liberar compras
-        <select value={vendorId} onChange={(event) => setVendorId(event.target.value)}>
-          <option value="">—</option>
-          {(vendors.data?.data ?? []).map((vendor) => <option key={vendor.id} value={vendor.id}>{vendor.name}</option>)}
-        </select>
-      </label>
-      <table>
-        <thead><tr><th>Tipo</th><th>SKU</th><th>Cantidad</th><th>Necesario</th><th>Liberar antes de</th><th>Estado</th><th></th></tr></thead>
-        <tbody>
-          {(planned.data?.data ?? []).map((row) => (
-            <tr key={row.id}>
-              <td>{row.kind === "buy" ? "Comprar" : "Fabricar"}</td>
-              <td>{row.sku}</td>
-              <td>{row.kind === "buy" && row.purchaseQuantity ? `${row.purchaseQuantity} ${row.purchaseUom}` : `${row.quantity} ${row.stockUom}`}</td>
-              <td>{row.needBy ?? "—"}</td>
-              <td>{row.releaseBy ?? "—"}</td>
-              <td>{row.status === "firmed" ? "Firme" : "Planeada"}</td>
-              <td style={{ display: "flex", gap: 8 }}>
-                {row.status === "planned" ? <Action label="Firmar" onClick={() => void run(async () => { await postJson(`/mrp/planned-orders/${row.id}/firm`, {}); await refresh(); })} /> : null}
-                <Action
-                  label={row.kind === "buy" ? "Crear OC" : "Crear OP"}
-                  onClick={() =>
-                    void run(async () => {
-                      await postJson(`/mrp/planned-orders/${row.id}/release`, row.kind === "buy" ? { vendorId: vendorId || undefined } : {});
-                      await refresh();
-                      await client.invalidateQueries({ queryKey: ["purchase-orders"] });
-                      await client.invalidateQueries({ queryKey: ["production-orders"] });
-                    })
-                  }
-                />
-                <Action label="Descartar" onClick={() => void run(async () => { await postJson(`/mrp/planned-orders/${row.id}/cancel`, {}); await refresh(); })} />
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <h2>Detalle por producto</h2>
-      <table>
-        <thead><tr><th>Nivel</th><th>SKU</th><th>Demanda</th><th>Existencia</th><th>En camino</th><th>Programado</th><th>Reorden</th><th>Neto</th></tr></thead>
-        <tbody>
-          {rows.map((row) => (
-            <tr key={row.productId}>
-              <td>{row.level}</td>
-              <td>{row.sku}</td>
-              <td>{row.grossDemand}</td>
-              <td>{row.onHand}</td>
-              <td>{row.incoming}</td>
-              <td>{row.scheduledOutput}</td>
-              <td>{row.reorderPoint}</td>
-              <td><strong>{row.netShortage}</strong> {row.stockUom} · {row.kind === "buy" ? "comprar" : "fabricar"}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
     </section>
   );
 }
@@ -395,6 +287,7 @@ export function PrefacturasPage() {
           Solo CSV
         </button>
       </div>
+      {documents.isPending ? <TableSkeleton columns={6} /> : (
       <table>
         <thead><tr><th>Folio</th><th>Cliente</th><th>RFC</th><th>Método</th><th>Total</th><th>Estado</th></tr></thead>
         <tbody>
@@ -410,6 +303,7 @@ export function PrefacturasPage() {
           ))}
         </tbody>
       </table>
+      )}
     </section>
   );
 }
@@ -419,7 +313,8 @@ export function PrefacturaPage() {
   const client = useQueryClient();
   const { error, run } = useError();
   const document = useQuery({ queryKey: ["prefactura", id], queryFn: () => api<PrefacturaDetail>(`/prefacturas/${id}`) });
-  if (!document.data) return <p>Cargando…</p>;
+  if (document.isPending) return <DetailSkeleton />;
+  if (!document.data) return <p className="error">No se pudo cargar la prefactura.</p>;
   const data = document.data;
   return (
     <section style={{ display: "grid", gap: 16 }}>
@@ -517,37 +412,6 @@ interface PurchaseOrder {
 interface PurchaseOrderDetail extends PurchaseOrder {
   lines: Array<{ id: string; sku: string; description: string; purchaseUom: string; quantity: string; receivedQty: string; pendingQty: string; unitCost: string; lineTotal: string }>;
   receipts: Array<{ id: string; folio: string; createdAt: string }>;
-}
-
-interface MrpRow {
-  productId: string;
-  sku: string;
-  name: string;
-  stockUom: string;
-  level: number;
-  kind: string;
-  grossDemand: string;
-  onHand: string;
-  incoming: string;
-  scheduledOutput: string;
-  reorderPoint: string;
-  netShortage: string;
-  purchaseQuantity: string | null;
-  purchaseUom: string | null;
-  releaseBy: string | null;
-}
-
-interface PlannedOrder {
-  id: string;
-  sku: string;
-  kind: string;
-  quantity: string;
-  stockUom: string;
-  purchaseQuantity: string | null;
-  purchaseUom: string | null;
-  needBy: string | null;
-  releaseBy: string | null;
-  status: string;
 }
 
 interface Prefactura {

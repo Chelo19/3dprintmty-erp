@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Header, Headers, Param, Post, StreamableFile } from "@nestjs/common";
+import { Body, Controller, Get, Header, Headers, Param, Patch, Post, StreamableFile } from "@nestjs/common";
 import {
   assertMxState,
   assertPostalCode,
@@ -18,13 +18,14 @@ import {
 } from "@3dprintmty/domain";
 import { manualPaymentPort } from "@3dprintmty/payments";
 import { AppError } from "@3dprintmty/shared";
-import { asc, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
 import { services } from "../container";
 import {
   companyProfiles,
   customerAddresses,
   customers,
+  filaments,
   locations,
   paymentMethodSettings,
   payments,
@@ -34,6 +35,7 @@ import {
   quotes,
   salesOrderLines,
   salesOrders,
+  serviceOfferings,
   stockBalances,
   stockLedgers,
 } from "../db/schema";
@@ -69,6 +71,16 @@ const customerSchema = z.object({
   billingEmail: z.string().trim().email().optional(),
   fiscal: addressSchema,
   shipping: addressSchema.optional(),
+});
+
+const customerPatchSchema = z.object({
+  legalName: z.string().trim().min(1).max(160).optional(),
+  rfc: z.string().optional(),
+  phone: z.string().optional(),
+  paymentTerms: z.enum(["pue", "net_15", "net_30"]).optional(),
+  creditLimit: z.string().optional(),
+  status: z.enum(["active", "inactive"]).optional(),
+  fiscal: addressSchema.optional(),
 });
 
 const lineSchema = z
@@ -138,8 +150,8 @@ export class OperationsController {
   @Get("inventory/balances")
   async balances(@CurrentUser() actor: Actor) {
     const tenant = requireTenant(actor);
-    const rows = await this.database.asUser(tenant, (db) =>
-      db
+    const rows = await this.database.asUser(tenant, async (db) => {
+      const goods = await db
         .select({
           id: stockBalances.id,
           productId: stockBalances.productId,
@@ -155,9 +167,26 @@ export class OperationsController {
         })
         .from(stockBalances)
         .innerJoin(products, eq(products.id, stockBalances.productId))
-        .innerJoin(locations, eq(locations.id, stockBalances.locationId))
-        .orderBy(products.sku),
-    );
+        .innerJoin(locations, eq(locations.id, stockBalances.locationId));
+      const rolls = await db
+        .select({
+          id: stockBalances.id,
+          productId: stockBalances.filamentId,
+          sku: filaments.sku,
+          name: filaments.name,
+          stockUom: sql<string>`'G'`,
+          locationId: stockBalances.locationId,
+          locationName: locations.name,
+          onHand: stockBalances.onHand,
+          allocated: stockBalances.allocated,
+          reorderPoint: stockBalances.reorderPoint,
+          leadTimeDays: stockBalances.leadTimeDays,
+        })
+        .from(stockBalances)
+        .innerJoin(filaments, eq(filaments.id, stockBalances.filamentId))
+        .innerJoin(locations, eq(locations.id, stockBalances.locationId));
+      return [...goods, ...rolls].sort((a, b) => String(a.sku).localeCompare(String(b.sku)));
+    });
     return {
       data: rows.map((row: BalanceRow) => {
         const onHand = fromQty(toQty(String(row.onHand)));
@@ -221,10 +250,11 @@ export class OperationsController {
       throw new AppError("invalid_quantity", "El punto de reorden no puede ser negativo.");
     }
     await this.database.asUser(tenant, async (db) => {
-      const product = await one(db, products, products.id, input.productId, "No encontramos ese producto.");
+      const [filament] = await db.select({ id: filaments.id }).from(filaments).where(eq(filaments.id, input.productId)).limit(1);
+      const product = filament ? null : await one(db, products, products.id, input.productId, "No encontramos ese producto.");
       const location = await one(db, locations, locations.id, input.locationId, "No encontramos esa sucursal.");
       await postStock(db, tenant, {
-        productId: product.id,
+        ...(filament ? { filamentId: filament.id } : { productId: product!.id }),
         locationId: location.id,
         kind: input.kind,
         delta,
@@ -291,6 +321,114 @@ export class OperationsController {
       return [customer];
     });
     return mapCustomer(created, tenant.role);
+  }
+
+  @Get("customers/:id")
+  async getCustomer(@CurrentUser() actor: Actor, @Param("id") id: string) {
+    const tenant = requireTenant(actor);
+    return this.database.asUser(tenant, async (db) => {
+      const customer = await one(db, customers, customers.id, id, "No encontramos ese cliente.");
+      const [fiscal] = await db
+        .select()
+        .from(customerAddresses)
+        .where(and(eq(customerAddresses.customerId, customer.id), eq(customerAddresses.kind, "fiscal")))
+        .limit(1);
+      const quoteRows = await db
+        .select()
+        .from(quotes)
+        .where(eq(quotes.customerId, customer.id))
+        .orderBy(desc(quotes.createdAt))
+        .limit(5);
+      const orderRows = await db.select().from(salesOrders).where(eq(salesOrders.customerId, customer.id));
+      const orderIds = orderRows.map((order: { id: string }) => order.id);
+      const ledger = orderIds.length
+        ? await db.select().from(payments).where(inArray(payments.salesOrderId, orderIds)).orderBy(desc(payments.createdAt))
+        : [];
+      const balance = orderRows.reduce((sum: bigint, order: { id: string; status: string; totalMinor: bigint }) => {
+        if (order.status === "cancelled" || order.status === "draft") return sum;
+        return sum + dueMinor(BigInt(order.totalMinor), ledger.filter((entry: { salesOrderId: string }) => entry.salesOrderId === order.id));
+      }, 0n);
+      const folios = new Map<string, string>(orderRows.map((order: { id: string; folio: string }) => [order.id, order.folio]));
+      return {
+        ...mapCustomer(customer, tenant.role),
+        fiscal: fiscal
+          ? { line1: fiscal.line1, neighborhood: fiscal.neighborhood, postalCode: fiscal.postalCode, state: fiscal.state }
+          : null,
+        balance: money(balance, tenant.role),
+        orders: [...orderRows]
+          .sort((a: { createdAt: Date }, b: { createdAt: Date }) => +new Date(b.createdAt) - +new Date(a.createdAt))
+          .slice(0, 5)
+          .map((order: { id: string; folio: string; status: string; totalMinor: bigint }) => ({
+            id: order.id,
+            folio: order.folio,
+            status: order.status,
+            total: money(BigInt(order.totalMinor), tenant.role),
+          })),
+        quotes: quoteRows.map((row: QuoteRow) => mapQuote(row, tenant.role)),
+        payments: ledger.slice(0, 5).map((row: { id: string; salesOrderId: string; method: string; kind: string; status: string; amountMinor: bigint; reference: string | null; note: string | null; createdAt: Date }) =>
+          mapPayment(
+            {
+              id: row.id,
+              salesOrderId: row.salesOrderId,
+              folio: folios.get(row.salesOrderId) ?? "",
+              method: row.method,
+              kind: row.kind,
+              status: row.status,
+              amountMinor: BigInt(row.amountMinor),
+              reference: row.reference,
+              note: row.note,
+              createdAt: row.createdAt,
+            },
+            tenant.role,
+          ),
+        ),
+      };
+    });
+  }
+
+  @Patch("customers/:id")
+  async updateCustomer(@CurrentUser() actor: Actor, @Param("id") id: string, @Body() body: unknown) {
+    const tenant = assertRole(actor, ["owner", "admin", "sales"]);
+    const input = customerPatchSchema.parse(body);
+    await this.database.asUser(tenant, async (db) => {
+      const customer = await one(db, customers, customers.id, id, "No encontramos ese cliente.");
+      const rfc = input.rfc === undefined ? undefined : input.rfc.trim() ? assertRfc(input.rfc) : null;
+      const phone = input.phone === undefined ? undefined : input.phone.trim() ? normalizeMxPhone(input.phone) : null;
+      const credit = input.creditLimit === undefined ? undefined : Money.fromMajor(input.creditLimit).minor;
+      if (credit !== undefined && credit < 0n) throw new AppError("invalid_money", "El límite de crédito no puede ser negativo.");
+      await db
+        .update(customers)
+        .set({
+          ...(input.legalName !== undefined ? { legalName: input.legalName } : {}),
+          ...(rfc !== undefined ? { rfc } : {}),
+          ...(phone !== undefined ? { phone } : {}),
+          ...(input.paymentTerms !== undefined ? { paymentTerms: input.paymentTerms } : {}),
+          ...(credit !== undefined ? { creditLimitMinor: credit } : {}),
+          ...(input.status !== undefined ? { status: input.status } : {}),
+          updatedAt: new Date(),
+        })
+        .where(eq(customers.id, customer.id));
+      if (input.fiscal) {
+        const address = cleanAddress(input.fiscal);
+        const [existing] = await db
+          .select({ id: customerAddresses.id })
+          .from(customerAddresses)
+          .where(and(eq(customerAddresses.customerId, customer.id), eq(customerAddresses.kind, "fiscal")))
+          .limit(1);
+        if (existing) {
+          await db.update(customerAddresses).set(address).where(eq(customerAddresses.id, existing.id));
+        } else {
+          await db.insert(customerAddresses).values({
+            tenantId: tenant.tenantId,
+            customerId: customer.id,
+            kind: "fiscal",
+            createdBy: tenant.userId,
+            ...address,
+          });
+        }
+      }
+    });
+    return this.getCustomer(actor, id);
   }
 
   @Get("quotes")
@@ -372,6 +510,7 @@ export class OperationsController {
           vatMinor: Money.fromMajor(priced.tax).minor,
           totalMinor: Money.fromMajor(priced.total).minor,
           serviceTerms: input.serviceTerms || null,
+          paymentTerms: customer.paymentTerms,
           createdBy: tenant.userId,
         })
         .returning();
@@ -393,10 +532,20 @@ export class OperationsController {
       }
       await db.insert(quoteLines).values(
         priced.stored.map((line, position) => ({
-          ...line,
           position,
           printId: printIds[position] ?? null,
+          catalogId: line.filamentId ?? line.productId ?? line.serviceId,
+          sku: line.sku,
+          lineKind: line.lineKind,
+          terms: line.terms,
           description: draft.labels[position] ? `${draft.labels[position]} · ${line.description}` : line.description,
+          uom: line.uom,
+          quantity: line.quantity,
+          unitPriceMinor: line.unitPriceMinor,
+          discountMinor: line.discountMinor,
+          netMinor: line.netMinor,
+          vatMinor: line.vatMinor,
+          totalMinor: line.totalMinor,
           tenantId: tenant.tenantId,
           quoteId: created.id,
         })),
@@ -453,13 +602,14 @@ export class OperationsController {
         })
         .returning();
       if (lines.length) {
-        await db.insert(salesOrderLines).values(
-          lines.map((line: StoredLine, position: number) => ({
+        const copied = [];
+        for (const [position, line] of lines.entries()) {
+          const target = await quoteLineTarget(db, line);
+          copied.push({
             tenantId: tenant.tenantId,
             salesOrderId: created.id,
             position,
-            productId: line.productId,
-            serviceId: line.serviceId,
+            ...target,
             lineKind: line.lineKind,
             terms: line.terms,
             description: line.description,
@@ -469,8 +619,9 @@ export class OperationsController {
             netMinor: line.netMinor,
             vatMinor: line.vatMinor,
             totalMinor: line.totalMinor,
-          })),
-        );
+          });
+        }
+        await db.insert(salesOrderLines).values(copied);
       }
       await db.update(quotes).set({ status: "converted" }).where(eq(quotes.id, quote.id));
       await orderEvent(db, tenant, created.id, "created", { to: created.status, note: `Desde ${quote.folio}` });
@@ -595,16 +746,31 @@ export class OperationsController {
   }
 }
 
+async function quoteLineTarget(db: Db, line: StoredLine) {
+  if (!line.catalogId) {
+    throw new AppError("catalog_missing", "Esa partida no tiene una referencia de catálogo para convertirla.", 409);
+  }
+  if (line.lineKind === "service") {
+    await one(db, serviceOfferings, serviceOfferings.id, line.catalogId, "Ese servicio ya no está en el catálogo. La cotización conserva sus importes, pero no se puede convertir.");
+    return { productId: null, filamentId: null, serviceId: line.catalogId };
+  }
+  if (line.lineKind === "filament") {
+    await one(db, filaments, filaments.id, line.catalogId, "Ese filamento ya no está en el catálogo. La cotización conserva sus importes, pero no se puede convertir.");
+    return { productId: null, filamentId: line.catalogId, serviceId: null };
+  }
+  await one(db, products, products.id, line.catalogId, "Ese producto ya no está en el catálogo. La cotización conserva sus importes, pero no se puede convertir.");
+  return { productId: line.catalogId, filamentId: null, serviceId: null };
+}
+
 async function loadQuote(db: Db, id: string, role: TenantRole) {
   const quote = await one(db, quotes, quotes.id, id, "No encontramos esa cotización.");
-  const customer = await one(db, customers, customers.id, quote.customerId, "No encontramos ese cliente.");
   const [company] = await db.select().from(companyProfiles).limit(1);
   const prints = await db.select().from(quotePrints).where(eq(quotePrints.quoteId, quote.id)).orderBy(asc(quotePrints.position));
   const lines = await db.select().from(quoteLines).where(eq(quoteLines.quoteId, quote.id)).orderBy(asc(quoteLines.position));
   const mapped = lines.map((line: StoredLine) => mapLine(line, role));
   return {
     ...mapQuote(quote, role),
-    paymentTerms: customer.paymentTerms,
+    paymentTerms: quote.paymentTerms,
     vatRate: company ? String(company.defaultVatRate) : "0.1600",
     issuer: company
       ? {
@@ -752,8 +918,8 @@ function mapLine(line: StoredLine, role: TenantRole) {
   return {
     id: line.id,
     printId: line.printId,
-    productId: line.productId,
-    serviceId: line.serviceId,
+    catalogId: line.catalogId,
+    sku: line.sku,
     lineKind: line.lineKind,
     terms: line.terms,
     description: line.description,
@@ -808,6 +974,7 @@ interface QuoteRow {
   vatMinor: bigint;
   totalMinor: bigint;
   serviceTerms: string | null;
+  paymentTerms: string;
   mode: string;
   createdAt: Date;
 }
@@ -815,8 +982,8 @@ interface QuoteRow {
 interface StoredLine {
   id?: string;
   printId: string | null;
-  productId: string | null;
-  serviceId: string | null;
+  catalogId: string | null;
+  sku: string;
   lineKind: string;
   terms: string | null;
   description: string;

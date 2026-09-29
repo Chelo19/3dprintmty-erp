@@ -30,6 +30,7 @@ import {
   commercialDocuments,
   companyProfiles,
   customers,
+  filaments,
   payments,
   productionOrders,
   products,
@@ -83,6 +84,7 @@ export interface OrderLineRow {
   id: string;
   salesOrderId: string;
   productId: string | null;
+  filamentId: string | null;
   serviceId: string | null;
   lineKind: string;
   terms: string | null;
@@ -117,8 +119,10 @@ export interface PaymentRow {
 
 export interface PricedLineInput {
   productId?: string | null;
+  filamentId?: string | null;
   serviceId?: string | null;
   lineKind?: "product" | "filament" | "service";
+  sku?: string;
   terms?: string | null;
   uom?: string;
   description: string;
@@ -143,22 +147,11 @@ export async function loadOrderLines(db: Db, orderId: string): Promise<OrderLine
     .orderBy(asc(salesOrderLines.position), asc(salesOrderLines.createdAt));
 }
 
-async function productTypes(db: Db, lines: OrderLineRow[]): Promise<Map<string, string>> {
-  const ids = [...new Set(lines.map((line) => line.productId).filter((id): id is string => Boolean(id)))];
-  const types = new Map<string, string>();
-  for (const id of ids) {
-    const [product] = await db.select({ productType: products.productType }).from(products).where(eq(products.id, id)).limit(1);
-    if (product) types.set(id, product.productType);
-  }
-  return types;
-}
-
 export async function orderSupply(db: Db, lines: OrderLineRow[]): Promise<OrderLineSupply[]> {
-  const types = await productTypes(db, lines);
   return lines.map((line) => ({
     lineId: line.id,
-    productId: line.productId,
-    stocked: Boolean(line.productId) && types.has(line.productId as string) && types.get(line.productId as string) !== "service",
+    productId: line.productId ?? line.filamentId,
+    stocked: line.lineKind !== "service" && Boolean(line.productId ?? line.filamentId),
     quantity: effectiveQty(line),
     reserved: qtyFromDb(line.reservedQty),
     shipped: qtyFromDb(line.shippedQty),
@@ -233,16 +226,16 @@ export async function allocateOrder(db: Db, tenant: TenantActor, order: OrderRow
   const locationId = await orderLocation(db, order);
   const available = new Map<string, bigint>();
   for (const line of supply) {
-    if (line.stocked && line.productId && !available.has(line.productId)) {
-      available.set(line.productId, await availableAt(db, line.productId, locationId));
-    }
+    if (!line.stocked || !line.productId || available.has(line.productId)) continue;
+    const source = lines.find((row) => row.id === line.lineId) as OrderLineRow;
+    available.set(line.productId, await availableAt(db, source.filamentId ? { filamentId: source.filamentId } : { productId: source.productId }, locationId));
   }
   const allocated: Array<{ lineId: string; quantity: string }> = [];
   for (const item of planOrderAllocation(supply, available)) {
     if (item.reserve === 0n) continue;
     const line = lines.find((row) => row.id === item.lineId) as OrderLineRow;
     await reserveStock(db, tenant, {
-      productId: item.productId,
+      ...(line.filamentId ? { filamentId: line.filamentId } : { productId: line.productId }),
       locationId,
       quantity: item.reserve,
       reason: `Apartado para ${order.folio}`,
@@ -262,9 +255,9 @@ export async function releaseOrderReservations(db: Db, tenant: TenantActor, orde
   const locationId = await orderLocation(db, order);
   for (const line of lines) {
     const reserved = qtyFromDb(line.reservedQty);
-    if (reserved <= 0n || !line.productId) continue;
+    if (reserved <= 0n || !(line.productId || line.filamentId)) continue;
     await reserveStock(db, tenant, {
-      productId: line.productId,
+      ...(line.filamentId ? { filamentId: line.filamentId } : { productId: line.productId }),
       locationId,
       quantity: -reserved,
       reason: `${reason} ${order.folio}`,
@@ -375,11 +368,9 @@ async function normalizeCommercialLines(
 ): Promise<PricedLineInput[]> {
   const normalized: PricedLineInput[] = [];
   for (const line of lines) {
-    if (line.productId && line.serviceId) {
-      throw new AppError("line_target", "Cada partida es un producto o un servicio.");
-    }
-    if (!line.productId && !line.serviceId) {
-      throw new AppError("line_target", "Cada partida necesita un producto o un servicio.");
+    const targets = [line.productId, line.filamentId, line.serviceId].filter(Boolean);
+    if (targets.length !== 1) {
+      throw new AppError("line_target", "Cada partida es un producto, un filamento o un servicio.");
     }
     if (line.serviceId) {
       const service = await one(db, serviceOfferings, serviceOfferings.id, line.serviceId, "No encontramos ese servicio.");
@@ -389,27 +380,53 @@ async function normalizeCommercialLines(
       normalized.push({
         ...line,
         productId: null,
+        filamentId: null,
         serviceId: service.id,
+        sku: service.code,
         lineKind: "service",
         uom: saleUom("service", service.unit),
         terms: line.terms?.trim() ? line.terms.trim() : service.terms,
       });
       continue;
     }
+    if (line.filamentId || line.productId) {
+      const requested = (line.filamentId ?? line.productId) as string;
+      const [filament] = await db.select().from(filaments).where(eq(filaments.id, requested)).limit(1);
+      if (filament) {
+        if (!allowInactive && filament.status !== "active") {
+          throw new AppError("product_inactive", "Ese filamento no está disponible.", 409);
+        }
+        normalized.push({
+          ...line,
+          productId: null,
+          filamentId: filament.id,
+          serviceId: null,
+          sku: filament.sku,
+          lineKind: "filament",
+          uom: "g",
+          terms: null,
+        });
+        continue;
+      }
+    }
     const product = await one(db, products, products.id, line.productId as string, "No encontramos ese producto.");
     if (product.productType === "service") {
       throw new AppError("use_service_catalog", "Los servicios se capturan en el catálogo de servicios.", 409);
     }
+    if (product.productType === "raw_material") {
+      throw new AppError("use_filament_catalog", "Los filamentos se capturan en el catálogo de filamentos.", 409);
+    }
     if (!allowInactive && product.status !== "active") {
       throw new AppError("product_inactive", "Ese producto no está disponible.", 409);
     }
-    const lineKind = product.productType === "raw_material" ? "filament" : "product";
     normalized.push({
       ...line,
       productId: product.id,
+      filamentId: null,
       serviceId: null,
-      lineKind,
-      uom: saleUom(lineKind, product.stockUom),
+      sku: product.sku,
+      lineKind: "product",
+      uom: saleUom("product", product.stockUom),
       terms: null,
     });
   }
@@ -443,7 +460,9 @@ export async function priceLines(
     if (!result) throw new AppError("empty_lines", "Agrega al menos una línea.");
     return {
       productId: line.productId ?? null,
+      filamentId: line.filamentId ?? null,
       serviceId: line.serviceId ?? null,
+      sku: line.sku ?? "",
       lineKind: line.lineKind ?? "product",
       terms: line.terms ?? null,
       uom: line.uom ?? "pza",
@@ -498,6 +517,7 @@ export async function repriceOrder(db: Db, order: OrderRow, before: OrderLineRow
     db,
     kept.map((line) => ({
       productId: line.productId,
+      filamentId: line.filamentId,
       serviceId: line.serviceId,
       terms: line.terms,
       description: line.description,

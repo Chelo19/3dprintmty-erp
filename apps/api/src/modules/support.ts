@@ -13,7 +13,9 @@ import type { DatabaseService } from "../db/database.service";
 import {
   auditEvents,
   idempotencyKeys,
+  filaments,
   locations,
+  materialLots,
   numberSequences,
   products,
   stockBalances,
@@ -128,11 +130,26 @@ export async function defaultLocationId(db: Db): Promise<string> {
   return found.id;
 }
 
-async function loadBalance(db: Db, productId: string, locationId: string) {
+export interface StockTarget {
+  productId?: string | null;
+  filamentId?: string | null;
+}
+
+function stockIdentity(item: StockTarget): { productId: string | null; filamentId: string | null } {
+  if (item.filamentId) return { productId: null, filamentId: item.filamentId };
+  if (item.productId) return { productId: item.productId, filamentId: null };
+  throw new AppError("line_target", "La existencia necesita un producto o un filamento.");
+}
+
+async function loadBalance(db: Db, item: StockTarget, locationId: string) {
+  const identity = stockIdentity(item);
+  const match = identity.filamentId
+    ? eq(stockBalances.filamentId, identity.filamentId)
+    : eq(stockBalances.productId, identity.productId as string);
   const [balance] = await db
     .select()
     .from(stockBalances)
-    .where(and(eq(stockBalances.productId, productId), eq(stockBalances.locationId, locationId)))
+    .where(and(match, eq(stockBalances.locationId, locationId)))
     .limit(1);
   return balance ?? null;
 }
@@ -140,7 +157,7 @@ async function loadBalance(db: Db, productId: string, locationId: string) {
 async function saveBalance(
   db: Db,
   tenant: TenantActor,
-  productId: string,
+  item: StockTarget,
   locationId: string,
   balance: { id: string } | null,
   values: Record<string, unknown>,
@@ -149,9 +166,11 @@ async function saveBalance(
     await db.update(stockBalances).set({ ...values, updatedAt: new Date() }).where(eq(stockBalances.id, balance.id));
     return;
   }
+  const identity = stockIdentity(item);
   await db.insert(stockBalances).values({
     tenantId: tenant.tenantId,
-    productId,
+    productId: identity.productId,
+    filamentId: identity.filamentId,
     locationId,
     onHand: "0",
     allocated: "0",
@@ -160,20 +179,30 @@ async function saveBalance(
   });
 }
 
-/** Valor en centavos de `quantity` (unidad de almacén) al costo vigente del producto. */
-export async function stockValueMinor(db: Db, productId: string, quantity: bigint): Promise<bigint> {
+/** Valor en centavos de `quantity` (unidad de almacén) al costo vigente. El filamento se costea por gramo. */
+export async function stockValueMinor(db: Db, item: StockTarget, quantity: bigint): Promise<bigint> {
+  const identity = stockIdentity(item);
+  if (identity.filamentId) {
+    const [filament] = await db
+      .select({ costMinor: filaments.costMinor })
+      .from(filaments)
+      .where(eq(filaments.id, identity.filamentId))
+      .limit(1);
+    if (!filament) return 0n;
+    const unit = stockUnitCostMinor(filament.costMinor === null ? null : BigInt(filament.costMinor), "1000");
+    return extendCostMinor(quantity, unit);
+  }
   const [product] = await db
     .select({ costMinor: products.costMinor, uomFactor: products.uomFactor })
     .from(products)
-    .where(eq(products.id, productId))
+    .where(eq(products.id, identity.productId as string))
     .limit(1);
   if (!product) return 0n;
   const unit = stockUnitCostMinor(product.costMinor === null ? null : BigInt(product.costMinor), String(product.uomFactor));
   return extendCostMinor(quantity, unit);
 }
 
-export interface StockPosting {
-  productId: string;
+export interface StockPosting extends StockTarget {
   locationId: string;
   kind: "receipt" | "issue" | "adjustment" | "scrap" | "transfer";
   /** Cambio firmado en existencia (escala de cantidad). */
@@ -192,7 +221,8 @@ export interface StockPosting {
 /** Toda entrada o salida pasa por aquí: actualiza la existencia y deja el renglón en el kardex. */
 export async function postStock(db: Db, tenant: TenantActor, input: StockPosting): Promise<void> {
   if (input.delta === 0n && input.reorderPoint === undefined && input.leadTimeDays === undefined) return;
-  const balance = await loadBalance(db, input.productId, input.locationId);
+  const identity = stockIdentity(input);
+  const balance = await loadBalance(db, identity, input.locationId);
   const onHand = balance ? qtyFromDb(balance.onHand) : 0n;
   const allocated = balance ? qtyFromDb(balance.allocated) : 0n;
   const next = onHand + input.delta;
@@ -217,17 +247,18 @@ export async function postStock(db: Db, tenant: TenantActor, input: StockPosting
       409,
     );
   }
-  await saveBalance(db, tenant, input.productId, input.locationId, balance, {
+  await saveBalance(db, tenant, identity, input.locationId, balance, {
     onHand: formatQty(next),
     allocated: formatQty(maxQty(0n, allocated - (input.releaseAllocated ?? 0n))),
     ...(input.reorderPoint !== undefined ? { reorderPoint: formatQty(input.reorderPoint) } : {}),
     ...(input.leadTimeDays !== undefined ? { leadTimeDays: input.leadTimeDays } : {}),
   });
   if (input.delta === 0n) return;
-  const value = input.valueMinor ?? (await stockValueMinor(db, input.productId, input.delta < 0n ? -input.delta : input.delta));
+  const value = input.valueMinor ?? (await stockValueMinor(db, identity, input.delta < 0n ? -input.delta : input.delta));
   await db.insert(stockLedgers).values({
     tenantId: tenant.tenantId,
-    productId: input.productId,
+    productId: identity.productId,
+    filamentId: identity.filamentId,
     locationId: input.locationId,
     kind: input.kind,
     quantity: formatQty(input.delta),
@@ -244,17 +275,19 @@ export async function postStock(db: Db, tenant: TenantActor, input: StockPosting
 export async function reserveStock(
   db: Db,
   tenant: TenantActor,
-  input: { productId: string; locationId: string; quantity: bigint; reason: string; reference: { type: string; id: string } },
+  input: StockTarget & { locationId: string; quantity: bigint; reason: string; reference: { type: string; id: string } },
 ): Promise<void> {
   if (input.quantity === 0n) return;
-  const balance = await loadBalance(db, input.productId, input.locationId);
+  const identity = stockIdentity(input);
+  const balance = await loadBalance(db, identity, input.locationId);
   const allocated = balance ? qtyFromDb(balance.allocated) : 0n;
-  await saveBalance(db, tenant, input.productId, input.locationId, balance, {
+  await saveBalance(db, tenant, identity, input.locationId, balance, {
     allocated: formatQty(maxQty(0n, allocated + input.quantity)),
   });
   await db.insert(stockLedgers).values({
     tenantId: tenant.tenantId,
-    productId: input.productId,
+    productId: identity.productId,
+    filamentId: identity.filamentId,
     locationId: input.locationId,
     kind: input.quantity > 0n ? "reservation" : "release",
     quantity: formatQty(input.quantity),
@@ -266,8 +299,8 @@ export async function reserveStock(
   });
 }
 
-export async function availableAt(db: Db, productId: string, locationId: string): Promise<bigint> {
-  const balance = await loadBalance(db, productId, locationId);
+export async function availableAt(db: Db, item: StockTarget | string, locationId: string): Promise<bigint> {
+  const balance = await loadBalance(db, typeof item === "string" ? { productId: item } : item, locationId);
   if (!balance) return 0n;
   return qtyFromDb(balance.onHand) - qtyFromDb(balance.allocated);
 }
@@ -282,4 +315,45 @@ export function minorToMajor(value: bigint | number | string): string {
 export function isoDate(value: Date | string | null | undefined): string | null {
   if (!value) return null;
   return (value instanceof Date ? value : new Date(value)).toISOString();
+}
+
+/** Abre o acumula un lote. El número es único por tenant; no se reusa entre productos. */
+export async function ensureLot(
+  db: Db,
+  tenant: TenantActor,
+  item: StockTarget,
+  lotNumber: string,
+  receivedQty: bigint,
+  extra: { source?: "manual" | "purchase"; vendorLot?: string | null; vendorId?: string; purchaseOrderId?: string; receiptId?: string } = {},
+): Promise<string> {
+  const filamentId = item.filamentId ?? null;
+  const productId = filamentId ? null : item.productId ?? null;
+  const [existing] = await db.select().from(materialLots).where(eq(materialLots.lotNumber, lotNumber)).limit(1);
+  if (existing) {
+    if ((existing.filamentId ?? null) !== filamentId || (existing.productId ?? null) !== productId) {
+      throw new AppError("lot_conflict", "Ese número de lote ya existe para otro producto.", 409);
+    }
+    await db
+      .update(materialLots)
+      .set({ receivedQty: formatQty(qtyFromDb(existing.receivedQty) + receivedQty) })
+      .where(eq(materialLots.id, existing.id));
+    return existing.id;
+  }
+  const [lot] = await db
+    .insert(materialLots)
+    .values({
+      tenantId: tenant.tenantId,
+      productId,
+      filamentId,
+      lotNumber,
+      vendorLot: extra.vendorLot ?? null,
+      source: extra.source ?? "manual",
+      receivedQty: formatQty(receivedQty),
+      vendorId: extra.vendorId ?? null,
+      purchaseOrderId: extra.purchaseOrderId ?? null,
+      receiptId: extra.receiptId ?? null,
+      createdBy: tenant.userId,
+    })
+    .returning();
+  return lot.id;
 }

@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Headers, Param, Patch, Post, Put, Query } from "@nestjs/common";
+import { Body, Controller, Get, Header, Headers, Param, Patch, Post, Put, Query, StreamableFile } from "@nestjs/common";
 import {
   assertOrderAction,
   canReadSalePrice,
@@ -25,6 +25,7 @@ import { z } from "zod";
 import { services } from "../container";
 import {
   commercialDocuments,
+  companyProfiles,
   customerAddresses,
   customers,
   locations,
@@ -34,7 +35,9 @@ import {
   salesOrderEvents,
   salesOrderLines,
   salesOrders,
+  serviceOfferings,
 } from "../db/schema";
+import { renderQuotePdf } from "./quote-pdf";
 import { assertRole, CurrentUser, requireTenant, type Actor, type TenantActor } from "../http/actor";
 import {
   allocateOrder,
@@ -155,6 +158,58 @@ export class OrdersController {
     return this.database.asUser(tenant, (db) => orderDetail(db, tenant, id));
   }
 
+  @Get("orders/:id/pdf")
+  @Header("Content-Type", "application/pdf")
+  async pdf(@CurrentUser() actor: Actor, @Param("id") id: string): Promise<StreamableFile> {
+    const tenant = requireTenant(actor);
+    const file = await this.database.asUser(tenant, async (db) => {
+      const order = await orderDetail(db, tenant, id);
+      const [company] = await db.select().from(companyProfiles).limit(1);
+      const [customer] = await db.select({ paymentTerms: customers.paymentTerms }).from(customers).where(eq(customers.id, order.customerId)).limit(1);
+      const issued = new Date(order.createdAt ?? Date.now());
+      const bytes = renderQuotePdf({
+        title: "PEDIDO",
+        kindLabel: "Pedido",
+        dateLabel: order.promisedDate ? "Entrega" : "Fecha",
+        folio: order.folio,
+        issuedAt: issued.toLocaleDateString("es-MX"),
+        customerName: order.customerName,
+        customerRfc: order.customerRfc,
+        paymentTerms: paymentTermsLabel(customer?.paymentTerms ?? "pue"),
+        validUntil: order.promisedDate ?? issued.toLocaleDateString("es-MX"),
+        mode: "products",
+        serviceTerms: order.serviceTerms,
+        subtotal: order.subtotal,
+        discount: order.discount,
+        vat: order.vat,
+        vatRate: company ? String(company.defaultVatRate) : "0.1600",
+        total: order.total,
+        currency: order.currency,
+        issuer: company?.tradeName || company?.legalName || "Taller",
+        issuerRfc: company?.rfc ?? "—",
+        issuerRegime: company?.taxRegime ?? "—",
+        issuerPostalCode: company?.fiscalPostalCode ?? "—",
+        prints: [],
+        lines: order.lines.map((line) => ({
+          description: line.description,
+          terms: line.terms,
+          uom: line.uom,
+          quantity: line.quantity,
+          unitPrice: line.unitPrice,
+          discount: line.discount,
+          net: line.net,
+          vat: line.vat,
+          total: line.total,
+        })),
+      });
+      return { filename: `${order.folio}.pdf`, bytes };
+    });
+    return new StreamableFile(Buffer.from(file.bytes), {
+      type: "application/pdf",
+      disposition: `attachment; filename="${file.filename}"`,
+    });
+  }
+
   @Get("shipments")
   async shipments(@CurrentUser() actor: Actor) {
     const tenant = requireTenant(actor);
@@ -215,7 +270,7 @@ export class OrdersController {
         })
         .returning();
       await db.insert(salesOrderLines).values(
-        priced.stored.map(({ uom: _uom, ...line }, position) => ({
+        priced.stored.map(({ uom: _uom, sku: _sku, ...line }, position) => ({
           ...line,
           position,
           tenantId: tenant.tenantId,
@@ -272,7 +327,7 @@ export class OrdersController {
       await releaseOrderReservations(db, tenant, order, "Edición de");
       await db.delete(salesOrderLines).where(eq(salesOrderLines.salesOrderId, order.id));
       await db.insert(salesOrderLines).values(
-        priced.stored.map(({ uom: _uom, ...line }, position) => ({
+        priced.stored.map(({ uom: _uom, sku: _sku, ...line }, position) => ({
           ...line,
           position,
           tenantId: tenant.tenantId,
@@ -444,9 +499,9 @@ export class OrdersController {
         const locationId = await orderLocation(db, order);
         for (const line of lines) {
           const reserved = qtyFromDb(line.reservedQty);
-          if (reserved <= 0n || !line.productId) continue;
+          if (reserved <= 0n || !(line.productId || line.filamentId)) continue;
           await postStock(db, tenant, {
-            productId: line.productId,
+            ...(line.filamentId ? { filamentId: line.filamentId } : { productId: line.productId }),
             locationId,
             kind: "issue",
             delta: -reserved,
@@ -628,10 +683,16 @@ export async function orderDetail(db: Db, tenant: TenantActor, id: string) {
     .where(eq(salesOrderEvents.salesOrderId, order.id))
     .orderBy(asc(salesOrderEvents.createdAt));
   const skus = new Map<string, string>();
+  const serviceUnits = new Map<string, string>();
   for (const line of lines) {
-    if (!line.productId || skus.has(line.productId)) continue;
-    const [product] = await db.select({ sku: products.sku }).from(products).where(eq(products.id, line.productId)).limit(1);
-    if (product) skus.set(line.productId, product.sku);
+    if (line.productId && !skus.has(line.productId)) {
+      const [product] = await db.select({ sku: products.sku }).from(products).where(eq(products.id, line.productId)).limit(1);
+      if (product) skus.set(line.productId, product.sku);
+    }
+    if (line.serviceId && !serviceUnits.has(line.serviceId)) {
+      const [service] = await db.select({ unit: serviceOfferings.unit }).from(serviceOfferings).where(eq(serviceOfferings.id, line.serviceId)).limit(1);
+      if (service) serviceUnits.set(line.serviceId, service.unit);
+    }
   }
   const supply = await orderSupply(db, lines);
   const due = dueMinor(BigInt(order.totalMinor), ledger);
@@ -643,6 +704,7 @@ export async function orderDetail(db: Db, tenant: TenantActor, id: string) {
     fullyAllocated: context.fullyAllocated,
     lines: lines.map((line, index) => ({
       ...mapOrderLine(line, tenant.role),
+      uom: line.lineKind === "filament" ? "g" : line.lineKind === "service" ? (line.serviceId ? (serviceUnits.get(line.serviceId) ?? "servicio") : "servicio") : "pza",
       sku: line.productId ? (skus.get(line.productId) ?? null) : null,
       stocked: supply[index]?.stocked ?? false,
       open: formatQty(supply[index] ? openQuantity(supply[index]) : 0n),
@@ -670,4 +732,10 @@ export async function orderDetail(db: Db, tenant: TenantActor, id: string) {
       }),
     ),
   };
+}
+
+function paymentTermsLabel(value: string): string {
+  if (value === "net_15") return "Crédito 15 días";
+  if (value === "net_30") return "Crédito 30 días";
+  return "Contado (PUE)";
 }

@@ -3,6 +3,7 @@ import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, postJson } from "./api";
 import { money, useError } from "./operations";
+import { DetailSkeleton, TableSkeleton } from "./skeleton";
 
 const grid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 } as const;
 
@@ -41,13 +42,6 @@ const CENTER_KIND: Record<string, string> = {
   other: "Otro",
 };
 
-const SPOOL_STATUS: Record<string, string> = {
-  available: "Disponible",
-  in_use: "En uso",
-  empty: "Vacío",
-  scrapped: "Baja",
-};
-
 export function useProducts() {
   return useQuery({
     queryKey: ["products", "all"],
@@ -55,241 +49,18 @@ export function useProducts() {
   });
 }
 
-export function useLocations() {
-  return useQuery({ queryKey: ["locations"], queryFn: () => api<Array<{ id: string; name: string }>>("/locations") });
-}
-
-export function SpoolsPage() {
-  const client = useQueryClient();
-  const { error, run } = useError();
-  const [status, setStatus] = useState("available,in_use");
-  const spools = useQuery({ queryKey: ["spools"], queryFn: () => api<{ data: Spool[] }>("/spools") });
-  const products = useProducts();
-  const locations = useLocations();
-  const filaments = (products.data?.data ?? []).filter((product) => product.stockUom === "G");
-  const visible = (spools.data?.data ?? []).filter((spool) => status === "all" || status.split(",").includes(spool.status));
-  const refresh = async () => {
-    await client.invalidateQueries({ queryKey: ["spools"] });
-    await client.invalidateQueries({ queryKey: ["inventory"] });
-  };
-  return (
-    <section style={{ display: "grid", gap: 16 }}>
-      <h1>Rollos</h1>
-      <p>Cada rollo lleva su peso neto. Pésalo de vez en cuando: la diferencia se ajusta en el kardex.</p>
-      <form
-        className="card"
-        style={grid}
-        onSubmit={(event) => {
-          event.preventDefault();
-          const form = event.currentTarget;
-          const data = new FormData(form);
-          void run(async () => {
-            await postJson("/spools", {
-              productId: data.get("productId"),
-              locationId: data.get("locationId") || undefined,
-              grams: data.get("grams"),
-              lotNumber: String(data.get("lotNumber") || "") || undefined,
-              addToStock: data.has("addToStock"),
-            });
-            form.reset();
-            await refresh();
-          });
-        }}
-      >
-        <label>
-          Filamento
-          <select name="productId" required>
-            {filaments.map((product) => <option key={product.id} value={product.id}>{product.sku} · {product.name}</option>)}
-          </select>
-        </label>
-        <label>
-          Sucursal
-          <select name="locationId">
-            {(locations.data ?? []).map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}
-          </select>
-        </label>
-        <label>Peso neto (g)<input name="grams" required placeholder="1000" /></label>
-        <label>Lote<input name="lotNumber" placeholder="Opcional" /></label>
-        <label style={{ gridTemplateColumns: "auto 1fr", alignItems: "center" }}>
-          <input name="addToStock" type="checkbox" defaultChecked />
-          Sumar al inventario
-        </label>
-        <button className="primary" type="submit">Dar de alta rollo</button>
-        {error ? <p className="error">{error}</p> : null}
-      </form>
-      <label style={{ maxWidth: 240 }}>
-        Mostrar
-        <select value={status} onChange={(event) => setStatus(event.target.value)}>
-          <option value="available,in_use">Activos</option>
-          <option value="empty,scrapped">Vacíos y bajas</option>
-          <option value="all">Todos</option>
-        </select>
-      </label>
-      <table>
-        <thead><tr><th>Rollo</th><th>Filamento</th><th>Lote</th><th>Restante</th><th>Estado</th><th></th></tr></thead>
-        <tbody>
-          {visible.map((spool) => (
-            <tr key={spool.id}>
-              <td>{spool.spoolNumber}</td>
-              <td>{spool.sku} · {spool.color ?? spool.name}</td>
-              <td>{spool.lotNumber ?? "—"}</td>
-              <td>{spool.currentGrams} g ({spool.percentRemaining}%)</td>
-              <td>{SPOOL_STATUS[spool.status] ?? spool.status}</td>
-              <td style={{ display: "flex", gap: 8 }}>
-                {spool.status !== "scrapped" ? (
-                  <>
-                    <Action
-                      label="Pesar"
-                      onClick={() => {
-                        const grams = window.prompt(`Peso neto actual de ${spool.spoolNumber} (g)`, spool.currentGrams);
-                        if (!grams) return;
-                        void run(async () => {
-                          await postJson(`/spools/${spool.id}/weigh`, { grams, reason: "Pesaje en báscula" });
-                          await refresh();
-                        });
-                      }}
-                    />
-                    <Action
-                      label="Baja"
-                      onClick={() => {
-                        const reason = window.prompt(`¿Por qué se da de baja ${spool.spoolNumber}?`);
-                        if (!reason) return;
-                        void run(async () => {
-                          await postJson(`/spools/${spool.id}/scrap`, { reason });
-                          await refresh();
-                        });
-                      }}
-                    />
-                  </>
-                ) : null}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </section>
-  );
-}
-
-export function CycleCountsPage() {
-  const client = useQueryClient();
-  const { error, run } = useError();
-  const [preview, setPreview] = useState<CountResult | null>(null);
-  const counts = useQuery({ queryKey: ["cycle-counts"], queryFn: () => api<{ data: CountSummary[] }>("/cycle-counts") });
-  const products = useProducts();
-  const locations = useLocations();
-  const [draft, setDraft] = useState<{ locationId: string; reference: string; lines: Array<{ productId: string; countedQty: string }> }>({
-    locationId: "",
-    reference: "",
-    lines: [{ productId: "", countedQty: "" }],
+export function useFilaments() {
+  return useQuery({
+    queryKey: ["filaments"],
+    queryFn: () => api<{ data: ProductOption[] }>("/filaments"),
   });
-  const body = (dryRun: boolean) => ({
-    locationId: draft.locationId || locations.data?.[0]?.id,
-    reference: draft.reference || "Conteo",
-    dryRun,
-    lines: draft.lines.filter((line) => line.productId && line.countedQty),
-  });
-  return (
-    <section style={{ display: "grid", gap: 16 }}>
-      <h1>Conteo cíclico</h1>
-      <p>Captura lo contado, revisa las diferencias y su valor, y después aplica el ajuste.</p>
-      <div className="card" style={{ display: "grid", gap: 10 }}>
-        <div style={grid}>
-          <label>
-            Sucursal
-            <select value={draft.locationId} onChange={(event) => setDraft({ ...draft, locationId: event.target.value })}>
-              {(locations.data ?? []).map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}
-            </select>
-          </label>
-          <label>Referencia<input value={draft.reference} onChange={(event) => setDraft({ ...draft, reference: event.target.value })} placeholder="Conteo semanal" /></label>
-        </div>
-        {draft.lines.map((line, index) => (
-          <div key={index} style={grid}>
-            <label>
-              Producto
-              <select
-                value={line.productId}
-                onChange={(event) => setDraft({ ...draft, lines: draft.lines.map((item, i) => (i === index ? { ...item, productId: event.target.value } : item)) })}
-              >
-                <option value="">—</option>
-                {(products.data?.data ?? []).filter((product) => product.productType !== "service").map((product) => (
-                  <option key={product.id} value={product.id}>{product.sku} · {product.name} ({product.stockUom})</option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Contado
-              <input
-                value={line.countedQty}
-                onChange={(event) => setDraft({ ...draft, lines: draft.lines.map((item, i) => (i === index ? { ...item, countedQty: event.target.value } : item)) })}
-              />
-            </label>
-          </div>
-        ))}
-        <div style={{ display: "flex", gap: 8 }}>
-          <button className="ghost" type="button" onClick={() => setDraft({ ...draft, lines: [...draft.lines, { productId: "", countedQty: "" }] })}>Agregar renglón</button>
-          <button className="ghost" type="button" onClick={() => void run(async () => setPreview(await postJson<CountResult>("/cycle-counts", body(true))))}>Revisar diferencias</button>
-          <button
-            className="primary"
-            type="button"
-            disabled={!preview}
-            onClick={() =>
-              void run(async () => {
-                setPreview(await postJson<CountResult>("/cycle-counts", body(false)));
-                await client.invalidateQueries({ queryKey: ["cycle-counts"] });
-                await client.invalidateQueries({ queryKey: ["inventory"] });
-              })
-            }
-          >
-            Aplicar ajuste
-          </button>
-        </div>
-        {error ? <p className="error">{error}</p> : null}
-      </div>
-      {preview ? (
-        <div className="card">
-          <strong>{preview.folio ? `Conteo ${preview.folio} aplicado` : "Vista previa (no se ha guardado)"}</strong>
-          <p>{preview.adjustments} ajustes · valor {money(preview.varianceValue)}</p>
-          <table>
-            <thead><tr><th>SKU</th><th>Sistema</th><th>Contado</th><th>Diferencia</th><th>Valor</th></tr></thead>
-            <tbody>
-              {preview.lines.map((line) => (
-                <tr key={line.productId}>
-                  <td>{line.sku}</td>
-                  <td>{line.systemQty} {line.stockUom}</td>
-                  <td>{line.countedQty}</td>
-                  <td>{line.variance}</td>
-                  <td>{money(line.value)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : null}
-      <h2>Historial</h2>
-      <table>
-        <thead><tr><th>Folio</th><th>Referencia</th><th>Sucursal</th><th>Ajustes</th><th>Valor</th><th>Fecha</th></tr></thead>
-        <tbody>
-          {(counts.data?.data ?? []).map((count) => (
-            <tr key={count.id}>
-              <td>{count.folio}</td>
-              <td>{count.reference}</td>
-              <td>{count.locationName}</td>
-              <td>{count.adjustments}</td>
-              <td>{money(count.varianceValue)}</td>
-              <td>{new Date(count.createdAt).toLocaleDateString("es-MX")}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </section>
-  );
 }
 
 export function ManufacturingPage() {
   const client = useQueryClient();
   const { error, run } = useError();
   const products = useProducts();
+  const filaments = useFilaments();
   const centers = useQuery({ queryKey: ["work-centers"], queryFn: () => api<{ data: WorkCenter[] }>("/work-centers") });
   const boms = useQuery({ queryKey: ["boms"], queryFn: () => api<{ data: BomSummary[] }>("/boms") });
   const [productId, setProductId] = useState("");
@@ -304,7 +75,10 @@ export function ManufacturingPage() {
     enabled: Boolean(productId),
   });
   const makeable = (products.data?.data ?? []).filter((product) => product.productType === "finished_good" || product.productType === "component");
-  const components = (products.data?.data ?? []).filter((product) => product.productType !== "service" && product.id !== productId);
+  const components = [
+    ...(filaments.data?.data ?? []).map((filament) => ({ ...filament, stockUom: filament.stockUom ?? "G" })),
+    ...(products.data?.data ?? []).filter((product) => product.productType !== "service" && product.productType !== "finished_good" && product.id !== productId),
+  ];
   const refresh = async () => {
     await client.invalidateQueries({ queryKey: ["boms"] });
     await client.invalidateQueries({ queryKey: ["bom", productId] });
@@ -315,6 +89,7 @@ export function ManufacturingPage() {
       <h1>Manufactura</h1>
       <p>Lista de materiales con merma, ruta por estación de trabajo y costo estándar por pieza.</p>
       <h2>Estaciones de trabajo</h2>
+      {centers.isPending ? <TableSkeleton columns={5} /> : (
       <table>
         <thead><tr><th>Clave</th><th>Nombre</th><th>Tipo</th><th>Tarifa por hora</th><th>Horas por día</th></tr></thead>
         <tbody>
@@ -329,7 +104,9 @@ export function ManufacturingPage() {
           ))}
         </tbody>
       </table>
+      )}
       <h2>Productos con BOM</h2>
+      {boms.isPending ? <TableSkeleton columns={6} /> : (
       <table>
         <thead><tr><th>SKU</th><th>Producto</th><th>Versión</th><th>Componentes</th><th>Material por pieza</th><th></th></tr></thead>
         <tbody>
@@ -345,6 +122,7 @@ export function ManufacturingPage() {
           ))}
         </tbody>
       </table>
+      )}
       <div className="card" style={{ display: "grid", gap: 10 }}>
         <label style={{ maxWidth: 360 }}>
           Producto a fabricar
@@ -550,7 +328,7 @@ export function ProductionPage() {
   return (
     <section style={{ display: "grid", gap: 16 }}>
       <h1>Producción</h1>
-      <p>Una orden aparta material al liberarse, consume de rollos específicos y recibe el terminado al pasar calidad.</p>
+      <p>Una orden aparta material al liberarse, lo consume del inventario y recibe el terminado al pasar calidad.</p>
       <div className="card" style={{ display: "grid", gap: 10 }}>
         <form
           style={grid}
@@ -615,6 +393,7 @@ export function ProductionPage() {
           <option value="">Todas</option>
         </select>
       </label>
+      {orders.isPending ? <TableSkeleton columns={7} /> : (
       <table>
         <thead><tr><th>Folio</th><th>Producto</th><th>Piezas</th><th>Estado</th><th>Calidad</th><th>Compromiso</th><th>Costo est.</th></tr></thead>
         <tbody>
@@ -631,6 +410,7 @@ export function ProductionPage() {
           ))}
         </tbody>
       </table>
+      )}
     </section>
   );
 }
@@ -640,15 +420,14 @@ export function ProductionDetailPage() {
   const client = useQueryClient();
   const { error, run } = useError();
   const order = useQuery({ queryKey: ["production-order", id], queryFn: () => api<ProductionDetail>(`/production-orders/${id}`) });
-  const spools = useQuery({ queryKey: ["spools"], queryFn: () => api<{ data: Spool[] }>("/spools") });
   const defects = useQuery({ queryKey: ["defect-types"], queryFn: () => api<{ data: Array<{ id: string; name: string }> }>("/quality/defect-types") });
   const [shortages, setShortages] = useState<Array<{ sku: string; short: string }>>([]);
-  if (!order.data) return <p>Cargando…</p>;
+  if (order.isPending) return <DetailSkeleton />;
+  if (!order.data) return <p className="error">No se pudo cargar la orden.</p>;
   const data = order.data;
   const refresh = async () => {
     await client.invalidateQueries({ queryKey: ["production-order", id] });
     await client.invalidateQueries({ queryKey: ["production-orders"] });
-    await client.invalidateQueries({ queryKey: ["spools"] });
     await client.invalidateQueries({ queryKey: ["inventory"] });
   };
   const act = (path: string, body: unknown = {}) =>
@@ -687,7 +466,7 @@ export function ProductionDetailPage() {
         ) : null}
       </div>
       {shortages.length ? (
-        <p className="banner">Faltó material para apartar: {shortages.map((item) => `${item.sku} ${item.short}`).join(", ")}. Revisa MRP.</p>
+        <p className="banner">Faltó material para apartar: {shortages.map((item) => `${item.sku} ${item.short}`).join(", ")}.</p>
       ) : null}
       {error ? <p className="error">{error}</p> : null}
       <h2>Material</h2>
@@ -717,7 +496,6 @@ export function ProductionDetailPage() {
             void act("/consume", {
               materialId: values.get("materialId"),
               quantity: values.get("quantity"),
-              spoolId: String(values.get("spoolId") || "") || undefined,
             }).then(() => form.reset());
           }}
         >
@@ -725,15 +503,6 @@ export function ProductionDetailPage() {
             Material
             <select name="materialId" required>
               {data.materials.map((material) => <option key={material.id} value={material.id}>{material.sku}</option>)}
-            </select>
-          </label>
-          <label>
-            Rollo
-            <select name="spoolId">
-              <option value="">Sin rollo (a granel)</option>
-              {(spools.data?.data ?? [])
-                .filter((spool) => (spool.status === "available" || spool.status === "in_use") && data.materials.some((material) => material.componentProductId === spool.productId))
-                .map((spool) => <option key={spool.id} value={spool.id}>{spool.spoolNumber} · {spool.sku} · {spool.currentGrams} g</option>)}
             </select>
           </label>
           <label>Cantidad<input name="quantity" required placeholder="120" /></label>
@@ -845,16 +614,14 @@ export function ProductionDetailPage() {
         <>
           <h2>Consumos</h2>
           <table>
-            <thead><tr><th>Cuándo</th><th>SKU</th><th>Rollo</th><th>Cantidad</th><th>Valor</th><th>Origen</th></tr></thead>
+            <thead><tr><th>Cuándo</th><th>SKU</th><th>Cantidad</th><th>Valor</th></tr></thead>
             <tbody>
               {data.consumptions.map((row) => (
                 <tr key={row.id}>
                   <td>{new Date(row.createdAt).toLocaleString("es-MX")}</td>
                   <td>{row.sku}</td>
-                  <td>{row.spoolNumber ?? "—"}</td>
                   <td>{row.quantity}</td>
                   <td>{money(row.value)}</td>
-                  <td>{row.source === "spool" ? "Rollo" : "Backflush"}</td>
                 </tr>
               ))}
             </tbody>
@@ -922,7 +689,7 @@ export function QualityPage() {
         {error ? <p className="error">{error}</p> : null}
       </div>
       <h2>Por inspeccionar</h2>
-      {!queue.data?.data.length ? <p>No hay órdenes esperando inspección.</p> : (
+      {queue.isPending ? <TableSkeleton columns={1} rows={3} /> : !queue.data?.data.length ? <p>No hay órdenes esperando inspección.</p> : (
         <ul>
           {queue.data.data.map((order) => (
             <li key={order.id}><Link to={`/app/produccion/${order.id}`}>{order.folio}</Link> · {order.sku} · {order.quantityCompleted} piezas</li>
@@ -930,6 +697,7 @@ export function QualityPage() {
         </ul>
       )}
       <h2>Historial</h2>
+      {inspections.isPending ? <TableSkeleton columns={6} /> : (
       <table>
         <thead><tr><th>Cuándo</th><th>Orden</th><th>Producto</th><th>Resultado</th><th>Rechazadas</th><th>Defecto</th></tr></thead>
         <tbody>
@@ -945,6 +713,7 @@ export function QualityPage() {
           ))}
         </tbody>
       </table>
+      )}
       <h2>Catálogo de defectos</h2>
       <form
         className="card"
@@ -981,36 +750,6 @@ export interface ProductOption {
   stockUom: string;
   purchaseUom: string;
   cost: string | null;
-}
-
-interface Spool {
-  id: string;
-  spoolNumber: string;
-  productId: string;
-  sku: string;
-  name: string;
-  color: string | null;
-  lotNumber: string | null;
-  currentGrams: string;
-  percentRemaining: number;
-  status: string;
-}
-
-interface CountSummary {
-  id: string;
-  folio: string;
-  reference: string;
-  locationName: string;
-  adjustments: number;
-  varianceValue: string;
-  createdAt: string;
-}
-
-interface CountResult {
-  folio: string | null;
-  adjustments: number;
-  varianceValue: string;
-  lines: Array<{ productId: string; sku: string; stockUom: string; systemQty: string; countedQty: string; variance: string; value: string }>;
 }
 
 interface WorkCenter {
@@ -1063,7 +802,7 @@ interface ProductionDetail extends ProductionOrder {
   salesOrderFolio: string | null;
   materials: Array<{ id: string; componentProductId: string; sku: string; name: string; stockUom: string; required: string; allocated: string; consumed: string; available: string; shortage: string }>;
   operations: Array<{ id: string; sequence: number; name: string; workCenterName: string; plannedMinutes: string; actualMinutes: string | null; status: string }>;
-  consumptions: Array<{ id: string; sku: string; spoolNumber: string | null; quantity: string; value: string; source: string; createdAt: string }>;
+  consumptions: Array<{ id: string; sku: string; quantity: string; value: string; createdAt: string }>;
   inspections: Array<{ id: string; result: string; qtyPassed: string; qtyFailed: string; disposition: string | null; defect: string | null; createdAt: string }>;
 }
 
