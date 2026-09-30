@@ -12,17 +12,22 @@ export const SERVICE_RESOLUTIONS = [
 export type ServiceResolution = (typeof SERVICE_RESOLUTIONS)[number];
 
 const SERVICE_RESOLUTION_TRANSITIONS: Record<ServiceResolution, readonly ServiceResolution[]> = {
-  pending: ["in_progress", "waived"],
-  in_progress: ["delivered", "rework", "waived"],
-  rework: ["in_progress", "waived"],
+  pending: ["in_progress"],
+  in_progress: ["delivered", "rework"],
+  rework: ["in_progress"],
   delivered: ["accepted", "rework"],
   accepted: [],
   waived: [],
 };
 
-/** El servicio ya se prestó, el cliente lo aceptó o se condonó. */
+/** La impresión o el servicio ya se prestó, o el cliente ya lo aceptó. */
 export function serviceIsSettled(resolution: string): boolean {
-  return resolution === "delivered" || resolution === "accepted" || resolution === "waived";
+  return resolution === "delivered" || resolution === "accepted";
+}
+
+/** La impresión o el producto terminado ya se marcó como prestado, o el cliente ya lo aceptó. */
+export function isPrestado(resolution: string): boolean {
+  return resolution === "delivered" || resolution === "accepted";
 }
 
 export function transitionServiceResolution(

@@ -1,18 +1,18 @@
-import { Body, Controller, Get, Headers, Param, Patch, Post, Query } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Headers, Param, Patch, Post, Query } from "@nestjs/common";
 import { canReadSalePrice, canWriteCatalog, Money, QC_RIGOR, type TenantRole } from "@3dprintmty/domain";
 import { countryPolicy } from "@3dprintmty/fiscal";
 import { AppError } from "@3dprintmty/shared";
-import { count, desc, eq, ilike, or } from "drizzle-orm";
+import { and, count, desc, eq, ilike, ne, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { services } from "../container";
 import { filaments, products, productsVisible, serviceOfferings } from "../db/schema";
 import { assertRole, CurrentUser, requireTenant, type Actor, type TenantActor } from "../http/actor";
-import { one, withIdempotency } from "./support";
+import { one, withIdempotency, type Db } from "./support";
 
 const productSchema = z.object({
   sku: z.string().trim().min(1).max(40),
   name: z.string().trim().min(1).max(160),
-  productType: z.enum(["raw_material", "component", "finished_good", "service"]),
+  productType: z.enum(["raw_material", "component", "finished_good", "service", "resale"]),
   material: z.string().trim().max(40).optional(),
   color: z.string().trim().max(40).optional(),
   diameterMm: z.enum(["1.75", "2.85"]).optional(),
@@ -22,6 +22,7 @@ const productSchema = z.object({
 });
 
 const productPatchSchema = z.object({
+  sku: z.string().trim().min(1).max(40).optional(),
   name: z.string().trim().min(1).max(160).optional(),
   cost: z.string().nullable().optional(),
   salePrice: z.string().nullable().optional(),
@@ -40,6 +41,7 @@ const filamentSchema = z.object({
 });
 
 const filamentPatchSchema = z.object({
+  sku: z.string().trim().min(1).max(40).optional(),
   name: z.string().trim().min(1).max(160).optional(),
   material: z.string().trim().min(1).max(40).optional(),
   color: z.string().trim().min(1).max(40).optional(),
@@ -53,7 +55,8 @@ const serviceSchema = z.object({
   code: z.string().trim().min(1).max(40),
   name: z.string().trim().min(1).max(160),
   description: z.string().trim().max(400).optional(),
-  unit: z.enum(["hora", "pieza", "servicio"]).default("servicio"),
+  unit: z.enum(["minuto", "hora", "pieza", "servicio"]).default("servicio"),
+  cost: z.string().optional(),
   salePrice: z.string(),
   terms: z.string().trim().max(2000).optional(),
 });
@@ -61,7 +64,8 @@ const serviceSchema = z.object({
 const servicePatchSchema = z.object({
   name: z.string().trim().min(1).max(160).optional(),
   description: z.string().trim().max(400).optional(),
-  unit: z.enum(["hora", "pieza", "servicio"]).optional(),
+  unit: z.enum(["minuto", "hora", "pieza", "servicio"]).optional(),
+  cost: z.string().nullable().optional(),
   salePrice: z.string().optional(),
   terms: z.string().trim().max(2000).optional(),
   status: z.enum(["active", "inactive"]).optional(),
@@ -140,9 +144,10 @@ export class CatalogController {
     }
     return withIdempotency(this.database, tenant.userId, idempotencyKey, { route: "products", input }, async () => {
       const values = productValues(tenant.tenantId, tenant.userId, input);
-      const [created] = await this.database.asUser(tenant, (db) =>
-        db.insert(products).values(values).returning({ id: products.id }),
-      );
+      const [created] = await this.database.asUser(tenant, async (db) => {
+        await assertSkuFree(db, tenant.tenantId, values.sku);
+        return db.insert(products).values(values).returning({ id: products.id });
+      });
       return this.load(tenant, created.id);
     });
   }
@@ -153,9 +158,12 @@ export class CatalogController {
     const input = productPatchSchema.parse(body);
     await this.database.asUser(tenant, async (db) => {
       const product = await one(db, products, products.id, id, "No encontramos ese producto.");
+      const sku = input.sku?.toUpperCase();
+      if (sku && sku !== product.sku) await assertSkuFree(db, tenant.tenantId, sku, { table: "product", id: product.id });
       await db
         .update(products)
         .set({
+          ...(sku ? { sku } : {}),
           ...(input.name !== undefined ? { name: input.name } : {}),
           ...(input.cost !== undefined ? { costMinor: majorOrNull(input.cost) } : {}),
           ...(input.salePrice !== undefined ? { salePriceMinor: majorOrNull(input.salePrice) } : {}),
@@ -166,6 +174,17 @@ export class CatalogController {
         .where(eq(products.id, product.id));
     });
     return this.load(tenant, id);
+  }
+
+  @Delete("products/:id")
+  async removeProduct(@CurrentUser() actor: Actor, @Param("id") id: string) {
+    const tenant = this.writer(actor);
+    await this.database.asUser(tenant, async (db) => {
+      const product = await one(db, products, products.id, id, "No encontramos ese producto.");
+      const [removed] = await db.delete(products).where(eq(products.id, product.id)).returning({ id: products.id });
+      if (!removed) throw new AppError("forbidden", "No tienes permiso para eliminar ese producto.", 403);
+    });
+    return { ok: true };
   }
 
   @Get("filaments")
@@ -195,8 +214,9 @@ export class CatalogController {
     const tenant = this.writer(actor);
     const input = filamentSchema.parse(body);
     return withIdempotency(this.database, tenant.userId, idempotencyKey, { route: "filaments", input }, async () => {
-      const [created] = await this.database.asUser(tenant, (db) =>
-        db
+      const [created] = await this.database.asUser(tenant, async (db) => {
+        await assertSkuFree(db, tenant.tenantId, input.sku.toUpperCase());
+        return db
           .insert(filaments)
           .values({
             tenantId: tenant.tenantId,
@@ -209,8 +229,8 @@ export class CatalogController {
             salePriceMinor: input.salePrice ? Money.fromMajor(input.salePrice).minor : null,
             createdBy: tenant.userId,
           })
-          .returning(),
-      );
+          .returning();
+      });
       return mapFilament(created, tenant.role);
     });
   }
@@ -221,9 +241,12 @@ export class CatalogController {
     const input = filamentPatchSchema.parse(body);
     const updated = await this.database.asUser(tenant, async (db) => {
       const filament = await one(db, filaments, filaments.id, id, "No encontramos ese filamento.");
+      const sku = input.sku?.toUpperCase();
+      if (sku && sku !== filament.sku) await assertSkuFree(db, tenant.tenantId, sku, { table: "filament", id: filament.id });
       const [row] = await db
         .update(filaments)
         .set({
+          ...(sku ? { sku } : {}),
           ...(input.name !== undefined ? { name: input.name } : {}),
           ...(input.material !== undefined ? { material: input.material } : {}),
           ...(input.color !== undefined ? { color: input.color } : {}),
@@ -238,6 +261,17 @@ export class CatalogController {
       return row;
     });
     return mapFilament(updated, tenant.role);
+  }
+
+  @Delete("filaments/:id")
+  async removeFilament(@CurrentUser() actor: Actor, @Param("id") id: string) {
+    const tenant = this.writer(actor);
+    await this.database.asUser(tenant, async (db) => {
+      const filament = await one(db, filaments, filaments.id, id, "No encontramos ese filamento.");
+      const [removed] = await db.delete(filaments).where(eq(filaments.id, filament.id)).returning({ id: filaments.id });
+      if (!removed) throw new AppError("forbidden", "No tienes permiso para eliminar ese filamento.", 403);
+    });
+    return { ok: true };
   }
 
   @Get("services")
@@ -271,6 +305,7 @@ export class CatalogController {
           name: input.name,
           description: input.description || null,
           unit: input.unit,
+          costMinor: input.cost ? majorOrNull(input.cost) : null,
           salePriceMinor: Money.fromMajor(input.salePrice).minor,
           terms: input.terms ?? "",
           createdBy: tenant.userId,
@@ -292,6 +327,7 @@ export class CatalogController {
           ...(input.name !== undefined ? { name: input.name } : {}),
           ...(input.description !== undefined ? { description: input.description || null } : {}),
           ...(input.unit !== undefined ? { unit: input.unit } : {}),
+          ...(input.cost !== undefined ? { costMinor: majorOrNull(input.cost) } : {}),
           ...(input.salePrice !== undefined ? { salePriceMinor: Money.fromMajor(input.salePrice).minor } : {}),
           ...(input.terms !== undefined ? { terms: input.terms } : {}),
           ...(input.status !== undefined ? { status: input.status } : {}),
@@ -302,6 +338,17 @@ export class CatalogController {
       return row;
     });
     return mapService(updated, tenant.role);
+  }
+
+  @Delete("services/:id")
+  async removeService(@CurrentUser() actor: Actor, @Param("id") id: string) {
+    const tenant = assertRole(actor, ["owner", "admin", "sales"]);
+    await this.database.asUser(tenant, async (db) => {
+      const service = await one(db, serviceOfferings, serviceOfferings.id, id, "No encontramos ese servicio.");
+      const [removed] = await db.delete(serviceOfferings).where(eq(serviceOfferings.id, service.id)).returning({ id: serviceOfferings.id });
+      if (!removed) throw new AppError("forbidden", "No tienes permiso para eliminar ese servicio.", 403);
+    });
+    return { ok: true };
   }
 
   @Post("tax/preview")
@@ -350,6 +397,7 @@ interface ServiceRow {
   name: string;
   description: string | null;
   unit: string;
+  costMinor: bigint | number | string | null;
   salePriceMinor: bigint | number | string | null;
   terms: string;
   status: string;
@@ -363,6 +411,7 @@ function mapService(row: ServiceRow, role: TenantRole) {
     name: row.name,
     description: row.description,
     unit: row.unit,
+    cost: moneyOrNull(row.costMinor),
     salePrice: hidePrice ? null : moneyOrNull(row.salePriceMinor),
     terms: row.terms,
     status: row.status,
@@ -434,6 +483,35 @@ interface FilamentRow {
   costMinor: bigint | number | string | null;
   salePriceMinor: bigint | number | string | null;
   status: string;
+}
+
+const SKU_OWNER: Record<string, string> = {
+  component: "el insumo",
+  finished_good: "el producto terminado",
+  resale: "el producto revendido",
+};
+
+/** Productos, insumos y filamentos comparten un solo espacio de SKU porque todos pasan por el kardex. */
+async function assertSkuFree(db: Db, tenantId: string, sku: string, self?: { table: "product" | "filament"; id: string }) {
+  const productSelf = self?.table === "product" ? ne(products.id, self.id) : undefined;
+  const filamentSelf = self?.table === "filament" ? ne(filaments.id, self.id) : undefined;
+  const [product] = await db
+    .select({ name: products.name, productType: products.productType, status: products.status })
+    .from(products)
+    .where(and(eq(products.tenantId, tenantId), eq(products.sku, sku), productSelf))
+    .limit(1);
+  const [filament] = product
+    ? []
+    : await db
+        .select({ name: filaments.name, productType: sql<string>`'filament'`, status: filaments.status })
+        .from(filaments)
+        .where(and(eq(filaments.tenantId, tenantId), eq(filaments.sku, sku), filamentSelf))
+        .limit(1);
+  const owner = product ?? filament;
+  if (!owner) return;
+  const who = owner.productType === "filament" ? "el filamento" : SKU_OWNER[owner.productType] ?? "el artículo";
+  const inactive = owner.status === "inactive" ? " (inactivo)" : "";
+  throw new AppError("sku_taken", `Ese SKU ya lo usa ${who} «${owner.name}»${inactive}.`, 409);
 }
 
 function productValues(tenantId: string, createdBy: string, input: z.infer<typeof productSchema>) {

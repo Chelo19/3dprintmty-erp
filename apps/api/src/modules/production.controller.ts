@@ -1,6 +1,7 @@
 import { Body, Controller, Get, Param, Patch, Post, Query } from "@nestjs/common";
 import {
   assertOrderAction,
+  orderActions,
   extendCostMinor,
   formatQty,
   maxQty,
@@ -145,6 +146,26 @@ export class ProductionController {
         mapOrder(row.order, row),
       ),
     };
+  }
+
+  /** Pedidos confirmados con producto fabricable. Una impresión no entra aquí. */
+  @Get("production-orders/sales-demand")
+  async salesDemand(@CurrentUser() actor: Actor) {
+    const tenant = requireTenant(actor);
+    const data = await this.database.asUser(tenant, async (db) => {
+      const orders = await db
+        .select()
+        .from(salesOrders)
+        .where(inArray(salesOrders.status, ["confirmed", "in_production"]));
+      const demand = [];
+      for (const order of orders) {
+        const make = orderActions(await orderContext(db, tenant, order)).find((item) => item.action === "make");
+        if (!make?.allowed) continue;
+        demand.push({ id: order.id, folio: order.folio, customerName: order.customerName });
+      }
+      return demand;
+    });
+    return { data };
   }
 
   @Get("production-orders/:id")
@@ -618,6 +639,7 @@ async function reserveMaterials(db: Db, tenant: TenantActor, order: OrderRow) {
     .where(eq(productionOrderMaterials.productionOrderId, order.id));
   const shortages: Array<{ productId: string; sku: string; short: string }> = [];
   for (const material of materials) {
+    if (material.componentFilamentId) continue;
     const need = qtyFromDb(material.requiredQty) - qtyFromDb(material.consumedQty) - qtyFromDb(material.allocatedQty);
     if (need <= 0n) continue;
     const available = maxQty(0n, await availableAt(db, materialStock(material), order.locationId));
@@ -675,16 +697,29 @@ async function issueMaterial(
   const allocated = qtyFromDb(material.allocatedQty);
   const release = minQty(allocated, quantity);
   const value = extendCostMinor(quantity, new Decimal(String(material.unitCostMinor)));
-  await postStock(db, tenant, {
-    ...materialStock(material),
-    locationId: order.locationId,
-    kind: "issue",
-    delta: -quantity,
-    reason: `Consumo en ${order.folio}`,
-    releaseAllocated: release,
-    valueMinor: value,
-    reference: { type: "production_order", id: order.id },
-  });
+  if (material.componentFilamentId) {
+    // El filamento se ajusta al pesar el rollo, igual que en las impresiones de un pedido: solo cuenta en el costo.
+    if (release > 0n) {
+      await reserveStock(db, tenant, {
+        filamentId: material.componentFilamentId,
+        locationId: order.locationId,
+        quantity: -release,
+        reason: `El filamento de ${order.folio} se ajusta al pesar el rollo`,
+        reference: { type: "production_order", id: order.id },
+      });
+    }
+  } else {
+    await postStock(db, tenant, {
+      ...materialStock(material),
+      locationId: order.locationId,
+      kind: "issue",
+      delta: -quantity,
+      reason: `Consumo en ${order.folio}`,
+      releaseAllocated: release,
+      valueMinor: value,
+      reference: { type: "production_order", id: order.id },
+    });
+  }
   await db.insert(productionConsumptions).values({
     tenantId: tenant.tenantId,
     productionOrderId: order.id,
@@ -776,6 +811,7 @@ async function loadDetail(db: Db, id: string) {
     const required = qtyFromDb(material.requiredQty);
     const consumed = qtyFromDb(material.consumedQty);
     const allocated = qtyFromDb(material.allocatedQty);
+    const tracksStock = !material.componentFilamentId;
     const available = await availableAt(db, materialStock(material), order.locationId);
     const open = maxQty(0n, required - consumed);
     const named = material.componentFilamentId
@@ -792,7 +828,8 @@ async function loadDetail(db: Db, id: string) {
       allocated: formatQty(allocated),
       consumed: formatQty(consumed),
       available: formatQty(available),
-      shortage: formatQty(maxQty(0n, open - allocated - maxQty(0n, available))),
+      shortage: tracksStock ? formatQty(maxQty(0n, open - allocated - maxQty(0n, available))) : "0",
+      tracksStock,
       unitCostMinor: String(material.unitCostMinor),
     });
   }

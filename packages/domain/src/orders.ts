@@ -135,6 +135,8 @@ export interface OrderContext {
   amountDueMinor: bigint;
   /** Algún servicio del pedido sigue sin prestarse, aceptarse o condonarse. */
   servicesOpen: boolean;
+  /** Cada impresión y cada producto terminado ya está prestado o aceptado. */
+  articlesPrestados: boolean;
 }
 
 const SALES: readonly TenantRole[] = ["owner", "admin", "sales"];
@@ -174,7 +176,10 @@ export function orderActions(context: OrderContext): OrderActionState[] {
   const stateReason = `El pedido está ${STATE_LABEL[state]}.`;
 
   add("submit", SALES, [[state === "draft", stateReason]]);
-  add("confirm", SALES, [[state === "pending", state === "draft" ? "Primero pásalo a pendiente." : stateReason]]);
+  add("confirm", SALES, [
+    [state === "pending", state === "draft" ? "Primero pásalo a pendiente." : stateReason],
+    [context.articlesPrestados, "Marca como prestadas las impresiones y los productos terminados antes de confirmar."],
+  ]);
   add("edit", SALES, [
     [inState(["draft", "pending", "confirmed", "ready_to_ship", "on_hold"]), stateReason],
     [!context.openProduction, "Ya hay una orden de producción para este pedido."],

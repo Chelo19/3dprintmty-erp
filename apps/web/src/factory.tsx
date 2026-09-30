@@ -1,9 +1,11 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { useRef, useState, type ReactNode } from "react";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api, postJson } from "./api";
-import { money, useError } from "./operations";
+import { FilterBar, FilterSelect, NoMatches, StatusBadge, matchesStatus, matchesText, useFilters } from "./filters";
+import { BanIcon, CheckIcon, IconAction, PencilIcon, PlusIcon, QuoteButton, TrashIcon, ViewLink, money, useError } from "./operations";
 import { DetailSkeleton, TableSkeleton } from "./skeleton";
+import { Paged } from "./pager";
 
 const grid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 } as const;
 
@@ -17,29 +19,6 @@ const ORDER_STATUS: Record<string, string> = {
   closed: "Cerrada",
   on_hold: "En pausa",
   cancelled: "Cancelada",
-};
-
-const QC_STATUS: Record<string, string> = {
-  not_required: "—",
-  pending: "Pendiente",
-  passed: "Aprobada",
-  failed: "Rechazada",
-  waived: "Dispensada",
-};
-
-const OPERATION_STATUS: Record<string, string> = {
-  pending: "Pendiente",
-  running: "En curso",
-  complete: "Hecha",
-  skipped: "Omitida",
-};
-
-const CENTER_KIND: Record<string, string> = {
-  printer: "Impresora",
-  post_process: "Postproceso",
-  quality: "Calidad",
-  packing: "Empaque",
-  other: "Otro",
 };
 
 export function useProducts() {
@@ -56,280 +35,37 @@ export function useFilaments() {
   });
 }
 
-export function ManufacturingPage() {
-  const client = useQueryClient();
-  const { error, run } = useError();
-  const products = useProducts();
-  const filaments = useFilaments();
-  const centers = useQuery({ queryKey: ["work-centers"], queryFn: () => api<{ data: WorkCenter[] }>("/work-centers") });
-  const boms = useQuery({ queryKey: ["boms"], queryFn: () => api<{ data: BomSummary[] }>("/boms") });
-  const [productId, setProductId] = useState("");
-  const bom = useQuery({
-    queryKey: ["bom", productId],
-    queryFn: () => api<BomDetail>(`/boms/${productId}`),
-    enabled: Boolean(productId),
-  });
-  const routing = useQuery({
-    queryKey: ["routing", productId],
-    queryFn: () => api<RoutingDetail>(`/routings/${productId}`),
-    enabled: Boolean(productId),
-  });
-  const makeable = (products.data?.data ?? []).filter((product) => product.productType === "finished_good" || product.productType === "component");
-  const components = [
-    ...(filaments.data?.data ?? []).map((filament) => ({ ...filament, stockUom: filament.stockUom ?? "G" })),
-    ...(products.data?.data ?? []).filter((product) => product.productType !== "service" && product.productType !== "finished_good" && product.id !== productId),
-  ];
-  const refresh = async () => {
-    await client.invalidateQueries({ queryKey: ["boms"] });
-    await client.invalidateQueries({ queryKey: ["bom", productId] });
-    await client.invalidateQueries({ queryKey: ["routing", productId] });
-  };
-  return (
-    <section style={{ display: "grid", gap: 16 }}>
-      <h1>Manufactura</h1>
-      <p>Lista de materiales con merma, ruta por estación de trabajo y costo estándar por pieza.</p>
-      <h2>Estaciones de trabajo</h2>
-      {centers.isPending ? <TableSkeleton columns={5} /> : (
-      <table>
-        <thead><tr><th>Clave</th><th>Nombre</th><th>Tipo</th><th>Tarifa por hora</th><th>Horas por día</th></tr></thead>
-        <tbody>
-          {(centers.data?.data ?? []).map((center) => (
-            <tr key={center.id}>
-              <td>{center.code}</td>
-              <td>{center.name}</td>
-              <td>{CENTER_KIND[center.kind] ?? center.kind}</td>
-              <td>{money(center.hourlyRate)}</td>
-              <td>{center.capacityHours}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      )}
-      <h2>Productos con BOM</h2>
-      {boms.isPending ? <TableSkeleton columns={6} /> : (
-      <table>
-        <thead><tr><th>SKU</th><th>Producto</th><th>Versión</th><th>Componentes</th><th>Material por pieza</th><th></th></tr></thead>
-        <tbody>
-          {(boms.data?.data ?? []).map((row) => (
-            <tr key={row.bomId}>
-              <td>{row.sku}</td>
-              <td>{row.name}</td>
-              <td>v{row.version}</td>
-              <td>{row.lines}</td>
-              <td>{money(row.materialCost)}</td>
-              <td><Action label="Editar" onClick={() => setProductId(row.productId)} /></td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      )}
-      <div className="card" style={{ display: "grid", gap: 10 }}>
-        <label style={{ maxWidth: 360 }}>
-          Producto a fabricar
-          <select value={productId} onChange={(event) => setProductId(event.target.value)}>
-            <option value="">Elige un terminado o componente</option>
-            {makeable.map((product) => <option key={product.id} value={product.id}>{product.sku} · {product.name}</option>)}
-          </select>
-        </label>
-        {productId && bom.data ? (
-          <>
-            <p style={{ margin: 0 }}>
-              Material {money(bom.data.materialCost)} + mano de obra {money(bom.data.laborCost)} = <strong>{money(bom.data.unitCost)}</strong> por pieza
-              {bom.data.currentCost ? ` · costo en catálogo ${money(bom.data.currentCost)}` : ""}
-            </p>
-            <table>
-              <thead><tr><th>Componente</th><th>Cantidad</th><th>Merma</th><th>Requerido por pieza</th><th>Costo</th></tr></thead>
-              <tbody>
-                {bom.data.lines.map((line) => (
-                  <tr key={line.componentProductId}>
-                    <td>{line.sku} · {line.name}</td>
-                    <td>{line.quantity} {line.stockUom}</td>
-                    <td>{line.scrapPct}%</td>
-                    <td>{line.requiredPerUnit} {line.stockUom}</td>
-                    <td>{money(line.extendedCost)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            <form
-              style={grid}
-              onSubmit={(event) => {
-                event.preventDefault();
-                const form = event.currentTarget;
-                const data = new FormData(form);
-                const existing = bom.data.lines.map((line) => ({
-                  componentProductId: line.componentProductId,
-                  quantity: line.quantity,
-                  scrapPct: line.scrapPct,
-                }));
-                const added = {
-                  componentProductId: String(data.get("componentProductId")),
-                  quantity: String(data.get("quantity")),
-                  scrapPct: String(data.get("scrapPct") || "0"),
-                };
-                void run(async () => {
-                  await postJson("/boms", {
-                    productId,
-                    lines: [...existing.filter((line) => line.componentProductId !== added.componentProductId), added],
-                  });
-                  form.reset();
-                  await refresh();
-                });
-              }}
-            >
-              <label>
-                Componente
-                <select name="componentProductId" required>
-                  {components.map((product) => <option key={product.id} value={product.id}>{product.sku} · {product.name} ({product.stockUom})</option>)}
-                </select>
-              </label>
-              <label>Cantidad por pieza<input name="quantity" required placeholder="120" /></label>
-              <label>Merma %<input name="scrapPct" placeholder="5" /></label>
-              <button className="primary" type="submit">Agregar o reemplazar (nueva versión)</button>
-            </form>
-            <form
-              style={grid}
-              onSubmit={(event) => {
-                event.preventDefault();
-                const data = new FormData(event.currentTarget);
-                void run(async () => {
-                  await postJson(`/boms/${productId}/copy`, {
-                    targetProductId: data.get("targetProductId"),
-                    swap: data.get("fromComponentId") && data.get("toComponentId")
-                      ? { fromComponentId: data.get("fromComponentId"), toComponentId: data.get("toComponentId") }
-                      : undefined,
-                  });
-                  await refresh();
-                });
-              }}
-            >
-              <label>
-                Copiar a
-                <select name="targetProductId" required>
-                  {makeable.filter((product) => product.id !== productId).map((product) => <option key={product.id} value={product.id}>{product.sku}</option>)}
-                </select>
-              </label>
-              <label>
-                Cambiar
-                <select name="fromComponentId">
-                  <option value="">—</option>
-                  {bom.data.lines.map((line) => <option key={line.componentProductId} value={line.componentProductId}>{line.sku}</option>)}
-                </select>
-              </label>
-              <label>
-                Por
-                <select name="toComponentId">
-                  <option value="">—</option>
-                  {components.map((product) => <option key={product.id} value={product.id}>{product.sku}</option>)}
-                </select>
-              </label>
-              <button className="ghost" type="submit">Copiar BOM (variante de color)</button>
-            </form>
-            <button
-              className="ghost"
-              type="button"
-              style={{ justifySelf: "start" }}
-              onClick={() => void run(async () => {
-                await postJson(`/products/${productId}/cost-from-bom`, {});
-                await refresh();
-                await client.invalidateQueries({ queryKey: ["products"] });
-              })}
-            >
-              Usar este costo en el catálogo
-            </button>
-            <h3>Ruta</h3>
-            <table>
-              <thead><tr><th>Sec.</th><th>Operación</th><th>Estación</th><th>Preparación</th><th>Min. por pieza</th></tr></thead>
-              <tbody>
-                {(routing.data?.operations ?? []).map((operation) => (
-                  <tr key={operation.sequence}>
-                    <td>{operation.sequence}</td>
-                    <td>{operation.name}</td>
-                    <td>{operation.workCenterName}</td>
-                    <td>{operation.setupMinutes} min</td>
-                    <td>{operation.runMinutes} min</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            <form
-              style={grid}
-              onSubmit={(event) => {
-                event.preventDefault();
-                const form = event.currentTarget;
-                const data = new FormData(form);
-                const current = (routing.data?.operations ?? []).map((operation) => ({
-                  sequence: operation.sequence,
-                  code: operation.code,
-                  name: operation.name,
-                  workCenterId: operation.workCenterId,
-                  setupMinutes: operation.setupMinutes,
-                  runMinutes: operation.runMinutes,
-                }));
-                const sequence = (current.at(-1)?.sequence ?? 0) + 10;
-                void run(async () => {
-                  await postJson("/routings", {
-                    productId,
-                    operations: [
-                      ...current,
-                      {
-                        sequence,
-                        code: String(data.get("name")).slice(0, 6).toUpperCase().replace(/\s+/g, ""),
-                        name: data.get("name"),
-                        workCenterId: data.get("workCenterId"),
-                        setupMinutes: String(data.get("setupMinutes") || "0"),
-                        runMinutes: data.get("runMinutes"),
-                      },
-                    ],
-                  });
-                  form.reset();
-                  await refresh();
-                });
-              }}
-            >
-              <label>Operación<input name="name" required placeholder="Impresión" /></label>
-              <label>
-                Estación
-                <select name="workCenterId" required>
-                  {(centers.data?.data ?? []).map((center) => <option key={center.id} value={center.id}>{center.name}</option>)}
-                </select>
-              </label>
-              <label>Preparación (min)<input name="setupMinutes" placeholder="10" /></label>
-              <label>Min. por pieza<input name="runMinutes" required placeholder="45" /></label>
-              <button className="primary" type="submit">Agregar operación</button>
-            </form>
-          </>
-        ) : null}
-        {error ? <p className="error">{error}</p> : null}
-      </div>
-    </section>
-  );
-}
-
 export function ProductionPage() {
   const client = useQueryClient();
-  const { error, run } = useError();
+  const { error, pendingKey, run } = useError();
   const [status, setStatus] = useState("draft,released,scheduled,in_progress,qc_hold,on_hold");
   const orders = useQuery({
     queryKey: ["production-orders", status],
     queryFn: () => api<{ data: ProductionOrder[] }>(`/production-orders${status ? `?status=${status}` : ""}`),
   });
   const products = useProducts();
-  const sales = useQuery({
-    queryKey: ["orders"],
-    queryFn: () => api<{ data: Array<{ id: string; folio: string; customerName: string; status: string }> }>("/orders"),
+  const recipes = useRecipes();
+  const demand = useQuery({
+    queryKey: ["production-demand"],
+    queryFn: () => api<{ data: Array<{ id: string; folio: string; customerName: string }> }>("/production-orders/sales-demand"),
   });
-  const makeable = (products.data?.data ?? []).filter((product) => product.productType === "finished_good" || product.productType === "component");
-  const pending = (sales.data?.data ?? []).filter((order) => order.status === "confirmed" || order.status === "in_production");
+  const withRecipe = new Set((recipes.data?.data ?? []).filter((row) => row.lines > 0).map((row) => row.productId));
+  const makeable = (products.data?.data ?? []).filter((product) =>
+    product.productType === "finished_good" && product.status !== "inactive" && withRecipe.has(product.id));
+  const pending = demand.data?.data ?? [];
   const refresh = async () => {
     await client.invalidateQueries({ queryKey: ["production-orders"] });
     await client.invalidateQueries({ queryKey: ["orders"] });
+    await client.invalidateQueries({ queryKey: ["production-demand"] });
   };
   return (
     <section style={{ display: "grid", gap: 16 }}>
       <h1>Producción</h1>
-      <p>Una orden aparta material al liberarse, lo consume del inventario y recibe el terminado al pasar calidad.</p>
+      <p>Fabrica un producto terminado con receta y márcalo terminado. Los insumos no se fabrican: se obtienen comprándolos. Las impresiones de un pedido no pasan por aquí.</p>
       <div className="card" style={{ display: "grid", gap: 10 }}>
+        {products.isPending || recipes.isPending ? null : !makeable.length ? (
+          <p style={{ margin: 0 }}>Ningún producto terminado activo tiene receta. <Link to="/app/recetas">Dale una receta</Link> para poder fabricarlo.</p>
+        ) : (
         <form
           style={grid}
           onSubmit={(event) => {
@@ -345,7 +81,7 @@ export function ProductionPage() {
               });
               form.reset();
               await refresh();
-            });
+            }, "create");
           }}
         >
           <label>
@@ -355,34 +91,39 @@ export function ProductionPage() {
             </select>
           </label>
           <label>Piezas<input name="quantity" required placeholder="10" /></label>
-          <label>Fecha compromiso<input name="dueDate" type="date" /></label>
-          <label>
-            Prioridad
-            <select name="priority" defaultValue="3">
-              {[1, 2, 3, 4, 5].map((value) => <option key={value} value={value}>{value}</option>)}
-            </select>
-          </label>
-          <button className="primary" type="submit">Nueva orden para stock</button>
+          <button className="primary new-link form-inline-submit" type="submit" disabled={pendingKey !== null} aria-busy={pendingKey === "create"}>
+            <PlusIcon />
+            Nueva orden
+          </button>
         </form>
-        <form
-          style={grid}
-          onSubmit={(event) => {
-            event.preventDefault();
-            const data = new FormData(event.currentTarget);
-            void run(async () => {
-              await postJson(`/production-orders/from-sales-order/${data.get("salesOrderId")}`, {});
-              await refresh();
-            });
-          }}
-        >
-          <label>
-            Pedido confirmado
-            <select name="salesOrderId" required>
-              {pending.map((order) => <option key={order.id} value={order.id}>{order.folio} · {order.customerName}</option>)}
-            </select>
-          </label>
-          <button className="ghost" type="submit">Generar órdenes del pedido</button>
-        </form>
+        )}
+        {makeable.length ? (
+          <p className="costing-hint">Solo aparecen productos terminados activos con receta. ¿Falta alguno? Revisa sus <Link to="/app/recetas">recetas</Link>.</p>
+        ) : null}
+        {demand.isPending ? null : pending.length ? (
+          <form
+            style={grid}
+            onSubmit={(event) => {
+              event.preventDefault();
+              const data = new FormData(event.currentTarget);
+              void run(async () => {
+                await postJson(`/production-orders/from-sales-order/${data.get("salesOrderId")}`, {});
+                await refresh();
+                await client.invalidateQueries({ queryKey: ["production-demand"] });
+              }, "demand");
+            }}
+          >
+            <label>
+              Pedido con producto por fabricar
+              <select name="salesOrderId" required>
+                {pending.map((order) => <option key={order.id} value={order.id}>{order.folio} · {order.customerName}</option>)}
+              </select>
+            </label>
+            <button className="ghost" type="submit" disabled={pendingKey !== null} aria-busy={pendingKey === "demand"}>Generar órdenes del pedido</button>
+          </form>
+        ) : (
+          <p style={{ margin: 0 }}>Ningún pedido confirmado tiene producto por fabricar.</p>
+        )}
         {error ? <p className="error">{error}</p> : null}
       </div>
       <label style={{ maxWidth: 260 }}>
@@ -393,353 +134,470 @@ export function ProductionPage() {
           <option value="">Todas</option>
         </select>
       </label>
-      {orders.isPending ? <TableSkeleton columns={7} /> : (
+      {orders.isPending ? <TableSkeleton columns={5} /> : (
+      <Paged rows={orders.data?.data ?? []}>
+      {(pageOrders) => (
       <table>
-        <thead><tr><th>Folio</th><th>Producto</th><th>Piezas</th><th>Estado</th><th>Calidad</th><th>Compromiso</th><th>Costo est.</th></tr></thead>
+        <thead><tr><th>Folio</th><th>Producto</th><th>Piezas</th><th>Estado</th><th></th></tr></thead>
         <tbody>
-          {(orders.data?.data ?? []).map((order) => (
-            <tr key={order.id}>
-              <td><Link to={`/app/produccion/${order.id}`}>{order.folio}</Link></td>
-              <td>{order.sku} · {order.name}</td>
-              <td>{order.quantityCompleted}/{order.quantityOrdered}</td>
-              <td>{ORDER_STATUS[order.status] ?? order.status}</td>
-              <td>{QC_STATUS[order.qcStatus] ?? order.qcStatus}</td>
-              <td>{order.dueDate ?? "—"}</td>
-              <td>{money(order.estimatedCost)}</td>
-            </tr>
-          ))}
+          {pageOrders.map((order) => {
+            const step = nextStep(order.status);
+            return (
+              <tr key={order.id}>
+                <td>{order.folio}</td>
+                <td>{order.sku} · {order.name}</td>
+                <td>{order.quantityCompleted}/{order.quantityOrdered}</td>
+                <td><ProductionStatusBadge status={order.status} /></td>
+                <td>
+                  <div className="record-actions">
+                    <ViewLink to={`/app/produccion/${order.id}`} />
+                    {step ? (
+                      <IconAction label={step.label} tone={step.tone} pending={pendingKey === order.id} disabled={pendingKey !== null} onClick={() => void run(() => finishProduction(order.id, order.status, order.quantityOrdered).then(refresh), order.id)}>
+                        {step.icon}
+                      </IconAction>
+                    ) : null}
+                    {CANCELLABLE.has(order.status) ? (
+                      <IconAction label="Cancelar orden" tone="delete" pending={pendingKey === `cancel-${order.id}`} disabled={pendingKey !== null} onClick={() => {
+                        const reason = askCancelReason(order.folio);
+                        if (reason) void run(() => cancelProduction(order.id, reason).then(refresh), `cancel-${order.id}`);
+                      }}>
+                        <BanIcon />
+                      </IconAction>
+                    ) : null}
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
       )}
+      </Paged>
+      )}
     </section>
   );
+}
+
+export function useRecipes() {
+  return useQuery({
+    queryKey: ["boms"],
+    queryFn: () => api<{ data: RecipeSummary[] }>("/boms"),
+  });
+}
+
+export function RecipesPage() {
+  const products = useProducts();
+  const recipes = useRecipes();
+  const [params, setParams] = useSearchParams();
+  const recipeId = params.get("producto") ?? "";
+  const editorRef = useRef<HTMLDivElement>(null);
+  const { values, set, reset, dirty } = useFilters({ q: "", estado: "active", receta: "" });
+  const summaries = new Map((recipes.data?.data ?? []).map((row) => [row.productId, row]));
+  const finished = (products.data?.data ?? []).filter((product) => product.productType === "finished_good");
+  const bySearch = finished.filter((product) => {
+    const lines = summaries.get(product.id)?.lines ?? 0;
+    return matchesText(values.q, product.sku, product.name)
+      && (!values.receta || (values.receta === "con" ? lines > 0 : lines === 0));
+  });
+  const rows = bySearch.filter((product) => matchesStatus(product.status, values.estado));
+  const selected = finished.find((product) => product.id === recipeId);
+  const choose = (id: string) => {
+    setParams((current) => {
+      const next = new URLSearchParams(current);
+      if (id) next.set("producto", id);
+      else next.delete("producto");
+      return next;
+    }, { replace: true });
+    if (id) requestAnimationFrame(() => editorRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
+  };
+  return (
+    <section style={{ display: "grid", gap: 16 }}>
+      <h1>Recetas</h1>
+      <p>La receta dice qué material lleva cada pieza de un producto terminado. Sin receta, el producto no se puede fabricar. Los productos e insumos se apartan y se descuentan del inventario; el filamento solo cuenta en el costo y se ajusta en Inventario ▸ Filamentos.</p>
+      {products.isPending || recipes.isPending ? <TableSkeleton columns={6} /> : !finished.length ? (
+        <p>Todavía no hay productos terminados. <Link to="/app/productos/nuevo">Da de alta uno</Link> para armar su receta.</p>
+      ) : (
+        <>
+        <FilterBar
+          search={values.q}
+          onSearch={(value) => set("q", value)}
+          placeholder="SKU o nombre"
+          status={values.estado}
+          onStatus={(value) => set("estado", value)}
+          hiddenInactive={values.estado === "active" ? bySearch.length - rows.length : 0}
+          dirty={dirty}
+          onClear={reset}
+        >
+          <FilterSelect
+            label="Receta"
+            value={values.receta}
+            onChange={(value) => set("receta", value)}
+            options={[{ value: "con", label: "Con receta" }, { value: "sin", label: "Sin receta" }]}
+          />
+        </FilterBar>
+        {!rows.length ? <NoMatches onClear={reset} /> : (
+        <Paged rows={rows}>
+        {(pageRows) => (
+        <table>
+          <thead><tr><th>SKU</th><th>Producto</th><th>Componentes</th><th>Costo de material por pieza</th><th>Estado</th><th></th></tr></thead>
+          <tbody>
+            {pageRows.map((product) => {
+              const summary = summaries.get(product.id);
+              const lines = summary?.lines ?? 0;
+              return (
+                <tr key={product.id} className={product.id === recipeId ? "row-selected" : undefined}>
+                  <td>{product.sku}</td>
+                  <td>{product.name}</td>
+                  <td>{lines ? lines : <span className="res res-badge cat-inactive">Sin receta</span>}</td>
+                  <td>{lines ? money(summary?.materialCost) : "—"}</td>
+                  <td><StatusBadge status={product.status} /></td>
+                  <td>
+                    <div className="record-actions">
+                      <IconAction label={lines ? "Editar receta" : "Armar receta"} tone="edit" onClick={() => choose(product.id)}>
+                        <PencilIcon />
+                      </IconAction>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        )}
+        </Paged>
+        )}
+        </>
+      )}
+      <div ref={editorRef}>
+        {selected ? <RecipeEditor key={selected.id} product={selected} onClose={() => choose("")} /> : null}
+      </div>
+    </section>
+  );
+}
+
+function RecipeEditor({ product, onClose }: { product: ProductOption; onClose: () => void }) {
+  const client = useQueryClient();
+  const products = useProducts();
+  const filaments = useFilaments();
+  const recipeId = product.id;
+  const bom = useQuery({
+    queryKey: ["bom", recipeId],
+    queryFn: () => api<BomDetail>(`/boms/${recipeId}`),
+  });
+  const components = [
+    ...(filaments.data?.data ?? []).map((filament) => ({ ...filament, stockUom: filament.stockUom ?? "G" })),
+    ...(products.data?.data ?? []).filter((item) => item.productType !== "service" && item.productType !== "finished_good" && item.id !== recipeId),
+  ];
+  const recipe = useError();
+  const recipeError = recipe.error;
+  const recipePending = recipe.pendingKey;
+  const recipeLines = bom.data?.lines ?? [];
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editQty, setEditQty] = useState("");
+  const saveRecipe = (lines: RecipeInput[], key: string) =>
+    recipe.run(async () => {
+      await postJson("/boms", { productId: recipeId, lines });
+      setEditingId(null);
+      await client.invalidateQueries({ queryKey: ["bom", recipeId] });
+      await client.invalidateQueries({ queryKey: ["boms"] });
+    }, key);
+  const saveQuantity = (componentId: string) => {
+    void saveRecipe(
+      recipeLines.map((line) => (line.componentProductId === componentId ? { ...recipeInput(line), quantity: editQty.trim() } : recipeInput(line))),
+      componentId,
+    );
+  };
+  return (
+      <div className="card" style={{ display: "grid", gap: 10 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <h2 style={{ margin: 0, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            Receta de {product.sku} · {product.name}
+            {product.status === "inactive" ? <StatusBadge status={product.status} /> : null}
+          </h2>
+          <button className="ghost" type="button" onClick={onClose}>Cerrar</button>
+        </div>
+        {bom.isPending ? <TableSkeleton columns={4} /> : bom.data ? (
+          <>
+            {recipeLines.length === 0 ? <p style={{ margin: 0 }}>Este producto todavía no tiene receta. Agrega su primer componente.</p> : (
+            <Paged rows={recipeLines}>
+            {(pageLines) => (
+            <table>
+              <thead><tr><th>Componente</th><th>Cantidad por pieza</th><th>Costo por pieza</th><th></th></tr></thead>
+              <tbody>
+                {pageLines.map((line) => {
+                  const editing = editingId === line.componentProductId;
+                  const only = recipeLines.length === 1;
+                  return (
+                    <tr key={line.componentProductId}>
+                      <td>{line.sku} · {line.name}</td>
+                      <td>
+                        {editing ? (
+                          <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                            <input
+                              aria-label={`Cantidad de ${line.name}`}
+                              inputMode="decimal"
+                              style={{ width: 100 }}
+                              value={editQty}
+                              autoFocus
+                              onChange={(event) => setEditQty(event.target.value)}
+                              onKeyDown={(event) => {
+                                if (event.key === "Enter") saveQuantity(line.componentProductId);
+                                if (event.key === "Escape") setEditingId(null);
+                              }}
+                            />
+                            {line.stockUom}
+                          </span>
+                        ) : `${line.quantity} ${line.stockUom}`}
+                      </td>
+                      <td>{money(line.extendedCost)}</td>
+                      <td>
+                        <div className="record-actions">
+                          {editing ? (
+                            <>
+                              <IconAction label="Guardar cantidad" tone="accept" pending={recipePending === line.componentProductId} disabled={recipePending !== null} onClick={() => saveQuantity(line.componentProductId)}>
+                                <CheckIcon />
+                              </IconAction>
+                              <IconAction label="Descartar cambio" tone="neutral" disabled={recipePending !== null} onClick={() => setEditingId(null)}>
+                                <XIcon />
+                              </IconAction>
+                            </>
+                          ) : (
+                            <>
+                              <IconAction label="Editar cantidad" tone="edit" disabled={recipePending !== null} onClick={() => { setEditingId(line.componentProductId); setEditQty(line.quantity); }}>
+                                <PencilIcon />
+                              </IconAction>
+                              <IconAction
+                                label={only ? "La receta necesita al menos un componente" : "Quitar de la receta"}
+                                tone="delete"
+                                pending={recipePending === `remove-${line.componentProductId}`}
+                                disabled={only || recipePending !== null}
+                                onClick={() => {
+                                  if (!window.confirm(`¿Quitar ${line.name} de la receta?`)) return;
+                                  void saveRecipe(recipeLines.filter((entry) => entry.componentProductId !== line.componentProductId).map(recipeInput), `remove-${line.componentProductId}`);
+                                }}
+                              >
+                                <TrashIcon />
+                              </IconAction>
+                            </>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+                <tr className="costing-subtotal">
+                  <td colSpan={2}>Costo de material por pieza</td>
+                  <td>{money(bom.data.materialCost)}</td>
+                  <td></td>
+                </tr>
+              </tbody>
+            </table>
+            )}
+            </Paged>
+            )}
+            <form
+              style={grid}
+              onSubmit={(event) => {
+                event.preventDefault();
+                const form = event.currentTarget;
+                const data = new FormData(form);
+                const added = {
+                  componentProductId: String(data.get("componentProductId")),
+                  quantity: String(data.get("quantity")),
+                  scrapPct: "0",
+                };
+                const kept = recipeLines.filter((line) => line.componentProductId !== added.componentProductId).map(recipeInput);
+                void saveRecipe([...kept, added], "add").then(() => form.reset());
+              }}
+            >
+              <label>
+                Componente
+                <select name="componentProductId" required>
+                  {components.map((product) => <option key={product.id} value={product.id}>{product.sku} · {product.name}</option>)}
+                </select>
+              </label>
+              <label>Cantidad por pieza<input name="quantity" required placeholder="120" /></label>
+              <button className="primary new-link form-inline-submit" type="submit" disabled={recipePending !== null} aria-busy={recipePending === "add"}>
+                <PlusIcon />
+                Agregar a la receta
+              </button>
+            </form>
+            <p className="costing-hint" style={{ margin: 0 }}>Si agregas un componente que ya está en la receta, se reemplaza su cantidad.</p>
+            {recipeError ? <p className="error">{recipeError}</p> : null}
+          </>
+        ) : <p className="error">No se pudo cargar la receta.</p>}
+      </div>
+  );
+}
+
+const PRODUCTION_HINT: Record<string, string> = {
+  draft: "Borrador. Al terminarla se libera, se consume el material de la receta y las piezas entran al inventario.",
+  released: "Cuando las piezas estén listas, termínala: se consume el material y las piezas entran al inventario.",
+  scheduled: "Cuando las piezas estén listas, termínala: se consume el material y las piezas entran al inventario.",
+  in_progress: "Cuando las piezas estén listas, termínala: se consume el material y las piezas entran al inventario.",
+  on_hold: "En pausa. Al terminarla se reanuda, se consume el material y las piezas entran al inventario.",
+  qc_hold: "Las piezas esperan revisión de calidad. Apruébalas para cerrar la orden.",
+  completed: "Terminada. Ciérrala para fijar su costo real.",
+};
+
+const OPEN_STATES = ["draft", "released", "scheduled", "in_progress", "on_hold", "qc_hold", "completed"];
+const CANCELLABLE = new Set(["draft", "released", "scheduled", "in_progress", "on_hold", "qc_hold"]);
+
+function nextStep(status: string): { label: string; tone: string; icon: ReactNode } | null {
+  if (status === "qc_hold") return { label: "Aprobar calidad", tone: "accept", icon: <CheckIcon /> };
+  if (status === "completed") return { label: "Cerrar orden", tone: "convert", icon: <LockIcon /> };
+  if (OPEN_STATES.includes(status)) return { label: "Terminar", tone: "accept", icon: <CheckIcon /> };
+  return null;
+}
+
+function ProductionStatusBadge({ status }: { status: string }) {
+  return <span className={`res res-badge prod-${status}`}>{ORDER_STATUS[status] ?? status}</span>;
+}
+
+function askCancelReason(folio: string): string | null {
+  const reason = window.prompt(`¿Por qué se cancela ${folio}? Se libera el material apartado.`);
+  return reason?.trim() ? reason.trim() : null;
+}
+
+async function cancelProduction(id: string, reason: string) {
+  await postJson(`/production-orders/${id}/transition`, { to: "cancelled", reason });
+}
+
+interface RecipeInput {
+  componentProductId: string;
+  quantity: string;
+  scrapPct: string;
+}
+
+function recipeInput(line: BomDetail["lines"][number]): RecipeInput {
+  return { componentProductId: line.componentProductId, quantity: line.quantity, scrapPct: line.scrapPct };
+}
+
+function XIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+      <path d="M18 6 6 18" />
+      <path d="m6 6 12 12" />
+    </svg>
+  );
+}
+
+function LockIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+      <rect x="4" y="11" width="16" height="10" rx="2" />
+      <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+    </svg>
+  );
+}
+
+async function finishProduction(id: string, status: string, quantity: string) {
+  if (status === "draft") await postJson(`/production-orders/${id}/release`, {});
+  if (status === "on_hold") await postJson(`/production-orders/${id}/transition`, { to: "in_progress" });
+  if (!["qc_hold", "completed", "closed"].includes(status)) {
+    await postJson(`/production-orders/${id}/complete`, { quantityGood: quantity, quantityScrapped: "0" });
+  }
+  const detail = await api<ProductionDetail>(`/production-orders/${id}`);
+  if (detail.status === "qc_hold") {
+    await postJson(`/production-orders/${id}/inspections`, { result: "pass", qtyPassed: detail.quantityCompleted, qtyFailed: "0" });
+  }
+  const after = await api<ProductionDetail>(`/production-orders/${id}`);
+  if (after.status === "completed") await postJson(`/production-orders/${id}/close`, {});
 }
 
 export function ProductionDetailPage() {
   const { id } = useParams();
   const client = useQueryClient();
-  const { error, run } = useError();
+  const { error, pendingKey, run } = useError();
   const order = useQuery({ queryKey: ["production-order", id], queryFn: () => api<ProductionDetail>(`/production-orders/${id}`) });
-  const defects = useQuery({ queryKey: ["defect-types"], queryFn: () => api<{ data: Array<{ id: string; name: string }> }>("/quality/defect-types") });
-  const [shortages, setShortages] = useState<Array<{ sku: string; short: string }>>([]);
   if (order.isPending) return <DetailSkeleton />;
   if (!order.data) return <p className="error">No se pudo cargar la orden.</p>;
   const data = order.data;
+  const step = nextStep(data.status);
   const refresh = async () => {
     await client.invalidateQueries({ queryKey: ["production-order", id] });
     await client.invalidateQueries({ queryKey: ["production-orders"] });
-    await client.invalidateQueries({ queryKey: ["inventory"] });
+    await client.invalidateQueries({ queryKey: ["orders"] });
   };
-  const act = (path: string, body: unknown = {}) =>
-    run(async () => {
-      const result = await postJson<ProductionDetail & { shortages?: Array<{ sku: string; short: string }> }>(`/production-orders/${id}${path}`, body);
-      setShortages(result.shortages ?? []);
-      await refresh();
-    });
-  const running = ["released", "scheduled", "in_progress"].includes(data.status);
   return (
     <section style={{ display: "grid", gap: 16 }}>
       <header>
         <Link to="/app/produccion">← Producción</Link>
-        <h1>{data.folio} · {data.sku} {data.name}</h1>
+        <h1 style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          {data.folio} · {data.sku} {data.name}
+          <ProductionStatusBadge status={data.status} />
+        </h1>
         <p>
-          {ORDER_STATUS[data.status] ?? data.status} · {data.quantityCompleted} de {data.quantityOrdered} piezas
-          {data.quantityScrapped !== "0" ? ` · ${data.quantityScrapped} de merma` : ""}
-          {data.salesOrderFolio ? ` · pedido ${data.salesOrderFolio}` : ""} · costo estimado {money(data.estimatedCost)}
-          {data.actualCost ? ` · real ${money(data.actualCost)}` : ""}
+          {data.quantityCompleted} de {data.quantityOrdered} piezas
+          {data.salesOrderFolio ? ` · pedido ${data.salesOrderFolio}` : ""}
         </p>
       </header>
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-        {data.status === "draft" ? <button className="primary" type="button" onClick={() => void act("/release")}>Liberar y apartar material</button> : null}
-        {data.status === "released" ? <Action label="Programar" onClick={() => void act("/transition", { to: "scheduled" })} /> : null}
-        {running ? <Action label="Pausar" onClick={() => void act("/transition", { to: "on_hold" })} /> : null}
-        {data.status === "on_hold" ? <Action label="Reanudar" onClick={() => void act("/transition", { to: "in_progress" })} /> : null}
-        {data.status === "completed" ? <button className="primary" type="button" onClick={() => void act("/close")}>Cerrar orden</button> : null}
-        {!["completed", "closed", "cancelled"].includes(data.status) ? (
-          <Action
-            label="Cancelar"
-            onClick={() => {
-              const reason = window.prompt("¿Por qué se cancela?");
-              if (reason) void act("/transition", { to: "cancelled", reason });
-            }}
-          />
-        ) : null}
-      </div>
-      {shortages.length ? (
-        <p className="banner">Faltó material para apartar: {shortages.map((item) => `${item.sku} ${item.short}`).join(", ")}.</p>
+      {step || CANCELLABLE.has(data.status) ? (
+        <div className="card quote-actions">
+          <div className="quote-actions-group">
+            <span className="quote-actions-label">Siguiente paso</span>
+            <p className="quote-actions-hint">{PRODUCTION_HINT[data.status] ?? ""}</p>
+            <div className="quote-actions-row">
+              {step ? (
+                <QuoteButton
+                  label={step.label === "Terminar" ? "Terminar la orden" : step.label}
+                  tone={step.tone}
+                  icon={step.icon}
+                  pending={pendingKey === "finish"}
+                  disabled={pendingKey !== null}
+                  onClick={() => void run(async () => {
+                    await finishProduction(data.id, data.status, data.quantityOrdered);
+                    await refresh();
+                  }, "finish")}
+                />
+              ) : null}
+              {CANCELLABLE.has(data.status) ? (
+                <QuoteButton
+                  label="Cancelar orden"
+                  tone="danger"
+                  icon={<BanIcon />}
+                  pending={pendingKey === "cancel"}
+                  disabled={pendingKey !== null}
+                  onClick={() => {
+                    const reason = askCancelReason(data.folio);
+                    if (reason) void run(() => cancelProduction(data.id, reason).then(refresh), "cancel");
+                  }}
+                />
+              ) : null}
+            </div>
+          </div>
+        </div>
       ) : null}
       {error ? <p className="error">{error}</p> : null}
       <h2>Material</h2>
+      <Paged rows={data.materials}>
+      {(materials) => (
       <table>
-        <thead><tr><th>Componente</th><th>Requerido</th><th>Apartado</th><th>Consumido</th><th>Disponible</th><th>Falta</th></tr></thead>
+        <thead><tr><th>Componente</th><th>Requerido</th><th>Consumido</th><th>Inventario</th></tr></thead>
         <tbody>
-          {data.materials.map((material) => (
+          {materials.map((material) => (
             <tr key={material.id}>
               <td>{material.sku} · {material.name}</td>
               <td>{material.required} {material.stockUom}</td>
-              <td>{material.allocated}</td>
               <td>{material.consumed}</td>
-              <td>{material.available}</td>
-              <td>{material.shortage !== "0" ? material.shortage : "—"}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      {running ? (
-        <form
-          className="card"
-          style={grid}
-          onSubmit={(event) => {
-            event.preventDefault();
-            const form = event.currentTarget;
-            const values = new FormData(form);
-            void act("/consume", {
-              materialId: values.get("materialId"),
-              quantity: values.get("quantity"),
-            }).then(() => form.reset());
-          }}
-        >
-          <label>
-            Material
-            <select name="materialId" required>
-              {data.materials.map((material) => <option key={material.id} value={material.id}>{material.sku}</option>)}
-            </select>
-          </label>
-          <label>Cantidad<input name="quantity" required placeholder="120" /></label>
-          <button className="primary" type="submit">Registrar consumo</button>
-        </form>
-      ) : null}
-      <h2>Operaciones</h2>
-      <table>
-        <thead><tr><th>Sec.</th><th>Operación</th><th>Estación</th><th>Plan (min)</th><th>Real (min)</th><th>Estado</th><th></th></tr></thead>
-        <tbody>
-          {data.operations.map((operation) => (
-            <tr key={operation.id}>
-              <td>{operation.sequence}</td>
-              <td>{operation.name}</td>
-              <td>{operation.workCenterName}</td>
-              <td>{operation.plannedMinutes}</td>
-              <td>{operation.actualMinutes ?? "—"}</td>
-              <td>{OPERATION_STATUS[operation.status] ?? operation.status}</td>
-              <td style={{ display: "flex", gap: 8 }}>
-                {running && operation.status === "pending" ? <Action label="Iniciar" onClick={() => void act(`/operations/${operation.id}`, { status: "running" })} /> : null}
-                {running && operation.status !== "complete" && operation.status !== "skipped" ? (
-                  <Action
-                    label="Terminar"
-                    onClick={() => {
-                      const minutes = window.prompt("Minutos reales", operation.plannedMinutes);
-                      if (minutes) void act(`/operations/${operation.id}`, { status: "complete", actualMinutes: minutes });
-                    }}
-                  />
-                ) : null}
+              <td>
+                {!material.tracksStock ? <span className="costing-hint">Se ajusta en el inventario</span>
+                  : Number(material.consumed) >= Number(material.required) ? <span className="costing-hint">Descontado</span>
+                  : Number(material.shortage) > 0 ? <span className="res res-badge prod-cancelled">Faltan {material.shortage}</span>
+                  : <span className="res res-badge prod-completed">Disponible</span>}
               </td>
             </tr>
           ))}
         </tbody>
       </table>
-      {running ? (
-        <form
-          className="card"
-          style={grid}
-          onSubmit={(event) => {
-            event.preventDefault();
-            const values = new FormData(event.currentTarget);
-            void act("/complete", {
-              quantityGood: values.get("quantityGood"),
-              quantityScrapped: String(values.get("quantityScrapped") || "0"),
-              scrapReason: String(values.get("scrapReason") || "") || undefined,
-              shortReason: String(values.get("shortReason") || "") || undefined,
-            });
-          }}
-        >
-          <label>Piezas buenas<input name="quantityGood" required defaultValue={data.quantityOrdered} /></label>
-          <label>Merma<input name="quantityScrapped" placeholder="0" /></label>
-          <label>Motivo de merma<input name="scrapReason" /></label>
-          <label>Si salieron menos, ¿por qué?<input name="shortReason" /></label>
-          <button className="primary" type="submit">Terminar orden</button>
-          <p style={{ margin: 0, gridColumn: "1 / -1" }}>Lo que falte por consumir según el BOM se descuenta automáticamente (backflush).</p>
-        </form>
-      ) : null}
-      {data.status === "qc_hold" ? (
-        <form
-          className="card"
-          style={grid}
-          onSubmit={(event) => {
-            event.preventDefault();
-            const values = new FormData(event.currentTarget);
-            const failed = String(values.get("qtyFailed") || "0");
-            void act("/inspections", {
-              result: failed !== "0" ? "fail" : "pass",
-              qtyPassed: values.get("qtyPassed"),
-              qtyFailed: failed,
-              defectTypeId: String(values.get("defectTypeId") || "") || undefined,
-              disposition: String(values.get("disposition") || "") || undefined,
-              notes: String(values.get("notes") || "") || undefined,
-            });
-          }}
-        >
-          <strong style={{ gridColumn: "1 / -1" }}>Inspección de calidad ({data.quantityCompleted} piezas)</strong>
-          <label>Aprobadas<input name="qtyPassed" required defaultValue={data.quantityCompleted} /></label>
-          <label>Rechazadas<input name="qtyFailed" placeholder="0" /></label>
-          <label>
-            Defecto
-            <select name="defectTypeId">
-              <option value="">—</option>
-              {(defects.data?.data ?? []).map((defect) => <option key={defect.id} value={defect.id}>{defect.name}</option>)}
-            </select>
-          </label>
-          <label>
-            Qué hacer con las rechazadas
-            <select name="disposition">
-              <option value="">—</option>
-              <option value="rework">Retrabajar</option>
-              <option value="scrap">Desechar</option>
-            </select>
-          </label>
-          <label>Notas<input name="notes" /></label>
-          <button className="primary" type="submit">Registrar inspección</button>
-          <button
-            className="ghost"
-            type="button"
-            onClick={() => {
-              const reason = window.prompt("Motivo para liberar sin inspección");
-              if (reason) void act("/waive-qc", { reason });
-            }}
-          >
-            Liberar sin inspección
-          </button>
-        </form>
-      ) : null}
-      {data.consumptions.length ? (
-        <>
-          <h2>Consumos</h2>
-          <table>
-            <thead><tr><th>Cuándo</th><th>SKU</th><th>Cantidad</th><th>Valor</th></tr></thead>
-            <tbody>
-              {data.consumptions.map((row) => (
-                <tr key={row.id}>
-                  <td>{new Date(row.createdAt).toLocaleString("es-MX")}</td>
-                  <td>{row.sku}</td>
-                  <td>{row.quantity}</td>
-                  <td>{money(row.value)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </>
-      ) : null}
-      {data.inspections.length ? (
-        <>
-          <h2>Inspecciones</h2>
-          <table>
-            <thead><tr><th>Cuándo</th><th>Resultado</th><th>Aprobadas</th><th>Rechazadas</th><th>Defecto</th><th>Destino</th></tr></thead>
-            <tbody>
-              {data.inspections.map((row) => (
-                <tr key={row.id}>
-                  <td>{new Date(row.createdAt).toLocaleString("es-MX")}</td>
-                  <td>{row.result === "pass" ? "Aprobada" : "Rechazada"}</td>
-                  <td>{row.qtyPassed}</td>
-                  <td>{row.qtyFailed}</td>
-                  <td>{row.defect ?? "—"}</td>
-                  <td>{row.disposition ?? "—"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </>
-      ) : null}
+      )}
+      </Paged>
     </section>
   );
 }
 
-export function QualityPage() {
-  const client = useQueryClient();
-  const { error, run } = useError();
-  const queue = useQuery({ queryKey: ["quality-queue"], queryFn: () => api<{ data: ProductionOrder[] }>("/quality/queue") });
-  const inspections = useQuery({
-    queryKey: ["inspections"],
-    queryFn: () => api<{ data: InspectionRow[]; stats: { total: number; failed: number; passRate: number | null } }>("/quality/inspections"),
-  });
-  const defects = useQuery({ queryKey: ["defect-types"], queryFn: () => api<{ data: Array<{ id: string; code: string; name: string }> }>("/quality/defect-types") });
-  const settings = useQuery({ queryKey: ["quality-settings"], queryFn: () => api<{ qcGate: string }>("/quality/settings") });
-  return (
-    <section style={{ display: "grid", gap: 16 }}>
-      <h1>Calidad</h1>
-      <div className="card" style={grid}>
-        <label>
-          Si una inspección falla
-          <select
-            value={settings.data?.qcGate ?? "warn"}
-            onChange={(event) =>
-              void run(async () => {
-                await api("/quality/settings", { method: "PATCH", body: JSON.stringify({ qcGate: event.target.value }) });
-                await client.invalidateQueries({ queryKey: ["quality-settings"] });
-              })
-            }
-          >
-            <option value="off">No inspeccionar</option>
-            <option value="warn">Registrar y dejar terminar</option>
-            <option value="block">Bloquear hasta retrabajar o desechar</option>
-          </select>
-        </label>
-        <p style={{ margin: 0 }}>
-          {inspections.data?.stats.total ?? 0} inspecciones · {inspections.data?.stats.failed ?? 0} rechazadas
-          {inspections.data?.stats.passRate !== null && inspections.data?.stats.passRate !== undefined ? ` · ${inspections.data.stats.passRate}% aprobadas` : ""}
-        </p>
-        {error ? <p className="error">{error}</p> : null}
-      </div>
-      <h2>Por inspeccionar</h2>
-      {queue.isPending ? <TableSkeleton columns={1} rows={3} /> : !queue.data?.data.length ? <p>No hay órdenes esperando inspección.</p> : (
-        <ul>
-          {queue.data.data.map((order) => (
-            <li key={order.id}><Link to={`/app/produccion/${order.id}`}>{order.folio}</Link> · {order.sku} · {order.quantityCompleted} piezas</li>
-          ))}
-        </ul>
-      )}
-      <h2>Historial</h2>
-      {inspections.isPending ? <TableSkeleton columns={6} /> : (
-      <table>
-        <thead><tr><th>Cuándo</th><th>Orden</th><th>Producto</th><th>Resultado</th><th>Rechazadas</th><th>Defecto</th></tr></thead>
-        <tbody>
-          {(inspections.data?.data ?? []).map((row) => (
-            <tr key={row.id}>
-              <td>{new Date(row.createdAt).toLocaleString("es-MX")}</td>
-              <td><Link to={`/app/produccion/${row.productionOrderId}`}>{row.folio}</Link></td>
-              <td>{row.sku}</td>
-              <td>{row.result === "pass" ? "Aprobada" : "Rechazada"}</td>
-              <td>{row.qtyFailed}</td>
-              <td>{row.defect ?? "—"}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      )}
-      <h2>Catálogo de defectos</h2>
-      <form
-        className="card"
-        style={grid}
-        onSubmit={(event) => {
-          event.preventDefault();
-          const form = event.currentTarget;
-          const data = new FormData(form);
-          void run(async () => {
-            await postJson("/quality/defect-types", { code: data.get("code"), name: data.get("name") });
-            form.reset();
-            await client.invalidateQueries({ queryKey: ["defect-types"] });
-          });
-        }}
-      >
-        <label>Clave<input name="code" required placeholder="BLOB" /></label>
-        <label>Nombre<input name="name" required placeholder="Gotas / zits" /></label>
-        <button className="primary" type="submit">Agregar defecto</button>
-      </form>
-      <ul>{(defects.data?.data ?? []).map((defect) => <li key={defect.id}>{defect.code} · {defect.name}</li>)}</ul>
-    </section>
-  );
-}
-
-export function Action({ label, onClick }: { label: string; onClick: () => void }) {
-  return <button className="ghost" type="button" onClick={onClick}>{label}</button>;
+export function Action({ label, onClick, pending = false, disabled = false }: { label: string; onClick: () => void; pending?: boolean; disabled?: boolean }) {
+  return <button className="ghost" type="button" disabled={pending || disabled} aria-busy={pending} onClick={onClick}>{label}</button>;
 }
 
 export interface ProductOption {
@@ -747,28 +605,16 @@ export interface ProductOption {
   sku: string;
   name: string;
   productType: string;
+  status?: string;
   stockUom: string;
   purchaseUom: string;
   cost: string | null;
 }
 
-interface WorkCenter {
-  id: string;
-  code: string;
-  name: string;
-  kind: string;
-  hourlyRate: string;
-  capacityHours: string;
-}
-
-interface BomSummary {
-  bomId: string;
+interface RecipeSummary {
   productId: string;
-  sku: string;
-  name: string;
-  version: number;
   lines: number;
-  materialCost: string;
+  materialCost: string | null;
 }
 
 interface BomDetail {
@@ -777,10 +623,6 @@ interface BomDetail {
   laborCost: string;
   unitCost: string;
   currentCost: string | null;
-}
-
-interface RoutingDetail {
-  operations: Array<{ sequence: number; code: string; name: string; workCenterId: string; workCenterName: string; setupMinutes: string; runMinutes: string }>;
 }
 
 interface ProductionOrder {
@@ -800,19 +642,8 @@ interface ProductionOrder {
 
 interface ProductionDetail extends ProductionOrder {
   salesOrderFolio: string | null;
-  materials: Array<{ id: string; componentProductId: string; sku: string; name: string; stockUom: string; required: string; allocated: string; consumed: string; available: string; shortage: string }>;
+  materials: Array<{ id: string; componentProductId: string; sku: string; name: string; stockUom: string; required: string; allocated: string; consumed: string; available: string; shortage: string; tracksStock: boolean }>;
   operations: Array<{ id: string; sequence: number; name: string; workCenterName: string; plannedMinutes: string; actualMinutes: string | null; status: string }>;
   consumptions: Array<{ id: string; sku: string; quantity: string; value: string; createdAt: string }>;
   inspections: Array<{ id: string; result: string; qtyPassed: string; qtyFailed: string; disposition: string | null; defect: string | null; createdAt: string }>;
-}
-
-interface InspectionRow {
-  id: string;
-  productionOrderId: string;
-  folio: string;
-  sku: string;
-  result: string;
-  qtyFailed: string;
-  defect: string | null;
-  createdAt: string;
 }

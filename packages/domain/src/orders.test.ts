@@ -32,6 +32,7 @@ function context(overrides: Partial<OrderContext> = {}): OrderContext {
     paidMinor: 0n,
     amountDueMinor: 34800n,
     servicesOpen: false,
+    articlesPrestados: true,
     ...overrides,
   };
 }
@@ -83,6 +84,8 @@ describe("estado del pedido según surtido", () => {
   });
 
   it("la máquina de estados permite los movimientos del surtido y bloquea regresar un embarque", () => {
+    expect(allowed(context({ state: "pending", articlesPrestados: false }), "confirm")?.allowed).toBe(false);
+    expect(allowed(context({ state: "pending", articlesPrestados: true }), "confirm")?.allowed).toBe(true);
     expect(transitionSalesOrder("confirmed", "ready_to_ship").ok).toBe(true);
     expect(transitionSalesOrder("ready_to_ship", "cancelled").ok).toBe(true);
     expect(transitionSalesOrder("shipped", "cancelled").ok).toBe(false);

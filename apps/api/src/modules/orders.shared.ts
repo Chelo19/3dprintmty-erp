@@ -4,12 +4,14 @@ import {
   exceedsCredit,
   formatQty,
   isFullyAllocated,
+  isPrestado,
   maxQty,
   Money,
   openQuantity,
   parseQty,
   planOrderAllocation,
   qtyFromDb,
+  roundDiv,
   serviceIsSettled,
   syncedOrderState,
   transitionFulfillment,
@@ -35,6 +37,7 @@ import {
   productionOrders,
   products,
   salesOrderEvents,
+  salesOrderPrints,
   serviceOfferings,
   salesOrderLines,
   salesOrders,
@@ -77,6 +80,9 @@ export interface OrderRow {
   closedShortReason: string | null;
   notes: string | null;
   serviceTerms: string | null;
+  paymentTerms: string | null;
+  depositPercent: number;
+  paymentNotes: string | null;
   createdAt: Date;
 }
 
@@ -86,6 +92,7 @@ export interface OrderLineRow {
   productId: string | null;
   filamentId: string | null;
   serviceId: string | null;
+  printId: string | null;
   lineKind: string;
   terms: string | null;
   resolution: string;
@@ -151,7 +158,7 @@ export async function orderSupply(db: Db, lines: OrderLineRow[]): Promise<OrderL
   return lines.map((line) => ({
     lineId: line.id,
     productId: line.productId ?? line.filamentId,
-    stocked: line.lineKind !== "service" && Boolean(line.productId ?? line.filamentId),
+    stocked: line.lineKind !== "service" && line.lineKind !== "filament" && Boolean(line.productId),
     quantity: effectiveQty(line),
     reserved: qtyFromDb(line.reservedQty),
     shipped: qtyFromDb(line.shippedQty),
@@ -186,8 +193,13 @@ export async function productionFor(db: Db, orderId: string) {
 export async function manufacturableIds(db: Db, productIds: string[]): Promise<Set<string>> {
   const result = new Set<string>();
   for (const id of new Set(productIds)) {
-    const [product] = await db.select({ productType: products.productType }).from(products).where(eq(products.id, id)).limit(1);
-    if (!product || (product.productType !== "finished_good" && product.productType !== "component")) continue;
+    const [product] = await db
+      .select({ productType: products.productType, status: products.status })
+      .from(products)
+      .where(eq(products.id, id))
+      .limit(1);
+    if (!product || product.status === "inactive") continue;
+    if (product.productType !== "finished_good") continue;
     const [bom] = await db
       .select({ id: boms.id })
       .from(boms)
@@ -196,6 +208,29 @@ export async function manufacturableIds(db: Db, productIds: string[]): Promise<S
     if (bom) result.add(id);
   }
   return result;
+}
+
+/** Qué le falta al pedido para quedar listo, separado de la fabricación de productos. */
+export function supplyPicture(
+  lines: OrderLineRow[],
+  supply: OrderLineSupply[],
+  makeable: Set<string>,
+  printsOpen: boolean,
+): { printsOpen: boolean; filamentShort: boolean; productToBuy: boolean; productToMake: boolean } {
+  let filamentShort = false;
+  let productToBuy = false;
+  let productToMake = false;
+  for (const [index, line] of lines.entries()) {
+    const row = supply[index];
+    if (!row || openQuantity(row) === 0n) continue;
+    if (line.filamentId) {
+      filamentShort = true;
+      continue;
+    }
+    if (line.productId && makeable.has(line.productId)) productToMake = true;
+    else if (line.productId) productToBuy = true;
+  }
+  return { printsOpen, filamentShort, productToBuy, productToMake };
 }
 
 /** Faltante por producto que ninguna OP abierta cubre todavía. */
@@ -329,6 +364,16 @@ export async function activePrefactura(db: Db, orderId: string) {
   return document ?? null;
 }
 
+async function printsOpen(db: Db, orderId: string, lines: OrderLineRow[]): Promise<boolean> {
+  const prints = await db
+    .select({ resolution: salesOrderPrints.resolution })
+    .from(salesOrderPrints)
+    .where(eq(salesOrderPrints.salesOrderId, orderId));
+  const printPending = prints.some((print) => !serviceIsSettled(print.resolution));
+  const looseService = lines.some((line) => line.lineKind === "service" && !line.printId && !serviceIsSettled(line.resolution));
+  return printPending || looseService;
+}
+
 export async function orderLedger(db: Db, orderId: string): Promise<PaymentRow[]> {
   return db.select().from(payments).where(eq(payments.salesOrderId, orderId));
 }
@@ -357,8 +402,27 @@ export async function orderContext(db: Db, tenant: TenantActor, order: OrderRow)
     activePrefactura: Boolean(await activePrefactura(db, order.id)),
     paidMinor: BigInt(order.totalMinor) - due,
     amountDueMinor: due,
-    servicesOpen: lines.some((line) => line.lineKind === "service" && !serviceIsSettled(line.resolution)),
+    servicesOpen: await printsOpen(db, order.id, lines),
+    articlesPrestados: await articlesArePrestados(db, order.id, lines),
   };
+}
+
+async function articlesArePrestados(db: Db, orderId: string, lines: OrderLineRow[]): Promise<boolean> {
+  const prints = await db
+    .select({ resolution: salesOrderPrints.resolution })
+    .from(salesOrderPrints)
+    .where(eq(salesOrderPrints.salesOrderId, orderId));
+  if (prints.some((print) => !isPrestado(print.resolution))) return false;
+  const finished = new Set<string>();
+  for (const line of lines) {
+    if (line.printId || line.lineKind !== "product" || !line.productId || finished.has(line.productId)) continue;
+    const [product] = await db.select({ productType: products.productType }).from(products).where(eq(products.id, line.productId)).limit(1);
+    if (product?.productType === "finished_good") finished.add(line.productId);
+  }
+  return lines.every((line) => {
+    if (line.printId || !line.productId || !finished.has(line.productId)) return true;
+    return isPrestado(line.resolution);
+  });
 }
 
 async function normalizeCommercialLines(
@@ -641,8 +705,43 @@ export function mapOrder(row: OrderRow, role: TenantRole) {
     closedShortReason: row.closedShortReason ?? null,
     notes: row.notes ?? null,
     serviceTerms: row.serviceTerms ?? null,
+    ...paymentConditions(row.paymentTerms, row.depositPercent ?? 0, row.paymentNotes ?? null, BigInt(row.totalMinor), role),
     createdAt: isoDate(row.createdAt),
   };
+}
+
+export function depositSplit(totalMinor: bigint, depositPercent: number) {
+  const deposit = roundDiv(totalMinor * BigInt(depositPercent), 100n);
+  return { deposit, balance: totalMinor - deposit };
+}
+
+export function paymentConditions(
+  paymentTerms: string | null,
+  depositPercent: number,
+  paymentNotes: string | null,
+  totalMinor: bigint,
+  role: TenantRole,
+) {
+  const split = depositSplit(totalMinor, depositPercent);
+  return {
+    paymentTerms,
+    depositPercent,
+    paymentNotes,
+    deposit: money(split.deposit, role),
+    balance: money(split.balance, role),
+  };
+}
+
+/** Suma días hábiles (lunes a viernes) a la fecha de hoy en la Ciudad de México. */
+export function addBusinessDays(days: number, from = new Date()): string {
+  const cursor = new Date(`${from.toLocaleDateString("en-CA", { timeZone: "America/Mexico_City" })}T00:00:00Z`);
+  let left = days;
+  while (left > 0) {
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+    const weekday = cursor.getUTCDay();
+    if (weekday !== 0 && weekday !== 6) left -= 1;
+  }
+  return cursor.toISOString().slice(0, 10);
 }
 
 export function withDue(order: OrderRow, ledger: PaymentRow[], role: TenantRole) {
@@ -653,6 +752,7 @@ export function withDue(order: OrderRow, ledger: PaymentRow[], role: TenantRole)
 export function mapOrderLine(line: OrderLineRow, role: TenantRole) {
   return {
     id: line.id,
+    printId: line.printId,
     productId: line.productId,
     serviceId: line.serviceId,
     lineKind: line.lineKind,

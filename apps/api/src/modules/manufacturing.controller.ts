@@ -296,8 +296,8 @@ export class ManufacturingController {
 
 async function writeBom(db: Db, tenant: TenantActor, productId: string, lines: BomLine[], notes: string | null) {
   const product = await one(db, products, products.id, productId, "No encontramos ese producto.");
-  if (product.productType !== "finished_good" && product.productType !== "component") {
-    throw new AppError("not_manufacturable", "Solo los terminados y componentes llevan BOM.", 409);
+  if (product.productType !== "finished_good") {
+    throw new AppError("not_manufacturable", "Solo los productos terminados llevan receta. Los insumos se compran.", 409);
   }
   const ids = lines.map((line) => line.componentId);
   if (new Set(ids).size !== ids.length) {

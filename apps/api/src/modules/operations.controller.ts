@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Header, Headers, Param, Patch, Post, StreamableFile } from "@nestjs/common";
+import { Body, Controller, Get, Header, Headers, Param, Patch, Post, Query, StreamableFile } from "@nestjs/common";
 import {
   assertMxState,
   assertPostalCode,
@@ -25,15 +25,20 @@ import {
   companyProfiles,
   customerAddresses,
   customers,
+  expenses,
   filaments,
   locations,
   paymentMethodSettings,
   payments,
+  productionOrders,
   products,
+  purchaseOrders,
   quoteLines,
   quotePrints,
   quotes,
+  receipts,
   salesOrderLines,
+  salesOrderPrints,
   salesOrders,
   serviceOfferings,
   stockBalances,
@@ -41,16 +46,19 @@ import {
 } from "../db/schema";
 import { assertRole, CurrentUser, requireTenant, type Actor, type TenantActor } from "../http/actor";
 import {
+  addBusinessDays,
   dueMinor,
   mapOrder,
   mapPayment,
   orderEvent,
+  paymentConditions,
   priceLines,
   refreshPaymentStatus,
   type PaymentRow,
 } from "./orders.shared";
-import { renderQuotePdf } from "./quote-pdf";
-import { allocateFolio, one, postStock, withIdempotency, type Db } from "./support";
+import { quoteCosting } from "./quote-costing";
+import { renderQuotePdf, type QuotePdfInput } from "./quote-pdf";
+import { allocateFolio, defaultLocationId, one, postStock, withIdempotency, type Db } from "./support";
 
 const addressSchema = z.object({
   line1: z.string().trim().min(1).max(160),
@@ -97,11 +105,19 @@ const lineSchema = z
     message: "Cada partida es un producto o un servicio.",
   });
 
+const quoteConditions = {
+  customerId: z.string().uuid(),
+  serviceTerms: z.string().trim().max(2000).optional(),
+  paymentTerms: z.enum(["pue", "net_15", "net_30"]).optional(),
+  depositPercent: z.number().int().min(0).max(100).default(0),
+  paymentNotes: z.string().trim().max(500).optional(),
+  leadTimeDays: z.number().int().min(1).max(365).optional(),
+};
+
 const quoteSchema = z.discriminatedUnion("mode", [
   z.object({
     mode: z.literal("prints"),
-    customerId: z.string().uuid(),
-    serviceTerms: z.string().trim().max(2000).optional(),
+    ...quoteConditions,
     prints: z
       .array(
         z.object({
@@ -116,8 +132,7 @@ const quoteSchema = z.discriminatedUnion("mode", [
   }),
   z.object({
     mode: z.literal("products"),
-    customerId: z.string().uuid(),
-    serviceTerms: z.string().trim().max(2000).optional(),
+    ...quoteConditions,
     lines: z.array(lineSchema).min(1).max(100),
   }),
 ]);
@@ -130,6 +145,13 @@ const movementSchema = z.object({
   reason: z.string().trim().min(3).max(180),
   reorderPoint: z.string().optional(),
   leadTimeDays: z.number().int().min(0).max(365).optional(),
+});
+
+const filamentAdjustSchema = z.object({
+  mode: z.enum(["subtract", "count"]),
+  grams: z.string(),
+  locationId: z.string().uuid().optional(),
+  reason: z.string().trim().max(180).optional(),
 });
 
 const paymentSchema = z.object({
@@ -212,32 +234,204 @@ export class OperationsController {
     };
   }
 
-  @Get("inventory/ledger")
-  async ledger(@CurrentUser() actor: Actor) {
+  /** Existencia de cada artículo del catálogo, aunque todavía esté en cero. */
+  @Get("inventory")
+  async inventory(@CurrentUser() actor: Actor) {
     const tenant = requireTenant(actor);
-    const rows = await this.database.asUser(tenant, (db) =>
-      db
+    const data = await this.database.asUser(tenant, async (db) => {
+      const goods = await db
+        .select({ id: products.id, sku: products.sku, name: products.name, productType: products.productType, stockUom: products.stockUom, status: products.status })
+        .from(products)
+        .where(inArray(products.productType, ["finished_good", "resale", "component"]))
+        .orderBy(asc(products.sku));
+      const rolls = await db
+        .select({ id: filaments.id, sku: filaments.sku, name: filaments.name, status: filaments.status })
+        .from(filaments)
+        .orderBy(asc(filaments.sku));
+      const balances = await db
+        .select({
+          productId: stockBalances.productId,
+          filamentId: stockBalances.filamentId,
+          onHand: stockBalances.onHand,
+          allocated: stockBalances.allocated,
+        })
+        .from(stockBalances);
+      const stock = new Map<string, { onHand: bigint; allocated: bigint }>();
+      for (const row of balances) {
+        const id = row.productId ?? row.filamentId;
+        if (!id) continue;
+        const current = stock.get(id) ?? { onHand: 0n, allocated: 0n };
+        current.onHand += qtyFromDb(row.onHand);
+        current.allocated += qtyFromDb(row.allocated);
+        stock.set(id, current);
+      }
+      const line = (row: { id: string; sku: string; name: string; stockUom: string; status: string; productType?: string }) => {
+        const held = stock.get(row.id) ?? { onHand: 0n, allocated: 0n };
+        return {
+          id: row.id,
+          sku: row.sku,
+          name: row.name,
+          stockUom: row.stockUom,
+          status: row.status,
+          productType: row.productType ?? null,
+          onHand: fromQty(held.onHand),
+          allocated: fromQty(held.allocated),
+          available: fromQty(held.onHand - held.allocated),
+        };
+      };
+      return {
+        finished: goods.filter((row) => row.productType === "finished_good").map((row) => line(row)),
+        resale: goods.filter((row) => row.productType === "resale").map((row) => line(row)),
+        supplies: goods.filter((row) => row.productType === "component").map((row) => line(row)),
+        filaments: rolls.map((row) => line({ ...row, stockUom: "g" })),
+      };
+    });
+    return data;
+  }
+
+  /** Entradas y salidas físicas de productos, insumos o filamentos, con el documento que las originó. Los apartados no cuentan. */
+  @Get("inventory/ledger")
+  async ledger(
+    @CurrentUser() actor: Actor,
+    @Query("section") section?: string,
+    @Query("productId") productId?: string,
+    @Query("limit") limitParam?: string,
+  ) {
+    const tenant = requireTenant(actor);
+    const types = section === "supplies" ? ["component"] : section === "products" ? ["finished_good", "resale"] : ["finished_good", "resale", "component"];
+    const limit = Math.min(Math.max(Number(limitParam) || 300, 1), 1000);
+    const physical = ["receipt", "issue", "adjustment", "scrap", "transfer"] as const;
+    return this.database.asUser(tenant, async (db) => {
+      const rows: LedgerRow[] = section === "filaments"
+        ? await db
+            .select({
+              id: stockLedgers.id,
+              kind: stockLedgers.kind,
+              quantity: stockLedgers.quantity,
+              reason: stockLedgers.reason,
+              referenceType: stockLedgers.referenceType,
+              referenceId: stockLedgers.referenceId,
+              createdAt: stockLedgers.createdAt,
+              productId: filaments.id,
+              sku: filaments.sku,
+              name: filaments.name,
+              productType: sql<string>`'filament'`,
+              stockUom: sql<string>`'g'`,
+              locationName: locations.name,
+            })
+            .from(stockLedgers)
+            .innerJoin(filaments, eq(filaments.id, stockLedgers.filamentId))
+            .innerJoin(locations, eq(locations.id, stockLedgers.locationId))
+            .where(
+              and(
+                inArray(stockLedgers.kind, [...physical]),
+                productId ? eq(stockLedgers.filamentId, productId) : undefined,
+              ),
+            )
+            .orderBy(desc(stockLedgers.createdAt))
+            .limit(limit)
+        : await db
         .select({
           id: stockLedgers.id,
           kind: stockLedgers.kind,
           quantity: stockLedgers.quantity,
           reason: stockLedgers.reason,
+          referenceType: stockLedgers.referenceType,
+          referenceId: stockLedgers.referenceId,
           createdAt: stockLedgers.createdAt,
+          productId: products.id,
           sku: products.sku,
+          name: products.name,
+          productType: products.productType,
+          stockUom: products.stockUom,
           locationName: locations.name,
         })
         .from(stockLedgers)
         .innerJoin(products, eq(products.id, stockLedgers.productId))
         .innerJoin(locations, eq(locations.id, stockLedgers.locationId))
+        .where(
+          and(
+            inArray(products.productType, types),
+            inArray(stockLedgers.kind, [...physical]),
+            productId ? eq(stockLedgers.productId, productId) : undefined,
+          ),
+        )
         .orderBy(desc(stockLedgers.createdAt))
-        .limit(100),
-    );
-    return {
-      data: rows.map((row: { quantity: string }) => ({
-        ...row,
-        quantity: fromQty(toQty(String(row.quantity))),
-      })),
-    };
+        .limit(limit);
+
+      const idsOf = (type: string) => [...new Set(rows.filter((row) => row.referenceType === type && row.referenceId).map((row) => row.referenceId as string))];
+      const productionIds = idsOf("production_order");
+      const receiptIds = idsOf("receipt");
+      const production = productionIds.length
+        ? await db
+            .select({ id: productionOrders.id, folio: productionOrders.folio, salesOrderId: productionOrders.salesOrderId })
+            .from(productionOrders)
+            .where(inArray(productionOrders.id, productionIds))
+        : [];
+      const productionById = new Map<string, { id: string; folio: string; salesOrderId: string | null }>(production.map((row: { id: string; folio: string; salesOrderId: string | null }) => [row.id, row]));
+      const salesIds: string[] = [
+        ...new Set<string>([
+          ...idsOf("sales_order"),
+          ...production.flatMap((row: { salesOrderId: string | null }) => (row.salesOrderId ? [row.salesOrderId] : [])),
+        ]),
+      ];
+      const sales = salesIds.length
+        ? await db
+            .select({ id: salesOrders.id, folio: salesOrders.folio, customerName: customers.legalName })
+            .from(salesOrders)
+            .leftJoin(customers, eq(customers.id, salesOrders.customerId))
+            .where(inArray(salesOrders.id, salesIds))
+        : [];
+      const salesById = new Map<string, { id: string; folio: string; customerName: string | null }>(sales.map((row: { id: string; folio: string; customerName: string | null }) => [row.id, row]));
+      const receiptRows = receiptIds.length
+        ? await db
+            .select({ id: receipts.id, folio: receipts.folio, purchaseOrderId: receipts.purchaseOrderId, purchaseFolio: purchaseOrders.folio })
+            .from(receipts)
+            .innerJoin(purchaseOrders, eq(purchaseOrders.id, receipts.purchaseOrderId))
+            .where(inArray(receipts.id, receiptIds))
+        : [];
+      const receiptById = new Map<string, { id: string; folio: string; purchaseOrderId: string; purchaseFolio: string }>(receiptRows.map((row: { id: string; folio: string; purchaseOrderId: string; purchaseFolio: string }) => [row.id, row]));
+      const purchaseIds: string[] = [...new Set<string>(receiptRows.map((row: { purchaseOrderId: string }) => row.purchaseOrderId))];
+      const expenseRows = purchaseIds.length
+        ? await db
+            .select({ id: expenses.id, folio: expenses.folio, purchaseOrderId: expenses.purchaseOrderId })
+            .from(expenses)
+            .where(inArray(expenses.purchaseOrderId, purchaseIds))
+        : [];
+      const expenseByPurchase = new Map<string | null, { id: string; folio: string; purchaseOrderId: string | null }>(expenseRows.map((row: { id: string; folio: string; purchaseOrderId: string | null }) => [row.purchaseOrderId, row]));
+
+      return {
+        data: rows.map((row) => {
+          const quantity = qtyFromDb(row.quantity);
+          const made = row.referenceType === "production_order" && row.referenceId ? productionById.get(row.referenceId) : undefined;
+          const salesId = row.referenceType === "sales_order" ? row.referenceId : made?.salesOrderId ?? null;
+          const sale = salesId ? salesById.get(salesId) : undefined;
+          const receipt = row.referenceType === "receipt" && row.referenceId ? receiptById.get(row.referenceId) : undefined;
+          const expense = receipt ? expenseByPurchase.get(receipt.purchaseOrderId) : undefined;
+          return {
+            id: row.id,
+            createdAt: row.createdAt,
+            kind: row.kind,
+            direction: quantity >= 0n ? "in" : "out",
+            quantity: fromQty(quantity),
+            reason: row.reason,
+            productId: row.productId,
+            sku: row.sku,
+            name: row.name,
+            productType: row.productType,
+            stockUom: row.stockUom,
+            locationName: row.locationName,
+            production: made ? { id: made.id, folio: made.folio } : null,
+            salesOrder: sale ? { id: sale.id, folio: sale.folio, customerName: sale.customerName } : null,
+            purchase: receipt
+              ? expense
+                ? { kind: "expense", id: expense.id, folio: expense.folio }
+                : { kind: "purchase_order", id: receipt.purchaseOrderId, folio: receipt.purchaseFolio, receiptFolio: receipt.folio }
+              : null,
+          };
+        }),
+      };
+    });
   }
 
   @Post("inventory/movements")
@@ -264,6 +458,42 @@ export class OperationsController {
       });
     });
     return { ok: true };
+  }
+
+  /** El filamento no se descuenta al imprimir: se resta el consumo o se captura lo que se contó. */
+  @Post("inventory/filaments/:id/adjust")
+  async adjustFilament(@CurrentUser() actor: Actor, @Param("id") id: string, @Body() body: unknown) {
+    const tenant = assertRole(actor, ["owner", "admin", "warehouse", "production"]);
+    const input = filamentAdjustSchema.parse(body);
+    const grams = toQty(input.grams.trim().replace(",", "."));
+    if (grams < 0n) throw new AppError("invalid_quantity", "Los gramos no pueden ser negativos.");
+    if (input.mode === "subtract" && grams === 0n) throw new AppError("invalid_quantity", "Captura cuántos gramos restar.");
+    return this.database.asUser(tenant, async (db) => {
+      const filament = await one(db, filaments, filaments.id, id, "No encontramos ese filamento.");
+      const location = await one(db, locations, locations.id, input.locationId ?? (await defaultLocationId(db)), "No encontramos esa sucursal.");
+      const [balance] = await db
+        .select({ onHand: stockBalances.onHand })
+        .from(stockBalances)
+        .where(and(eq(stockBalances.filamentId, filament.id), eq(stockBalances.locationId, location.id)))
+        .limit(1);
+      const before = balance ? qtyFromDb(balance.onHand) : 0n;
+      if (input.mode === "subtract" && grams > before) {
+        throw new AppError("not_enough_filament", `Solo hay ${fromQty(before)} g de ${filament.name} en ${location.name}.`, 409);
+      }
+      const delta = input.mode === "subtract" ? -grams : grams - before;
+      const reason = input.reason || (input.mode === "subtract" ? "Consumo" : "Conteo físico");
+      if (delta !== 0n) {
+        await postStock(db, tenant, {
+          filamentId: filament.id,
+          locationId: location.id,
+          kind: "adjustment",
+          delta,
+          reason: input.mode === "count" ? `Conteo físico: ${reason === "Conteo físico" ? `había ${fromQty(before)} g` : reason}` : reason,
+          allowNegative: true,
+        });
+      }
+      return { filamentId: filament.id, locationId: location.id, before: fromQty(before), delta: fromQty(delta), onHand: fromQty(before + delta) };
+    });
   }
 
   @Get("customers")
@@ -358,10 +588,11 @@ export class OperationsController {
         orders: [...orderRows]
           .sort((a: { createdAt: Date }, b: { createdAt: Date }) => +new Date(b.createdAt) - +new Date(a.createdAt))
           .slice(0, 5)
-          .map((order: { id: string; folio: string; status: string; totalMinor: bigint }) => ({
+          .map((order: { id: string; folio: string; status: string; paymentStatus: string; totalMinor: bigint }) => ({
             id: order.id,
             folio: order.folio,
             status: order.status,
+            paymentStatus: order.paymentStatus,
             total: money(BigInt(order.totalMinor), tenant.role),
           })),
         quotes: quoteRows.map((row: QuoteRow) => mapQuote(row, tenant.role)),
@@ -450,35 +681,29 @@ export class OperationsController {
     const tenant = requireTenant(actor);
     const file = await this.database.asUser(tenant, async (db) => {
       const quote = await loadQuote(db, id, tenant.role);
-      const [company] = await db.select().from(companyProfiles).limit(1);
-      const bytes = renderQuotePdf({
-        folio: quote.folio,
-        issuedAt: new Date(quote.createdAt).toLocaleDateString("es-MX"),
-        customerName: quote.customerName,
-        customerRfc: quote.customerRfc,
-        paymentTerms: paymentTermsLabel(quote.paymentTerms),
-        validUntil: new Date(quote.validUntil).toLocaleDateString("es-MX"),
-        mode: quote.mode,
-        serviceTerms: quote.serviceTerms,
-        subtotal: quote.subtotal,
-        discount: quote.discount,
-        vat: quote.vat,
-        vatRate: quote.vatRate,
-        total: quote.total,
-        currency: quote.currency,
-        issuer: quote.issuer?.tradeName || quote.issuer?.legalName || company?.tradeName || company?.legalName || "Taller",
-        issuerRfc: quote.issuer?.rfc ?? company?.rfc ?? "—",
-        issuerRegime: quote.issuer?.taxRegime ?? company?.taxRegime ?? "—",
-        issuerPostalCode: quote.issuer?.postalCode ?? company?.fiscalPostalCode ?? "—",
-        prints: quote.prints,
-        lines: quote.lines,
-      });
+      const bytes = renderQuotePdf(await quotePdfInput(db, quote));
       return { filename: `${quote.folio}.pdf`, bytes };
     });
-    return new StreamableFile(Buffer.from(file.bytes), {
-      type: "application/pdf",
-      disposition: `attachment; filename="${file.filename}"`,
+    return pdfFile(file);
+  }
+
+  @Get("quotes/:id/pdf/taller")
+  @Header("Content-Type", "application/pdf")
+  async quoteWorkshopPdf(@CurrentUser() actor: Actor, @Param("id") id: string): Promise<StreamableFile> {
+    const tenant = requireTenant(actor);
+    if (!canReadSalePrice(tenant.role)) {
+      throw new AppError("forbidden", "Tu rol no puede ver costos ni utilidad.", 403);
+    }
+    const file = await this.database.asUser(tenant, async (db) => {
+      const quote = await loadQuote(db, id, tenant.role);
+      const bytes = renderQuotePdf({
+        ...(await quotePdfInput(db, quote)),
+        title: "COTIZACIÓN · TALLER",
+        costing: quote.costing,
+      });
+      return { filename: `${quote.folio}-taller.pdf`, bytes };
     });
+    return pdfFile(file);
   }
 
   @Post("quotes")
@@ -486,7 +711,33 @@ export class OperationsController {
     const tenant = assertRole(actor, ["owner", "admin", "sales"]);
     const input = quoteSchema.parse(body);
     const folio = await allocateFolio(this.database, tenant.tenantId, "quote", "COT");
+    const quote = await this.database.asUser(tenant, (db) => insertQuote(db, tenant, input, folio));
+    return mapQuote(quote, tenant.role);
+  }
+
+  @Post("quotes/:id/clone")
+  async cloneQuote(@CurrentUser() actor: Actor, @Param("id") id: string) {
+    const tenant = assertRole(actor, ["owner", "admin", "sales"]);
+    const folio = await allocateFolio(this.database, tenant.tenantId, "quote", "COT");
     const quote = await this.database.asUser(tenant, async (db) => {
+      const source = await one(db, quotes, quotes.id, id, "No encontramos esa cotización.");
+      const prints = await db.select().from(quotePrints).where(eq(quotePrints.quoteId, source.id)).orderBy(asc(quotePrints.position));
+      const lines = await db.select().from(quoteLines).where(eq(quoteLines.quoteId, source.id)).orderBy(asc(quoteLines.position));
+      const input = quoteInputFromStored(source, prints, lines);
+      return insertQuote(db, tenant, input, folio);
+    });
+    return mapQuote(quote, tenant.role);
+  }
+
+  @Patch("quotes/:id")
+  async updateQuote(@CurrentUser() actor: Actor, @Param("id") id: string, @Body() body: unknown) {
+    const tenant = assertRole(actor, ["owner", "admin", "sales"]);
+    const input = quoteSchema.parse(body);
+    const quote = await this.database.asUser(tenant, async (db) => {
+      const existing = await one(db, quotes, quotes.id, id, "No encontramos esa cotización.");
+      if (existing.status !== "draft") {
+        throw new AppError("quote_locked", "Solo se edita una cotización en borrador.", 409);
+      }
       const customer = await one(db, customers, customers.id, input.customerId, "No encontramos ese cliente.");
       if (customer.status !== "active") {
         throw new AppError("customer_inactive", "Ese cliente no puede recibir cotizaciones.", 409);
@@ -494,63 +745,26 @@ export class OperationsController {
       const draft = draftQuoteLines(input);
       const priced = await priceLines(db, draft.lines, undefined, "0");
       assertQuoteMode(input.mode, priced.stored.map((line) => line.lineKind));
-      const validUntil = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-      const [created] = await db
-        .insert(quotes)
-        .values({
-          tenantId: tenant.tenantId,
-          folio: `COT-${folio}`,
+      await db.delete(quoteLines).where(eq(quoteLines.quoteId, existing.id));
+      await db.delete(quotePrints).where(eq(quotePrints.quoteId, existing.id));
+      const [updated] = await db
+        .update(quotes)
+        .set({
           customerId: customer.id,
           customerName: customer.legalName,
           customerRfc: customer.rfc,
           mode: input.mode,
-          validUntil,
           subtotalMinor: Money.fromMajor(priced.subtotal).minor,
           discountMinor: Money.fromMajor(priced.discount).minor,
           vatMinor: Money.fromMajor(priced.tax).minor,
           totalMinor: Money.fromMajor(priced.total).minor,
-          serviceTerms: input.serviceTerms || null,
-          paymentTerms: customer.paymentTerms,
-          createdBy: tenant.userId,
+          ...quoteConditionValues(input, customer.paymentTerms),
+          updatedAt: new Date(),
         })
+        .where(eq(quotes.id, existing.id))
         .returning();
-      const printIds: Array<string | null> = [];
-      if (input.mode === "prints") {
-        for (const [index, print] of draft.prints.entries()) {
-          const [row] = await db
-            .insert(quotePrints)
-            .values({
-              tenantId: tenant.tenantId,
-              quoteId: created.id,
-              position: index,
-              name: print.name,
-              quantity: fromQty(toQty(print.quantity)),
-            })
-            .returning();
-          print.lineCount && printIds.push(...Array(print.lineCount).fill(row.id));
-        }
-      }
-      await db.insert(quoteLines).values(
-        priced.stored.map((line, position) => ({
-          position,
-          printId: printIds[position] ?? null,
-          catalogId: line.filamentId ?? line.productId ?? line.serviceId,
-          sku: line.sku,
-          lineKind: line.lineKind,
-          terms: line.terms,
-          description: draft.labels[position] ? `${draft.labels[position]} · ${line.description}` : line.description,
-          uom: line.uom,
-          quantity: line.quantity,
-          unitPriceMinor: line.unitPriceMinor,
-          discountMinor: line.discountMinor,
-          netMinor: line.netMinor,
-          vatMinor: line.vatMinor,
-          totalMinor: line.totalMinor,
-          tenantId: tenant.tenantId,
-          quoteId: created.id,
-        })),
-      );
-      return created;
+      await writeQuoteChildren(db, tenant.tenantId, updated.id, draft, priced);
+      return updated;
     });
     return mapQuote(quote, tenant.role);
   }
@@ -598,9 +812,31 @@ export class OperationsController {
           vatMinor: quote.vatMinor,
           totalMinor: quote.totalMinor,
           serviceTerms: quote.serviceTerms,
+          paymentTerms: quote.paymentTerms,
+          depositPercent: quote.depositPercent,
+          paymentNotes: quote.paymentNotes,
+          promisedDate: quote.leadTimeDays ? addBusinessDays(quote.leadTimeDays) : null,
           createdBy: tenant.userId,
         })
         .returning();
+      const quotePrintRows = await db.select().from(quotePrints).where(eq(quotePrints.quoteId, quote.id)).orderBy(asc(quotePrints.position));
+      const printIds = new Map<string, string>();
+      if (quotePrintRows.length) {
+        const createdPrints = await db
+          .insert(salesOrderPrints)
+          .values(quotePrintRows.map((print) => ({
+            tenantId: tenant.tenantId,
+            salesOrderId: created.id,
+            position: print.position,
+            name: print.name,
+            quantity: print.quantity,
+          })))
+          .returning();
+        for (const print of quotePrintRows) {
+          const copy = createdPrints.find((row) => row.position === print.position && row.name === print.name);
+          if (copy) printIds.set(print.id, copy.id);
+        }
+      }
       if (lines.length) {
         const copied = [];
         for (const [position, line] of lines.entries()) {
@@ -609,6 +845,7 @@ export class OperationsController {
             tenantId: tenant.tenantId,
             salesOrderId: created.id,
             position,
+            printId: line.printId ? printIds.get(line.printId) ?? null : null,
             ...target,
             lineKind: line.lineKind,
             terms: line.terms,
@@ -768,8 +1005,10 @@ async function loadQuote(db: Db, id: string, role: TenantRole) {
   const prints = await db.select().from(quotePrints).where(eq(quotePrints.quoteId, quote.id)).orderBy(asc(quotePrints.position));
   const lines = await db.select().from(quoteLines).where(eq(quoteLines.quoteId, quote.id)).orderBy(asc(quoteLines.position));
   const mapped = lines.map((line: StoredLine) => mapLine(line, role));
+  const costing = canReadSalePrice(role) ? await quoteCosting(db, lines, prints) : null;
   return {
     ...mapQuote(quote, role),
+    costing,
     paymentTerms: quote.paymentTerms,
     vatRate: company ? String(company.defaultVatRate) : "0.1600",
     issuer: company
@@ -798,6 +1037,47 @@ async function loadQuote(db: Db, id: string, role: TenantRole) {
     }),
     lines: mapped.filter((line: { printId: string | null }) => !line.printId),
   };
+}
+
+async function quotePdfInput(db: Db, quote: Awaited<ReturnType<typeof loadQuote>>): Promise<QuotePdfInput> {
+  const [company] = await db.select().from(companyProfiles).limit(1);
+  return {
+    folio: quote.folio,
+    issuedAt: new Date(quote.createdAt).toLocaleDateString("es-MX"),
+    customerName: quote.customerName,
+    customerRfc: quote.customerRfc,
+    paymentTerms: paymentTermsLabel(quote.paymentTerms),
+    validUntil: new Date(quote.validUntil).toLocaleDateString("es-MX"),
+    mode: quote.mode,
+    serviceTerms: quote.serviceTerms,
+    subtotal: quote.subtotal,
+    discount: quote.discount,
+    vat: quote.vat,
+    vatRate: quote.vatRate,
+    total: quote.total,
+    currency: quote.currency,
+    issuer: quote.issuer?.tradeName || quote.issuer?.legalName || company?.tradeName || company?.legalName || "Taller",
+    issuerRfc: quote.issuer?.rfc ?? company?.rfc ?? "—",
+    issuerRegime: quote.issuer?.taxRegime ?? company?.taxRegime ?? "—",
+    issuerPostalCode: quote.issuer?.postalCode ?? company?.fiscalPostalCode ?? "—",
+    prints: quote.prints,
+    lines: quote.lines,
+    payment: {
+      terms: quote.paymentTerms,
+      depositPercent: quote.depositPercent,
+      deposit: quote.deposit,
+      balance: quote.balance,
+      notes: quote.paymentNotes,
+      leadTimeDays: quote.leadTimeDays,
+    },
+  };
+}
+
+function pdfFile(file: { filename: string; bytes: Uint8Array }) {
+  return new StreamableFile(Buffer.from(file.bytes), {
+    type: "application/pdf",
+    disposition: `attachment; filename="${file.filename}"`,
+  });
 }
 
 function sumMinor(lines: StoredLine[], field: "netMinor" | "discountMinor" | "vatMinor" | "totalMinor", role: TenantRole) {
@@ -838,6 +1118,145 @@ function draftQuoteLines(input: z.infer<typeof quoteSchema>) {
     prints.push({ name: print.name, quantity: print.quantity, lineCount: chunk.length });
   }
   return { lines, labels, prints };
+}
+
+async function insertQuote(db: Db, tenant: TenantActor, input: z.infer<typeof quoteSchema>, folio: number) {
+  const customer = await one(db, customers, customers.id, input.customerId, "No encontramos ese cliente.");
+  if (customer.status !== "active") {
+    throw new AppError("customer_inactive", "Ese cliente no puede recibir cotizaciones.", 409);
+  }
+  const draft = draftQuoteLines(input);
+  const priced = await priceLines(db, draft.lines, undefined, "0");
+  assertQuoteMode(input.mode, priced.stored.map((line) => line.lineKind));
+  const [created] = await db
+    .insert(quotes)
+    .values({
+      tenantId: tenant.tenantId,
+      folio: `COT-${folio}`,
+      customerId: customer.id,
+      customerName: customer.legalName,
+      customerRfc: customer.rfc,
+      mode: input.mode,
+      validUntil: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+      subtotalMinor: Money.fromMajor(priced.subtotal).minor,
+      discountMinor: Money.fromMajor(priced.discount).minor,
+      vatMinor: Money.fromMajor(priced.tax).minor,
+      totalMinor: Money.fromMajor(priced.total).minor,
+      ...quoteConditionValues(input, customer.paymentTerms),
+      createdBy: tenant.userId,
+    })
+    .returning();
+  await writeQuoteChildren(db, tenant.tenantId, created.id, draft, priced);
+  return created;
+}
+
+function quoteConditionValues(input: z.infer<typeof quoteSchema>, customerTerms: string) {
+  return {
+    serviceTerms: input.serviceTerms || null,
+    paymentTerms: input.paymentTerms ?? customerTerms,
+    depositPercent: input.depositPercent,
+    paymentNotes: input.paymentNotes || null,
+    leadTimeDays: input.leadTimeDays ?? null,
+  };
+}
+
+async function writeQuoteChildren(
+  db: Db,
+  tenantId: string,
+  quoteId: string,
+  draft: ReturnType<typeof draftQuoteLines>,
+  priced: Awaited<ReturnType<typeof priceLines>>,
+) {
+  const printIds: Array<string | null> = [];
+  for (const [index, print] of draft.prints.entries()) {
+    const [row] = await db
+      .insert(quotePrints)
+      .values({
+        tenantId,
+        quoteId,
+        position: index,
+        name: print.name,
+        quantity: fromQty(toQty(print.quantity)),
+      })
+      .returning();
+    if (print.lineCount) printIds.push(...Array(print.lineCount).fill(row.id));
+  }
+  if (!priced.stored.length) return;
+  await db.insert(quoteLines).values(
+    priced.stored.map((line, position) => ({
+      position,
+      printId: printIds[position] ?? null,
+      catalogId: line.filamentId ?? line.productId ?? line.serviceId,
+      sku: line.sku,
+      lineKind: line.lineKind,
+      terms: line.terms,
+      description: draft.labels[position] ? `${draft.labels[position]} · ${line.description}` : line.description,
+      uom: line.uom,
+      quantity: line.quantity,
+      unitPriceMinor: line.unitPriceMinor,
+      discountMinor: line.discountMinor,
+      netMinor: line.netMinor,
+      vatMinor: line.vatMinor,
+      totalMinor: line.totalMinor,
+      tenantId,
+      quoteId,
+    })),
+  );
+}
+
+function quoteInputFromStored(
+  quote: Pick<QuoteRow, "customerId" | "serviceTerms" | "paymentTerms" | "depositPercent" | "paymentNotes" | "leadTimeDays" | "mode">,
+  prints: Array<{ id: string; name: string; quantity: string }>,
+  lines: StoredLine[],
+): z.infer<typeof quoteSchema> {
+  const conditions = {
+    customerId: quote.customerId,
+    serviceTerms: quote.serviceTerms ?? undefined,
+    paymentTerms: quote.paymentTerms as "pue" | "net_15" | "net_30",
+    depositPercent: quote.depositPercent,
+    paymentNotes: quote.paymentNotes ?? undefined,
+    leadTimeDays: quote.leadTimeDays ?? undefined,
+  };
+  if (quote.mode !== "prints") {
+    return {
+      mode: "products",
+      ...conditions,
+      lines: lines.filter((line) => !line.printId).map((line) => storedLineInput(line)),
+    };
+  }
+  return {
+    mode: "prints",
+    ...conditions,
+    prints: prints.map((print) => {
+      const raw = lines.filter((line) => line.printId === print.id);
+      return {
+        name: print.name,
+        quantity: fromQty(qtyFromDb(print.quantity)),
+        filaments: raw.filter((line) => line.lineKind === "filament").map((line) => storedLineInput(line, print)),
+        services: raw.filter((line) => line.lineKind === "service").map((line) => storedLineInput(line, print)),
+      };
+    }),
+  };
+}
+
+function storedLineInput(line: StoredLine, print?: { name: string; quantity: string }) {
+  if (!line.catalogId) {
+    throw new AppError("catalog_missing", "Esa partida no tiene una referencia de catálogo para clonarla.", 409);
+  }
+  const pieces = print ? qtyFromDb(print.quantity) : 0n;
+  const quantity = print && pieces > 0n
+    ? fromQty(roundDiv(qtyFromDb(line.quantity) * 10_000n, pieces))
+    : fromQty(qtyFromDb(line.quantity));
+  const prefix = print ? `${print.name} · ` : "";
+  const description = prefix && line.description.startsWith(prefix) ? line.description.slice(prefix.length) : line.description;
+  const shared = {
+    description: description || "Partida",
+    quantity,
+    unitPrice: Money.fromMinor(line.unitPriceMinor).toMajor(),
+    discount: Money.fromMinor(line.discountMinor).toMajor(),
+  };
+  if (line.lineKind === "service") return { ...shared, serviceId: line.catalogId, terms: line.terms ?? undefined };
+  return { ...shared, productId: line.catalogId };
 }
 
 function assertQuoteMode(mode: "prints" | "products", kinds: string[]) {
@@ -908,6 +1327,8 @@ function mapQuote(row: QuoteRow, role: TenantRole) {
     vat: money(row.vatMinor, role),
     total: money(row.totalMinor, role),
     serviceTerms: row.serviceTerms,
+    ...paymentConditions(row.paymentTerms, row.depositPercent, row.paymentNotes, BigInt(row.totalMinor), role),
+    leadTimeDays: row.leadTimeDays,
     mode: row.mode === "prints" ? "prints" as const : "products" as const,
     currency: "MXN",
     createdAt: row.createdAt,
@@ -931,6 +1352,22 @@ function mapLine(line: StoredLine, role: TenantRole) {
     vat: money(line.vatMinor, role),
     total: money(line.totalMinor, role),
   };
+}
+
+interface LedgerRow {
+  id: string;
+  kind: string;
+  quantity: string;
+  reason: string;
+  referenceType: string | null;
+  referenceId: string | null;
+  createdAt: Date;
+  productId: string;
+  sku: string;
+  name: string;
+  productType: string;
+  stockUom: string;
+  locationName: string;
 }
 
 interface BalanceRow {
@@ -975,6 +1412,9 @@ interface QuoteRow {
   totalMinor: bigint;
   serviceTerms: string | null;
   paymentTerms: string;
+  depositPercent: number;
+  paymentNotes: string | null;
+  leadTimeDays: number | null;
   mode: string;
   createdAt: Date;
 }

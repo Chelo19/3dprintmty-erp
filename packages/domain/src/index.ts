@@ -1,6 +1,7 @@
 export { Money } from "./money";
 export {
   SERVICE_RESOLUTIONS,
+  isPrestado,
   serviceIsSettled,
   transitionServiceResolution,
   type ServiceResolution,

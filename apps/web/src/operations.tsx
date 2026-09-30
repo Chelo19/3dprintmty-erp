@@ -1,9 +1,13 @@
 import { Money, MX_STATES } from "@3dprintmty/domain";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { createPortal } from "react-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ApiError, api, download } from "./api";
 import { CustomerSkeleton, DetailSkeleton, FormSkeleton, TableSkeleton } from "./skeleton";
+import { Paged } from "./pager";
+import { CostPriceFields, MarginValue } from "./margin";
+import { FilterBar, FilterSelect, NoMatches, StatusBadge, distinct, matchesStatus, matchesText, useFilters } from "./filters";
 
 export function money(value: string | null | undefined) {
   if (!value) return "—";
@@ -15,6 +19,68 @@ export function ViewLink({ to }: { to: string }) {
     <Link className="icon-btn view" to={to} aria-label="Ver detalle" title="Ver detalle">
       <EyeIcon />
     </Link>
+  );
+}
+
+function SaveIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+      <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z" />
+      <path d="M17 21v-8H7v8" />
+      <path d="M7 3v5h8" />
+    </svg>
+  );
+}
+
+export function TrashIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+      <path d="M3 6h18" />
+      <path d="M8 6V4h8v2" />
+      <path d="M19 6l-1 14H6L5 6" />
+      <path d="M10 11v6" />
+      <path d="M14 11v6" />
+    </svg>
+  );
+}
+
+export function PlusIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+      <path d="M12 5v14" />
+      <path d="M5 12h14" />
+    </svg>
+  );
+}
+
+export function NewLink({ to, children }: { to: string; children: ReactNode }) {
+  return (
+    <Link className="primary new-link" to={to}>
+      <PlusIcon />
+      {children}
+    </Link>
+  );
+}
+
+export function FormActions({ children }: { children: ReactNode }) {
+  return <div className="form-actions">{children}</div>;
+}
+
+export function SaveButton({ pending = false, label = "Guardar cambios", onClick }: { pending?: boolean; label?: string; onClick?: () => void }) {
+  return (
+    <button className="primary" type={onClick ? "button" : "submit"} disabled={pending} aria-busy={pending} onClick={onClick}>
+      <SaveIcon />
+      {label}
+    </button>
+  );
+}
+
+export function DeleteButton({ pending = false, label = "Eliminar", onClick }: { pending?: boolean; label?: string; onClick: () => void }) {
+  return (
+    <button className="danger" type="button" disabled={pending} onClick={onClick}>
+      <TrashIcon />
+      {label}
+    </button>
   );
 }
 
@@ -48,7 +114,7 @@ function EyeIcon() {
   );
 }
 
-function PencilIcon() {
+export function PencilIcon() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
       <path d="M12 20h9" />
@@ -59,14 +125,23 @@ function PencilIcon() {
 
 export function useError() {
   const [error, setError] = useState<string | null>(null);
+  const [pendingKey, setPendingKey] = useState<string | null>(null);
+  const lock = useRef<string | null>(null);
   return {
     error,
-    async run(action: () => Promise<void>) {
+    pendingKey,
+    async run(action: () => Promise<void>, key = "default") {
+      if (lock.current) return;
+      lock.current = key;
+      setPendingKey(key);
       setError(null);
       try {
         await action();
       } catch (caught) {
         setError(caught instanceof ApiError ? caught.message : "No se pudo guardar.");
+      } finally {
+        lock.current = null;
+        setPendingKey(null);
       }
     },
   };
@@ -77,28 +152,66 @@ export function CustomersPage() {
     queryKey: ["customers"],
     queryFn: () => api<{ data: Customer[] }>("/customers"),
   });
+  const { values, set, reset, dirty } = useFilters({ q: "", estado: "active", tipo: "", terminos: "" });
+  const all = query.data?.data ?? [];
+  const bySearch = all.filter((customer) =>
+    matchesText(values.q, customer.legalName, customer.rfc, customer.phone)
+    && (!values.tipo || customer.kind === values.tipo)
+    && (!values.terminos || customer.paymentTerms === values.terminos));
+  const rows = bySearch.filter((customer) => matchesStatus(customer.status, values.estado));
   return (
     <section style={{ display: "grid", gap: 16 }}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
         <h1 style={{ margin: 0 }}>Clientes</h1>
         <Link className="primary" to="/app/clientes/nuevo">Nuevo cliente</Link>
       </div>
-      {query.isPending ? <TableSkeleton columns={6} /> : (
+      {query.isPending ? <TableSkeleton columns={6} /> : !all.length ? <p>Todavía no hay clientes.</p> : (
+      <>
+      <FilterBar
+        search={values.q}
+        onSearch={(value) => set("q", value)}
+        placeholder="Nombre, RFC o teléfono"
+        status={values.estado}
+        onStatus={(value) => set("estado", value)}
+        hiddenInactive={values.estado === "active" ? bySearch.length - rows.length : 0}
+        dirty={dirty}
+        onClear={reset}
+      >
+        <FilterSelect
+          label="Tipo"
+          value={values.tipo}
+          onChange={(value) => set("tipo", value)}
+          options={[{ value: "b2b", label: "Empresa" }, { value: "b2c", label: "Persona" }]}
+        />
+        <FilterSelect
+          label="Términos"
+          value={values.terminos}
+          onChange={(value) => set("terminos", value)}
+          options={["pue", "net_15", "net_30"].map((terms) => ({ value: terms, label: paymentTermsLabel(terms) }))}
+        />
+      </FilterBar>
+      {!rows.length ? <NoMatches onClear={reset} /> : (
+      <Paged rows={rows}>
+      {(customers) => (
       <table>
         <thead><tr><th>Nombre</th><th>RFC</th><th>Términos</th><th>Límite</th><th>Estado</th><th></th></tr></thead>
         <tbody>
-          {(query.data?.data ?? []).map((customer) => (
+          {customers.map((customer) => (
             <tr key={customer.id}>
               <td>{customer.legalName}</td>
               <td>{customer.rfc ?? "—"}</td>
               <td>{paymentTermsLabel(customer.paymentTerms)}</td>
               <td>{money(customer.creditLimit)}</td>
-              <td>{customer.status === "active" ? "Activo" : "Inactivo"}</td>
+              <td><StatusBadge status={customer.status} /></td>
               <td><RecordActions detailTo={`/app/clientes/${customer.id}`} editTo={`/app/clientes/${customer.id}/editar`} /></td>
             </tr>
           ))}
         </tbody>
       </table>
+      )}
+      </Paged>
+      )}
+      </>
       )}
     </section>
   );
@@ -107,7 +220,7 @@ export function CustomersPage() {
 export function CustomerNewPage() {
   const client = useQueryClient();
   const navigate = useNavigate();
-  const { error, run } = useError();
+  const { error, pendingKey, run } = useError();
   return (
     <section style={{ display: "grid", gap: 16 }}>
       <p><Link to="/app/clientes">Clientes</Link></p>
@@ -158,7 +271,7 @@ export function CustomerNewPage() {
         <label>Colonia<input name="neighborhood" required /></label>
         <label>C.P.<input name="postalCode" required pattern="\d{5}" /></label>
         <label>Estado<select name="state">{MX_STATES.map((state) => <option key={state}>{state}</option>)}</select></label>
-        <button className="primary" type="submit">Guardar cliente</button>
+        <button className="primary" type="submit" disabled={pendingKey !== null} aria-busy={pendingKey !== null}>Guardar cliente</button>
         {error ? <p className="error">{error}</p> : null}
       </form>
     </section>
@@ -167,30 +280,63 @@ export function CustomerNewPage() {
 
 export function ServicesPage() {
   const services = useQuery({ queryKey: ["services"], queryFn: () => api<{ data: ServiceOffering[] }>("/services") });
+  const { values, set, reset, dirty } = useFilters({ q: "", estado: "active", unidad: "" });
+  const all = services.data?.data ?? [];
+  const bySearch = all.filter((service) =>
+    matchesText(values.q, service.code, service.name) && (!values.unidad || service.unit === values.unidad));
+  const rows = bySearch.filter((service) => matchesStatus(service.status, values.estado));
   return (
     <section style={{ display: "grid", gap: 16 }}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
         <h1 style={{ margin: 0 }}>Servicios</h1>
-        <Link className="primary" to="/app/servicios/nuevo">Nuevo servicio</Link>
+        <NewLink to="/app/servicios/nuevo">Nuevo servicio</NewLink>
       </div>
       <p>Diseño, impresión, acabado o entrega. El precio, la unidad y los términos se copian a la cotización.</p>
-      {services.isPending ? <TableSkeleton columns={7} /> : (
+      {services.isPending ? <TableSkeleton columns={9} /> : !all.length ? <p>Todavía no hay servicios.</p> : (
+      <>
+      <FilterBar
+        search={values.q}
+        onSearch={(value) => set("q", value)}
+        placeholder="Clave o nombre"
+        status={values.estado}
+        onStatus={(value) => set("estado", value)}
+        hiddenInactive={values.estado === "active" ? bySearch.length - rows.length : 0}
+        dirty={dirty}
+        onClear={reset}
+      >
+        <FilterSelect
+          label="Unidad"
+          value={values.unidad}
+          onChange={(value) => set("unidad", value)}
+          options={distinct(all.map((service) => service.unit)).map((unit) => ({ value: unit, label: unit }))}
+          allLabel="Todas"
+        />
+      </FilterBar>
+      {!rows.length ? <NoMatches onClear={reset} /> : (
+      <Paged rows={rows}>
+      {(offerings) => (
       <table>
-        <thead><tr><th>Clave</th><th>Nombre</th><th>Unidad</th><th>Precio</th><th>Términos</th><th>Estado</th><th></th></tr></thead>
+        <thead><tr><th>Clave</th><th>Nombre</th><th>Unidad</th><th>Costo</th><th>Precio</th><th>Margen de utilidad</th><th>Términos</th><th>Estado</th><th></th></tr></thead>
         <tbody>
-          {(services.data?.data ?? []).map((service) => (
+          {offerings.map((service) => (
             <tr key={service.id}>
               <td>{service.code}</td>
               <td>{service.name}</td>
               <td>{service.unit}</td>
+              <td>{money(service.cost)}</td>
               <td>{money(service.salePrice)}</td>
+              <td><MarginValue cost={service.cost} price={service.salePrice} /></td>
               <td>{service.terms || "—"}</td>
-              <td>{service.status === "active" ? "Activo" : "Inactivo"}</td>
+              <td><StatusBadge status={service.status} /></td>
               <td><RecordActions detailTo={`/app/servicios/${service.id}`} editTo={`/app/servicios/${service.id}/editar`} /></td>
             </tr>
           ))}
         </tbody>
       </table>
+      )}
+      </Paged>
+      )}
+      </>
       )}
     </section>
   );
@@ -199,14 +345,13 @@ export function ServicesPage() {
 export function ServiceNewPage() {
   const client = useQueryClient();
   const navigate = useNavigate();
-  const { error, run } = useError();
+  const { error, pendingKey, run } = useError();
   return (
     <section style={{ display: "grid", gap: 16 }}>
       <p><Link to="/app/servicios">Servicios</Link></p>
       <h1>Nuevo servicio</h1>
       <form
-        className="card"
-        style={{ display: "grid", gap: 10 }}
+        className="card form-vertical"
         onSubmit={(event) => {
           event.preventDefault();
           const data = new FormData(event.currentTarget);
@@ -217,6 +362,7 @@ export function ServiceNewPage() {
                 code: data.get("code"),
                 name: data.get("name"),
                 unit: data.get("unit"),
+                cost: String(data.get("cost") || "") || undefined,
                 salePrice: data.get("salePrice"),
                 terms: String(data.get("terms") || ""),
               }),
@@ -226,22 +372,25 @@ export function ServiceNewPage() {
           });
         }}
       >
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10 }}>
+        <div className="form-fields">
           <label>Clave<input name="code" required placeholder="DIS-01" /></label>
           <label>Nombre<input name="name" required placeholder="Diseño de pieza" /></label>
           <label>
             Unidad
             <select name="unit" defaultValue="servicio">
               <option value="servicio">Servicio</option>
+              <option value="minuto">Minuto</option>
               <option value="hora">Hora</option>
               <option value="pieza">Pieza</option>
             </select>
           </label>
-          <label>Precio<input name="salePrice" required placeholder="800.00" /></label>
+          <CostPriceFields costLabel="Costo" priceLabel="Precio" costPlaceholder="300.00" pricePlaceholder="800.00" priceRequired />
         </div>
         <label>Términos<textarea name="terms" rows={3} placeholder="Incluye dos revisiones. El archivo final se entrega en STL." /></label>
-        <button className="primary" type="submit">Guardar servicio</button>
-        {error ? <p className="error">{error}</p> : null}
+        <FormActions>
+          <SaveButton pending={pendingKey !== null} label="Guardar servicio" />
+          {error ? <p className="error">{error}</p> : null}
+        </FormActions>
       </form>
     </section>
   );
@@ -294,7 +443,7 @@ export function CustomerDetailPage() {
             <ActivityRow
               key={order.id}
               title={order.folio}
-              detail={ORDER_STATUS[order.status] ?? order.status}
+              detail={<OrderStages order={order} />}
               to={`/app/pedidos/${order.id}`}
             />
           ))}
@@ -318,7 +467,7 @@ export function CustomerEditPage() {
   const { id } = useParams();
   const client = useQueryClient();
   const navigate = useNavigate();
-  const { error, run } = useError();
+  const { error, pendingKey, run } = useError();
   const customer = useQuery({
     queryKey: ["customer", id],
     queryFn: () => api<CustomerDetail>(`/customers/${id}`),
@@ -383,8 +532,10 @@ export function CustomerEditPage() {
         <label>Colonia<input name="neighborhood" required defaultValue={data.fiscal?.neighborhood ?? ""} /></label>
         <label>C.P.<input name="postalCode" required pattern="\d{5}" defaultValue={data.fiscal?.postalCode ?? ""} /></label>
         <label>Estado<select name="state" defaultValue={data.fiscal?.state ?? MX_STATES[0]}>{MX_STATES.map((state) => <option key={state}>{state}</option>)}</select></label>
-        <button className="primary" type="submit">Guardar cambios</button>
-        {error ? <p className="error">{error}</p> : null}
+        <FormActions>
+          <SaveButton pending={pendingKey !== null} />
+          {error ? <p className="error">{error}</p> : null}
+        </FormActions>
       </form>
     </section>
   );
@@ -408,7 +559,9 @@ export function ServiceDetailPage() {
       </div>
       <article className="card">
         <p>Clave {data.code} · unidad {data.unit} · {data.status === "active" ? "Activo" : "Inactivo"}</p>
+        <p>Costo {money(data.cost)}</p>
         <p>Precio {money(data.salePrice)}</p>
+        <p>Margen de utilidad <MarginValue cost={data.cost} price={data.salePrice} /></p>
         <p style={{ margin: 0 }}>{data.terms || "Sin términos."}</p>
       </article>
     </section>
@@ -419,7 +572,7 @@ export function ServiceEditPage() {
   const { id } = useParams();
   const client = useQueryClient();
   const navigate = useNavigate();
-  const { error, run } = useError();
+  const { error, pendingKey, run } = useError();
   const service = useQuery({
     queryKey: ["service", id],
     queryFn: () => api<ServiceOffering>(`/services/${id}`),
@@ -432,8 +585,7 @@ export function ServiceEditPage() {
       <p><Link to={`/app/servicios/${id}`}>Servicio</Link></p>
       <h1>Editar servicio</h1>
       <form
-        className="card"
-        style={{ display: "grid", gap: 10 }}
+        className="card form-vertical"
         onSubmit={(event) => {
           event.preventDefault();
           const form = new FormData(event.currentTarget);
@@ -443,6 +595,7 @@ export function ServiceEditPage() {
               body: JSON.stringify({
                 name: form.get("name"),
                 unit: form.get("unit"),
+                cost: String(form.get("cost") || "") || null,
                 salePrice: form.get("salePrice"),
                 terms: String(form.get("terms") || ""),
                 status: form.get("status"),
@@ -454,18 +607,19 @@ export function ServiceEditPage() {
           });
         }}
       >
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10 }}>
+        <div className="form-fields">
           <label>Clave<input value={data.code} readOnly /></label>
           <label>Nombre<input name="name" required defaultValue={data.name} /></label>
           <label>
             Unidad
             <select name="unit" defaultValue={data.unit}>
               <option value="servicio">Servicio</option>
+              <option value="minuto">Minuto</option>
               <option value="hora">Hora</option>
               <option value="pieza">Pieza</option>
             </select>
           </label>
-          <label>Precio<input name="salePrice" required defaultValue={data.salePrice ?? ""} /></label>
+          <CostPriceFields costLabel="Costo" priceLabel="Precio" initialCost={data.cost ?? ""} initialPrice={data.salePrice ?? ""} priceRequired />
           <label>
             Estado
             <select name="status" defaultValue={data.status}>
@@ -475,8 +629,21 @@ export function ServiceEditPage() {
           </label>
         </div>
         <label>Términos<textarea name="terms" rows={3} defaultValue={data.terms} /></label>
-        <button className="primary" type="submit">Guardar cambios</button>
-        {error ? <p className="error">{error}</p> : null}
+        <FormActions>
+          <SaveButton pending={pendingKey !== null} />
+          <DeleteButton
+            pending={pendingKey !== null}
+            onClick={() => {
+              if (!window.confirm("¿Eliminar este servicio? Esta acción no se puede deshacer.")) return;
+              void run(async () => {
+                await api(`/services/${id}`, { method: "DELETE" });
+                await client.invalidateQueries({ queryKey: ["services"] });
+                navigate("/app/servicios");
+              }, "delete");
+            }}
+          />
+          {error ? <p className="error">{error}</p> : null}
+        </FormActions>
       </form>
     </section>
   );
@@ -484,6 +651,7 @@ export function ServiceEditPage() {
 
 export function QuotesPage() {
   const client = useQueryClient();
+  const navigate = useNavigate();
   const { error, run } = useError();
   const [pendingId, setPendingId] = useState<string | null>(null);
   const quotes = useQuery({ queryKey: ["quotes"], queryFn: () => api<{ data: Quote[] }>("/quotes") });
@@ -504,14 +672,16 @@ export function QuotesPage() {
       </div>
       <p>Una cotización es de impresiones o de productos. Cada impresión lleva sus servicios y sus filamentos, en gramos. Vigencia de 30 días. Aceptada, se convierte en pedido.</p>
       {quotes.isPending ? <TableSkeleton columns={5} /> : (
+      <Paged rows={quotes.data?.data ?? []}>
+      {(pageQuotes) => (
       <table>
         <thead><tr><th>Folio</th><th>Cliente</th><th>Estado</th><th>Total</th><th></th></tr></thead>
         <tbody>
-          {(quotes.data?.data ?? []).map((quote) => (
+          {pageQuotes.map((quote) => (
             <tr key={quote.id}>
               <td>{quote.folio}</td>
               <td>{quote.customerName}</td>
-              <td>{QUOTE_STATUS[quote.status] ?? quote.status}</td>
+              <td><QuoteStatusBadge status={quote.status} /></td>
               <td>{money(quote.total)}</td>
               <td>
                 <div className="record-actions">
@@ -527,7 +697,7 @@ export function QuotesPage() {
                     </IconAction>
                   ) : null}
                   {quote.status === "accepted" ? (
-                    <IconAction label="A pedido" tone="convert" pending={pendingId === quote.id} disabled={pendingId !== null} onClick={() => act(quote.id, () => convertQuote(client, quote.id))}>
+                    <IconAction label="A pedido" tone="convert" pending={pendingId === quote.id} disabled={pendingId !== null} onClick={() => act(quote.id, async () => { const order = await convertQuote(client, quote.id); navigate(`/app/pedidos/${order.id}`); })}>
                       <OrderIcon />
                     </IconAction>
                   ) : null}
@@ -538,21 +708,19 @@ export function QuotesPage() {
         </tbody>
       </table>
       )}
+      </Paged>
+      )}
       {error ? <p className="error">{error}</p> : null}
     </section>
   );
 }
 
-function IconAction({ label, tone, pending = false, disabled = false, onClick, children }: { label: string; tone: string; pending?: boolean; disabled?: boolean; onClick: () => void; children: ReactNode }) {
+export function IconAction({ label, tone, pending = false, disabled = false, onClick, children }: { label: string; tone: string; pending?: boolean; disabled?: boolean; onClick: () => void; children: ReactNode }) {
   return (
     <button className={`icon-btn ${tone}`} type="button" aria-label={pending ? `${label}, en proceso` : label} title={label} disabled={pending || disabled} aria-busy={pending} onClick={onClick}>
-      {pending ? <Spinner /> : children}
+      {children}
     </button>
   );
-}
-
-function Spinner() {
-  return <span className="spinner" aria-hidden="true" />;
 }
 
 function SendIcon() {
@@ -564,7 +732,7 @@ function SendIcon() {
   );
 }
 
-function CheckIcon() {
+export function CheckIcon() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
       <path d="M20 6 9 17l-5-5" />
@@ -647,19 +815,21 @@ export function OrdersPage() {
         <h1 style={{ margin: 0 }}>Pedidos</h1>
         <Link className="primary" to="/app/pedidos/nuevo">Nuevo pedido</Link>
       </div>
-      <p>El pedido nace de una cotización o se captura directo. Primero se satisface el trabajo, y el cobro y la entrega avanzan por separado.</p>
+      <p>El pedido nace de una cotización o se captura directo. Una impresión se cierra aquí, sin descontar filamento: el consumo real se resta en Inventario ▸ Filamentos. Producción solo fabrica productos con receta. El cobro y la entrega avanzan por separado.</p>
       {orders.isPending ? <TableSkeleton columns={6} /> : (
+      <Paged rows={orders.data?.data ?? []}>
+      {(pageOrders) => (
       <table>
-        <thead><tr><th>Folio</th><th>Cliente</th><th>Estado</th><th>Pago</th><th>Saldo</th><th></th></tr></thead>
+        <thead><tr><th>Folio</th><th>Cliente</th><th>Avance</th><th>Estado</th><th>Saldo</th><th></th></tr></thead>
         <tbody>
-          {(orders.data?.data ?? []).map((order) => {
+          {pageOrders.map((order) => {
             const step = nextOrderAction(order.status);
             return (
             <tr key={order.id}>
               <td>{order.folio}</td>
               <td>{order.customerName}</td>
-              <td>{ORDER_STATUS[order.status] ?? order.status}</td>
-              <td>{PAYMENT_STATUS[order.paymentStatus] ?? order.paymentStatus}</td>
+              <td><OrderStages order={order} /></td>
+              <td><OrderStatusBadge status={order.status} /></td>
               <td>{money(order.amountDue)}</td>
               <td>
                 <div className="record-actions">
@@ -683,6 +853,8 @@ export function OrdersPage() {
         </tbody>
       </table>
       )}
+      </Paged>
+      )}
       {error ? <p className="error">{error}</p> : null}
     </section>
   );
@@ -691,7 +863,7 @@ export function OrdersPage() {
 export function OrderNewPage() {
   const client = useQueryClient();
   const navigate = useNavigate();
-  const { error, run } = useError();
+  const { error, pendingKey, run } = useError();
   const customers = useQuery({ queryKey: ["customers"], queryFn: () => api<{ data: Customer[] }>("/customers") });
   const products = useQuery({
     queryKey: ["products", "goods"],
@@ -700,7 +872,7 @@ export function OrderNewPage() {
   const filamentCatalog = useQuery({ queryKey: ["filaments"], queryFn: () => api<{ data: CatalogItem[] }>("/filaments") });
   const services = useQuery({ queryKey: ["services"], queryFn: () => api<{ data: ServiceOffering[] }>("/services") });
   const filaments = filamentCatalog.data?.data ?? [];
-  const goods = (products.data?.data ?? []).filter((product) => product.productType === "component" || product.productType === "finished_good");
+  const goods = (products.data?.data ?? []).filter((product) => product.productType === "component" || product.productType === "finished_good" || product.productType === "resale");
   const offerings = (services.data?.data ?? []).filter((service) => service.status === "active");
   return (
     <section style={{ display: "grid", gap: 16 }}>
@@ -715,6 +887,7 @@ export function OrderNewPage() {
         error={error}
         submitLabel="Guardar pedido"
         shipping
+        pending={pendingKey !== null}
         onSubmit={(body) =>
           run(async () => {
             const created = await api<{ id: string }>("/orders", { method: "POST", body: JSON.stringify(body) });
@@ -763,17 +936,7 @@ export function OrderDetailPage() {
               await client.invalidateQueries({ queryKey: ["order", id] });
             }}
           />
-          <div style={{ display: "flex", gap: 8 }}>
-            <Action label="PDF" onClick={() => run(() => download(`/orders/${data.id}/pdf`, `${data.folio}.pdf`))} />
-            {nextOrderAction(data.status) ? (
-              <Action
-                label={nextOrderAction(data.status)!.label}
-                pending={pendingKey === "status"}
-                disabled={pendingKey !== null}
-                onClick={() => act("status", () => transitionOrder(client, data.id, nextOrderAction(data.status)!.to))}
-              />
-            ) : null}
-          </div>
+          <OrderNextStep order={data} pendingKey={pendingKey} onAct={(to) => act("status", () => transitionOrder(client, data.id, to))} onPdf={() => act("pdf", () => download(`/orders/${data.id}/pdf`, `${data.folio}.pdf`))} onCancel={() => act("cancel", () => cancelOrder(client, data.id))} />
         </>
       )}
     </section>
@@ -786,15 +949,139 @@ const RESOLUTION_LABEL: Record<string, string> = {
   delivered: "Prestado",
   accepted: "Aceptado",
   rework: "Retrabajo",
-  waived: "Condonado",
 };
 
 const RESOLUTION_NEXT: Record<string, Array<{ to: string; label: string }>> = {
-  pending: [{ to: "in_progress", label: "Empezar" }, { to: "waived", label: "Condonar" }],
-  in_progress: [{ to: "delivered", label: "Prestado" }, { to: "rework", label: "Retrabajo" }, { to: "waived", label: "Condonar" }],
-  rework: [{ to: "in_progress", label: "Reanudar" }, { to: "waived", label: "Condonar" }],
+  pending: [{ to: "in_progress", label: "Empezar" }],
+  in_progress: [{ to: "delivered", label: "Prestado" }, { to: "rework", label: "Retrabajo" }],
+  rework: [{ to: "in_progress", label: "Reanudar" }],
   delivered: [{ to: "accepted", label: "Cliente acepta" }, { to: "rework", label: "Retrabajo" }],
 };
+
+function ResolutionBadge({ resolution }: { resolution: string }) {
+  return <span className={`res res-badge res-${resolution}`}>{RESOLUTION_LABEL[resolution] ?? resolution}</span>;
+}
+
+function OrderLinesTable({
+  lines,
+  showResolution,
+  pendingKey = null,
+  onResolve,
+}: {
+  lines: OrderDetail["lines"];
+  showResolution: boolean;
+  pendingKey?: string | null;
+  onResolve?: (line: OrderDetail["lines"][number], step: string) => void;
+}) {
+  if (!lines.length) return null;
+  return (
+    <Paged rows={lines}>
+    {(pageLines) => (
+    <div className="scroll-x">
+      <table>
+        <thead>
+          <tr>
+            <th>Descripción</th>
+            <th>Cantidad</th>
+            <th>UM</th>
+            <th>Precio unitario</th>
+            <th>Descuento</th>
+            <th>Importe</th>
+            <th>IVA</th>
+            <th>Total</th>
+            {showResolution ? <th>Resolución</th> : null}
+          </tr>
+        </thead>
+        <tbody>
+          {pageLines.map((line) => (
+            <tr key={line.id}>
+              <td>
+                {line.description}
+                {line.lineKind === "filament" && line.onHand != null ? (
+                  <div className={Number(line.onHand) <= 0 ? "stock-zero" : undefined}>Existencia {line.onHand} g</div>
+                ) : null}
+                {line.terms ? <div>{line.terms}</div> : null}
+                {showResolution && (line.lineKind === "service" || line.productType === "finished_good") ? (
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 6 }}>
+                    {(RESOLUTION_NEXT[line.resolution] ?? []).map((step) => {
+                      const key = `${line.id}:${step.to}`;
+                      return (
+                        <Action
+                          key={step.to}
+                          label={step.label}
+                          tone={step.to}
+                          pending={pendingKey === key}
+                          disabled={pendingKey !== null}
+                          onClick={() => onResolve?.(line, step.to)}
+                        />
+                      );
+                    })}
+                  </div>
+                ) : null}
+              </td>
+              <td>{line.quantity}</td>
+              <td>{lineUom(line)}</td>
+              <td>{money(line.unitPrice)}</td>
+              <td>{money(line.discount)}</td>
+              <td>{money(line.net)}</td>
+              <td>{money(line.vat)}</td>
+              <td>{money(line.total)}</td>
+              {showResolution ? <td>{line.lineKind === "service" || line.productType === "finished_good" ? <ResolutionBadge resolution={line.resolution} /> : "—"}</td> : null}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+    )}
+    </Paged>
+  );
+}
+
+function OrderGuidance({
+  order,
+  pendingKey,
+  act,
+  onChange,
+}: {
+  order: OrderDetail;
+  pendingKey: string | null;
+  act: (key: string, action: () => Promise<void>) => Promise<void>;
+  onChange: () => Promise<void>;
+}) {
+  const client = useQueryClient();
+  const supply = order.supply;
+  if (!supply) return null;
+  const stocking = ["confirmed", "in_production", "on_hold"].includes(order.status);
+  const beforeShip = stocking || order.status === "ready_to_ship";
+  const notes: string[] = [];
+  if (beforeShip && supply.printsOpen) notes.push("Cierra cada impresión en este pedido. Prestado o aceptado permite embarcar.");
+  if (stocking && supply.filamentShort) notes.push("Falta filamento. El consumo real se resta en Inventario ▸ Filamentos, no al cerrar la impresión.");
+  if (stocking && supply.productToBuy) notes.push("Falta producto en existencia. Recíbelo en Compras y apártalo en este pedido.");
+  if (stocking && supply.productToMake) notes.push("Hay producto por fabricar. Genera la orden en Producción.");
+  const allocate = order.actions?.find((action) => action.action === "allocate");
+  if (!notes.length && !allocate?.allowed) return null;
+  return (
+    <div style={{ display: "grid", gap: 8 }}>
+      {notes.map((note) => <p key={note} style={{ margin: 0 }}>{note}</p>)}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        {allocate?.allowed ? (
+          <Action
+            label="Apartar existencia"
+            pending={pendingKey === "allocate"}
+            disabled={pendingKey !== null}
+            onClick={() => act("allocate", async () => {
+              await api(`/orders/${order.id}/allocate`, { method: "POST" });
+              await onChange();
+              await client.invalidateQueries({ queryKey: ["orders"] });
+            })}
+          />
+        ) : null}
+        {stocking && supply.productToMake ? <Link to="/app/produccion">Ir a Producción</Link> : null}
+        {stocking && (supply.filamentShort || supply.productToBuy) ? <Link to="/app/compras">Ir a Compras</Link> : null}
+      </div>
+    </div>
+  );
+}
 
 function OrderPanel({
   order,
@@ -810,88 +1097,77 @@ function OrderPanel({
   onChange: () => Promise<void>;
 }) {
   const client = useQueryClient();
-  const satisfied = ["ready_to_ship", "shipped", "delivered", "completed"].includes(order.status);
-  const delivered = ["delivered", "completed"].includes(order.status);
-  const stages = [
-    { label: "Creado", done: true },
-    { label: "Satisfecho", done: satisfied },
-    { label: "Cobrado", done: order.paymentStatus === "paid" },
-    { label: "Entregado", done: delivered },
-  ];
   return (
     <article className="card" style={{ display: "grid", gap: 12 }}>
       <header style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", gap: 16 }}>
         <div>
           <h2 style={{ margin: 0 }}>{order.folio}</h2>
-          <p style={{ margin: 0 }}>{order.customerName}{order.customerRfc ? ` · RFC ${order.customerRfc}` : ""} · {ORDER_STATUS[order.status] ?? order.status}</p>
+          <p style={{ margin: 0, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            {order.customerName}{order.customerRfc ? ` · RFC ${order.customerRfc}` : ""}
+            <OrderStatusBadge status={order.status} />
+          </p>
         </div>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          {stages.map((stage) => (
-            <span key={stage.label} style={{ padding: "4px 10px", borderRadius: 999, background: stage.done ? "var(--color-accent, #1f6b4a)" : "transparent", color: stage.done ? "#fff" : "inherit", border: "1px solid var(--color-line, #ccc)" }}>
-              {stage.label}
-            </span>
-          ))}
-        </div>
+        <OrderStages order={order} full />
       </header>
       {order.serviceTerms ? <p style={{ margin: 0 }}>Términos: {order.serviceTerms}</p> : null}
-      <div className="scroll-x">
-        <table>
-          <thead>
-            <tr>
-              <th>Descripción</th>
-              <th>Cantidad</th>
-              <th>UM</th>
-              <th>Precio unitario</th>
-              <th>Descuento</th>
-              <th>Importe</th>
-              <th>IVA</th>
-              <th>Total</th>
-              <th>Resolución</th>
-            </tr>
-          </thead>
-          <tbody>
-            {order.lines.map((line) => (
-              <tr key={line.id}>
-                <td>
-                  {line.description}
-                  {line.terms ? <div>{line.terms}</div> : null}
-                  {line.lineKind === "service" ? (
-                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 6 }}>
-                      {(RESOLUTION_NEXT[line.resolution] ?? []).map((step) => {
-                        const key = `${line.id}:${step.to}`;
-                        return (
-                          <Action
-                            key={step.to}
-                            label={step.label}
-                            pending={pendingKey === key}
-                            disabled={pendingKey !== null}
-                            onClick={() => act(key, async () => {
-                              await api(`/orders/${order.id}/lines/${line.id}/resolution`, {
-                                method: "POST",
-                                body: JSON.stringify({ resolution: step.to }),
-                              });
-                              await onChange();
-                              await client.invalidateQueries({ queryKey: ["orders"] });
-                            })}
-                          />
-                        );
-                      })}
-                    </div>
-                  ) : null}
-                </td>
-                <td>{line.quantity}</td>
-                <td>{lineUom(line)}</td>
-                <td>{money(line.unitPrice)}</td>
-                <td>{money(line.discount)}</td>
-                <td>{money(line.net)}</td>
-                <td>{money(line.vat)}</td>
-                <td>{money(line.total)}</td>
-                <td>{line.lineKind === "service" ? (RESOLUTION_LABEL[line.resolution] ?? line.resolution) : "—"}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {order.paymentTerms || order.depositPercent > 0 || order.paymentNotes ? (
+        <PaymentConditions
+          data={order}
+          total={order.total ?? null}
+          paid={order.total != null && order.amountDue !== null ? (Number(order.total) - Number(order.amountDue)).toFixed(2) : null}
+        />
+      ) : null}
+      {order.promisedDate ? <p style={{ margin: 0 }}>Fecha compromiso: {new Date(`${order.promisedDate}T12:00:00`).toLocaleDateString("es-MX")}</p> : null}
+      <OrderGuidance order={order} pendingKey={pendingKey} act={act} onChange={onChange} />
+      {(order.prints ?? []).map((print) => (
+        <section key={print.id} style={{ display: "grid", gap: 8 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+            <div>
+              <strong>{print.name}</strong>
+              <p style={{ margin: "4px 0 0", display: "flex", gap: 8, alignItems: "center" }}>{print.quantity} piezas <ResolutionBadge resolution={print.resolution} /></p>
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {(RESOLUTION_NEXT[print.resolution] ?? []).map((step) => {
+                const key = `print:${print.id}:${step.to}`;
+                return (
+                  <Action
+                    key={step.to}
+                    label={step.label}
+                    tone={step.to}
+                    pending={pendingKey === key}
+                    disabled={pendingKey !== null}
+                    onClick={() => act(key, async () => {
+                      await api(`/orders/${order.id}/prints/${print.id}/resolution`, {
+                        method: "POST",
+                        body: JSON.stringify({ resolution: step.to }),
+                      });
+                      await onChange();
+                      await client.invalidateQueries({ queryKey: ["orders"] });
+                    })}
+                  />
+                );
+              })}
+            </div>
+          </div>
+          <OrderLinesTable lines={order.lines.filter((line) => line.printId === print.id)} showResolution={false} />
+        </section>
+      ))}
+      <OrderLinesTable
+        lines={order.lines.filter((line) => !line.printId)}
+        showResolution
+        pendingKey={pendingKey}
+        onResolve={(line, step) => {
+          const key = `${line.id}:${step}`;
+          void act(key, async () => {
+            await api(`/orders/${order.id}/lines/${line.id}/resolution`, {
+              method: "POST",
+              body: JSON.stringify({ resolution: step }),
+            });
+            await onChange();
+            await client.invalidateQueries({ queryKey: ["orders"] });
+          });
+        }}
+      />
       <div style={{ justifySelf: "end", textAlign: "right" }}>
         <p style={{ margin: 0 }}>Subtotal {money(order.subtotal)}</p>
         <p style={{ margin: 0 }}>Descuento {money(order.discount)}</p>
@@ -916,10 +1192,12 @@ export function CollectionsPage() {
       </div>
       <p>Efectivo, SPEI, tarjeta o contra entrega. El saldo sale del libro de pagos, no de una casilla.</p>
       {payments.isPending ? <TableSkeleton columns={5} /> : (
+      <Paged rows={payments.data?.data ?? []}>
+      {(pagePayments) => (
       <table>
         <thead><tr><th>Pedido</th><th>Método</th><th>Estado</th><th>Importe</th><th>Referencia</th></tr></thead>
         <tbody>
-          {(payments.data?.data ?? []).map((payment) => (
+          {pagePayments.map((payment) => (
             <tr key={payment.id}>
               <td>{payment.folio}</td>
               <td>{payment.method}</td>
@@ -931,6 +1209,8 @@ export function CollectionsPage() {
         </tbody>
       </table>
       )}
+      </Paged>
+      )}
     </section>
   );
 }
@@ -938,7 +1218,9 @@ export function CollectionsPage() {
 export function PaymentNewPage() {
   const client = useQueryClient();
   const navigate = useNavigate();
-  const { error, run } = useError();
+  const [params] = useSearchParams();
+  const preset = params.get("pedido") ?? "";
+  const { error, pendingKey, run } = useError();
   const orders = useQuery({ queryKey: ["orders"], queryFn: () => api<{ data: Order[] }>("/orders") });
   return (
     <section style={{ display: "grid", gap: 16 }}>
@@ -964,14 +1246,15 @@ export function PaymentNewPage() {
             });
             await client.invalidateQueries({ queryKey: ["payments"] });
             await client.invalidateQueries({ queryKey: ["orders"] });
+            await client.invalidateQueries({ queryKey: ["order", data.get("orderId")] });
             await client.invalidateQueries({ queryKey: ["dashboard"] });
-            navigate("/app/cobranza");
+            navigate(preset ? `/app/pedidos/${preset}` : "/app/cobranza");
           });
         }}
       >
         <label>
           Pedido
-          <select name="orderId" required>
+          <select name="orderId" required defaultValue={preset}>
             {(orders.data?.data ?? []).filter((order) => order.status !== "draft" && order.status !== "cancelled").map((order) => (
               <option key={order.id} value={order.id}>{order.folio} · saldo {money(order.amountDue)}</option>
             ))}
@@ -986,10 +1269,10 @@ export function PaymentNewPage() {
             <option value="cod">Contra entrega</option>
           </select>
         </label>
-        <label>Importe<input name="amount" required placeholder="100.00" /></label>
+        <label>Importe<input name="amount" required placeholder="100.00" defaultValue={preset ? (orders.data?.data ?? []).find((order) => order.id === preset)?.amountDue ?? undefined : undefined} /></label>
         <label>Referencia<input name="reference" placeholder="Folio bancario" /></label>
         <label>Nota<input name="note" /></label>
-        <button className="primary" type="submit">Guardar cobro</button>
+        <button className="primary" type="submit" disabled={pendingKey !== null} aria-busy={pendingKey !== null}>Guardar cobro</button>
         {error ? <p className="error">{error}</p> : null}
       </form>
       )}
@@ -1000,7 +1283,7 @@ export function PaymentNewPage() {
 export function QuoteNewPage() {
   const client = useQueryClient();
   const navigate = useNavigate();
-  const { error, run } = useError();
+  const { error, pendingKey, run } = useError();
   const customers = useQuery({ queryKey: ["customers"], queryFn: () => api<{ data: Customer[] }>("/customers") });
   const products = useQuery({
     queryKey: ["products", "goods"],
@@ -1009,7 +1292,7 @@ export function QuoteNewPage() {
   const filamentCatalog = useQuery({ queryKey: ["filaments"], queryFn: () => api<{ data: CatalogItem[] }>("/filaments") });
   const services = useQuery({ queryKey: ["services"], queryFn: () => api<{ data: ServiceOffering[] }>("/services") });
   const filaments = filamentCatalog.data?.data ?? [];
-  const goods = (products.data?.data ?? []).filter((product) => product.productType === "component" || product.productType === "finished_good");
+  const goods = (products.data?.data ?? []).filter((product) => product.productType === "component" || product.productType === "finished_good" || product.productType === "resale");
   const offerings = (services.data?.data ?? []).filter((service) => service.status === "active");
   return (
     <section style={{ display: "grid", gap: 16 }}>
@@ -1022,6 +1305,7 @@ export function QuoteNewPage() {
         filaments={filaments}
         services={offerings}
         error={error}
+        pending={pendingKey !== null}
         onSubmit={(body) =>
           run(async () => {
             const created = await api<{ id: string }>("/quotes", { method: "POST", body: JSON.stringify(body) });
@@ -1035,20 +1319,63 @@ export function QuoteNewPage() {
   );
 }
 
+export function QuoteEditPage() {
+  const { id } = useParams();
+  const client = useQueryClient();
+  const navigate = useNavigate();
+  const { error, pendingKey, run } = useError();
+  const quote = useQuery({
+    queryKey: ["quote", id],
+    queryFn: () => api<QuoteDetail>(`/quotes/${id}`),
+    enabled: Boolean(id),
+  });
+  const customers = useQuery({ queryKey: ["customers"], queryFn: () => api<{ data: Customer[] }>("/customers") });
+  const products = useQuery({
+    queryKey: ["products", "goods"],
+    queryFn: () => api<{ data: CatalogItem[] }>("/products?limit=100"),
+  });
+  const filamentCatalog = useQuery({ queryKey: ["filaments"], queryFn: () => api<{ data: CatalogItem[] }>("/filaments") });
+  const services = useQuery({ queryKey: ["services"], queryFn: () => api<{ data: ServiceOffering[] }>("/services") });
+  const filaments = filamentCatalog.data?.data ?? [];
+  const goods = (products.data?.data ?? []).filter((product) => product.productType === "component" || product.productType === "finished_good" || product.productType === "resale");
+  const offerings = (services.data?.data ?? []).filter((service) => service.status === "active");
+  const data = quote.data;
+  const loading = quote.isPending || customers.isPending || products.isPending || filamentCatalog.isPending || services.isPending;
+  return (
+    <section style={{ display: "grid", gap: 16 }}>
+      <p><Link to={data ? `/app/cotizaciones/${data.id}` : "/app/cotizaciones"}>Cotización</Link></p>
+      <h1>Editar {data?.folio ?? "cotización"}</h1>
+      {loading ? <FormSkeleton fields={6} /> : !data ? <p className="error">No se pudo cargar la cotización.</p> : data.status !== "draft" ? (
+        <p className="error">Solo se edita una cotización en borrador.</p>
+      ) : (
+      <QuoteBuilder
+        customers={customers.data?.data ?? []}
+        products={goods}
+        filaments={filaments}
+        services={offerings}
+        initial={quoteToDraft(data)}
+        error={error}
+        pending={pendingKey !== null}
+        submitLabel="Guardar cambios"
+        onSubmit={(body) =>
+          run(async () => {
+            await api(`/quotes/${data.id}`, { method: "PATCH", body: JSON.stringify(body) });
+            await client.invalidateQueries({ queryKey: ["quotes"] });
+            await client.invalidateQueries({ queryKey: ["quote", data.id] });
+            navigate(`/app/cotizaciones/${data.id}`);
+          })
+        }
+      />
+      )}
+    </section>
+  );
+}
+
 export function QuoteDetailPage() {
   const { id } = useParams();
   const client = useQueryClient();
-  const { error, run } = useError();
-  const [pending, setPending] = useState(false);
-  async function act(action: () => Promise<void>) {
-    if (pending) return;
-    setPending(true);
-    try {
-      await run(action);
-    } finally {
-      setPending(false);
-    }
-  }
+  const navigate = useNavigate();
+  const { error, pendingKey, run } = useError();
   const quote = useQuery({
     queryKey: ["quote", id],
     queryFn: () => api<QuoteDetail>(`/quotes/${id}`),
@@ -1064,8 +1391,9 @@ export function QuoteDetailPage() {
             <header style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", gap: 16 }}>
               <div>
                 <h1 style={{ margin: 0 }}>{data.folio}</h1>
-                <p style={{ margin: 0 }}>
-                  {new Date(data.createdAt).toLocaleDateString("es-MX")} · Vigente hasta {new Date(data.validUntil).toLocaleDateString("es-MX")} · {QUOTE_STATUS[data.status] ?? data.status}
+                <p style={{ margin: 0, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                  {new Date(data.createdAt).toLocaleDateString("es-MX")} · Vigente hasta {new Date(data.validUntil).toLocaleDateString("es-MX")}
+                  <QuoteStatusBadge status={data.status} />
                 </p>
                 <p style={{ margin: 0 }}>{data.mode === "prints" ? "Impresiones" : "Productos"} · {data.currency} · {paymentTermsLabel(data.paymentTerms)} · {vatRateLabel(data.vatRate)}</p>
               </div>
@@ -1080,21 +1408,80 @@ export function QuoteDetailPage() {
               <strong>Cliente</strong>
               <p style={{ margin: 0 }}>{data.customerName}{data.customerRfc ? ` · RFC ${data.customerRfc}` : ""}</p>
             </div>
-            {data.mode === "prints" ? <PrintBreakdown prints={data.prints} /> : <QuoteLinesTable lines={data.lines} />}
-            <div style={{ justifySelf: "end", textAlign: "right" }}>
-              <p style={{ margin: 0 }}>Subtotal {money(data.subtotal)}</p>
-              <p style={{ margin: 0 }}>Descuento {money(data.discount)}</p>
-              <p style={{ margin: 0 }}>IVA {money(data.vat)}</p>
-              <p style={{ margin: 0, fontSize: 20 }}><strong>Total {money(data.total)} {data.currency}</strong></p>
+            {data.costing ? (
+              <QuoteBreakdown quote={data} costing={data.costing} />
+            ) : data.mode === "prints" ? <PrintBreakdown prints={data.prints} /> : <QuoteLinesTable lines={data.lines} />}
+            <div className="quote-footer">
+              <PaymentConditions data={data} total={data.total} leadTimeDays={data.leadTimeDays} />
+              <div style={{ textAlign: "right" }}>
+                <p style={{ margin: 0 }}>Subtotal {money(data.subtotal)}</p>
+                <p style={{ margin: 0 }}>Descuento {money(data.discount)}</p>
+                <p style={{ margin: 0 }}>IVA {money(data.vat)}</p>
+                <p style={{ margin: 0, fontSize: 20 }}><strong>Total {money(data.total)} {data.currency}</strong></p>
+              </div>
             </div>
             {data.serviceTerms ? <p style={{ margin: 0 }}>Términos: {data.serviceTerms}</p> : null}
             <p style={{ margin: 0, fontWeight: 600 }}>Documento comercial. No es un CFDI.</p>
           </article>
-          <div style={{ display: "flex", gap: 8 }}>
-            <Action label="PDF" onClick={() => run(() => download(`/quotes/${data.id}/pdf`, `${data.folio}.pdf`))} />
-            {data.status === "draft" ? <Action label="Enviar" pending={pending} onClick={() => act(() => transitionQuote(client, data.id, "sent"))} /> : null}
-            {data.status === "sent" ? <Action label="Aceptar" pending={pending} onClick={() => act(() => transitionQuote(client, data.id, "accepted"))} /> : null}
-            {data.status === "accepted" ? <Action label="A pedido" pending={pending} onClick={() => act(() => convertQuote(client, data.id))} /> : null}
+          <div className="card quote-actions">
+            <div className="quote-actions-group">
+              <span className="quote-actions-label">Siguiente paso</span>
+              <p className="quote-actions-hint">{QUOTE_NEXT_HINT[data.status] ?? ""}</p>
+              <div className="quote-actions-row">
+                {data.status === "draft" ? (
+                  <QuoteButton label="Marcar como enviada" tone="send" icon={<SendIcon />} pending={pendingKey === "sent"} disabled={pendingKey !== null} onClick={() => run(() => transitionQuote(client, data.id, "sent"), "sent")} />
+                ) : null}
+                {data.status === "sent" ? (
+                  <QuoteButton label="El cliente aceptó" tone="accept" icon={<CheckIcon />} pending={pendingKey === "accepted"} disabled={pendingKey !== null} onClick={() => run(() => transitionQuote(client, data.id, "accepted"), "accepted")} />
+                ) : null}
+                {data.status === "accepted" ? (
+                  <QuoteButton label="Convertir en pedido" tone="convert" icon={<OrderIcon />} pending={pendingKey === "convert"} disabled={pendingKey !== null} onClick={() => run(async () => { const order = await convertQuote(client, data.id); navigate(`/app/pedidos/${order.id}`); }, "convert")} />
+                ) : null}
+                {data.status === "converted" ? (
+                  <Link className="quote-btn convert" to="/app/pedidos"><OrderIcon /><span>Ir a pedidos</span></Link>
+                ) : null}
+                {data.status === "draft" ? (
+                  <Link className="quote-btn neutral" to={`/app/cotizaciones/${data.id}/editar`}><PencilIcon /><span>Editar</span></Link>
+                ) : null}
+                {data.status === "sent" ? (
+                  <QuoteButton label="Marcar como vencida" tone="warn" icon={<ClockIcon />} pending={pendingKey === "expired"} disabled={pendingKey !== null} onClick={() => run(() => transitionQuote(client, data.id, "expired"), "expired")} />
+                ) : null}
+                {["draft", "sent", "accepted"].includes(data.status) ? (
+                  <QuoteButton
+                    label="Cancelar cotización"
+                    tone="danger"
+                    icon={<BanIcon />}
+                    pending={pendingKey === "void"}
+                    disabled={pendingKey !== null}
+                    onClick={() => {
+                      if (!window.confirm(`¿Cancelar ${data.folio}? Ya no se podrá enviar ni convertir.`)) return;
+                      void run(() => transitionQuote(client, data.id, "void"), "void");
+                    }}
+                  />
+                ) : null}
+              </div>
+            </div>
+            <div className="quote-actions-group">
+              <span className="quote-actions-label">Documentos</span>
+              <div className="quote-actions-row">
+                <QuoteButton label="PDF para el cliente" tone="doc" icon={<DownloadIcon />} pending={pendingKey === "pdf"} disabled={pendingKey !== null} onClick={() => run(() => download(`/quotes/${data.id}/pdf`, `${data.folio}.pdf`), "pdf")} />
+                {data.costing ? (
+                  <QuoteButton label="PDF del taller" tone="shop" icon={<DownloadIcon />} pending={pendingKey === "pdf-taller"} disabled={pendingKey !== null} onClick={() => run(() => download(`/quotes/${data.id}/pdf/taller`, `${data.folio}-taller.pdf`), "pdf-taller")} />
+                ) : null}
+                <QuoteButton
+                  label="Duplicar"
+                  tone="neutral"
+                  icon={<CopyIcon />}
+                  pending={pendingKey === "clone"}
+                  disabled={pendingKey !== null}
+                  onClick={() => run(async () => {
+                    const copy = await api<{ id: string }>(`/quotes/${data.id}/clone`, { method: "POST" });
+                    await client.invalidateQueries({ queryKey: ["quotes"] });
+                    navigate(`/app/cotizaciones/${copy.id}/editar`);
+                  }, "clone")}
+                />
+              </div>
+            </div>
           </div>
           {error ? <p className="error">{error}</p> : null}
         </>
@@ -1116,11 +1503,54 @@ const ORDER_STATUS: Record<string, string> = {
   cancelled: "Cancelado",
 };
 
-const PAYMENT_STATUS: Record<string, string> = {
-  pending: "Por cobrar",
-  partial: "Parcial",
-  paid: "Pagado",
-};
+function orderStages(order: { status: string; paymentStatus: string }) {
+  const satisfied = ["ready_to_ship", "shipped", "delivered", "completed"].includes(order.status);
+  const delivered = ["delivered", "completed"].includes(order.status);
+  return [
+    { key: "created", label: "Creado", done: true },
+    { key: "satisfied", label: "Satisfecho", done: satisfied },
+    { key: "paid", label: "Cobrado", done: order.paymentStatus === "paid" },
+    { key: "delivered", label: "Entregado", done: delivered },
+  ];
+}
+
+function OrderStages({ order, full = false }: { order: { status: string; paymentStatus: string }; full?: boolean }) {
+  return (
+    <span className="stage-row">
+      {orderStages(order).map((stage) => {
+        const className = stage.done ? `stage stage-${stage.key}` : `stage stage-${stage.key} off`;
+        return full
+          ? <span key={stage.key} className={className}>{stage.label}</span>
+          : <LetterChip key={stage.key} label={stage.label} className={className} />;
+      })}
+    </span>
+  );
+}
+
+function LetterChip({ label, className }: { label: string; className: string }) {
+  const [tip, setTip] = useState<{ x: number; y: number } | null>(null);
+  return (
+    <span
+      className={`letter-chip ${className}`}
+      aria-label={label}
+      onMouseEnter={(event) => {
+        const box = event.currentTarget.getBoundingClientRect();
+        setTip({ x: box.left + box.width / 2, y: box.top });
+      }}
+      onMouseLeave={() => setTip(null)}
+    >
+      {label.slice(0, 1)}
+      {tip ? createPortal(
+        <span className="stage-tip" style={{ left: tip.x, top: tip.y }} role="tooltip">{label}</span>,
+        document.body,
+      ) : null}
+    </span>
+  );
+}
+
+function OrderStatusBadge({ status }: { status: string }) {
+  return <span className={`res res-badge order-${status}`}>{ORDER_STATUS[status] ?? status}</span>;
+}
 
 function lineUom(line: { lineKind: string; uom?: string }): string {
   if (line.uom) return line.uom;
@@ -1137,6 +1567,79 @@ const QUOTE_STATUS: Record<string, string> = {
   expired: "Vencida",
   void: "Cancelada",
 };
+
+function QuoteStatusBadge({ status }: { status: string }) {
+  return <span className={`res res-badge quote-${status}`}>{QUOTE_STATUS[status] ?? status}</span>;
+}
+
+const QUOTE_NEXT_HINT: Record<string, string> = {
+  draft: "Revisa precios y condiciones. Cuando se la mandes al cliente, márcala como enviada. En borrador todavía se puede editar.",
+  sent: "Esperando respuesta del cliente. Si acepta, márcala como aceptada para poder convertirla en pedido.",
+  accepted: "El cliente aceptó. Conviértela en pedido para producir, cobrar el anticipo y entregar.",
+  converted: "Ya se convirtió en pedido. El seguimiento sigue en Pedidos.",
+  expired: "Venció sin respuesta. Duplícala para enviar una nueva con precios vigentes.",
+  void: "Cotización cancelada. Duplícala si quieres retomarla.",
+};
+
+export function QuoteButton({
+  label,
+  tone,
+  icon,
+  pending = false,
+  disabled = false,
+  onClick,
+}: {
+  label: string;
+  tone: string;
+  icon: ReactNode;
+  pending?: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button className={`quote-btn ${tone}`} type="button" disabled={pending || disabled} aria-busy={pending} onClick={onClick}>
+      {icon}
+      <span>{label}</span>
+    </button>
+  );
+}
+
+function DownloadIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+      <path d="M12 3v12" />
+      <path d="m7 10 5 5 5-5" />
+      <path d="M5 21h14" />
+    </svg>
+  );
+}
+
+function CopyIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+      <rect x="9" y="9" width="12" height="12" rx="2" />
+      <path d="M5 15V5a2 2 0 0 1 2-2h8" />
+    </svg>
+  );
+}
+
+function ClockIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7v5l3 2" />
+    </svg>
+  );
+}
+
+export function BanIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+      <circle cx="12" cy="12" r="9" />
+      <path d="m5.6 5.6 12.8 12.8" />
+    </svg>
+  );
+}
 
 function paymentTermsLabel(value: string) {
   if (value === "net_15") return "Crédito 15 días";
@@ -1167,6 +1670,8 @@ function PrintBreakdown({ prints }: { prints: QuoteDetail["prints"] }) {
         {allOpen ? "Cerrar todas" : "Desplegar todas"}
       </button>
     </div>
+    <Paged rows={prints}>
+    {(pagePrints) => (
     <table>
       <thead>
         <tr>
@@ -1181,7 +1686,7 @@ function PrintBreakdown({ prints }: { prints: QuoteDetail["prints"] }) {
         </tr>
       </thead>
       <tbody>
-        {prints.map((print) => {
+        {pagePrints.map((print) => {
           const open = openIds.has(print.id);
           return (
             <Fragment key={print.id}>
@@ -1212,12 +1717,172 @@ function PrintBreakdown({ prints }: { prints: QuoteDetail["prints"] }) {
         })}
       </tbody>
     </table>
+    )}
+    </Paged>
+    </div>
+  );
+}
+
+function profitClass(value: string | null) {
+  if (value === null) return undefined;
+  const amount = Number(value);
+  if (amount > 0) return "profit-positive";
+  if (amount < 0) return "profit-negative";
+  return undefined;
+}
+
+function PaymentConditions({
+  data,
+  total,
+  leadTimeDays,
+  paid,
+}: {
+  data: PaymentConditionsData;
+  total: string | null;
+  leadTimeDays?: number | null;
+  paid?: string | null;
+}) {
+  const credit = data.paymentTerms === "net_15" ? 15 : data.paymentTerms === "net_30" ? 30 : 0;
+  const when = credit ? `a ${credit} días de crédito` : "contra entrega";
+  const rows: Array<[string, string]> = [["Forma de pago", credit ? `Crédito ${credit} días` : "Contado"]];
+  if (data.depositPercent >= 100) rows.push(["Anticipo 100%", `${money(data.deposit)} al aceptar`]);
+  else if (data.depositPercent > 0) {
+    rows.push([`Anticipo ${data.depositPercent}%`, `${money(data.deposit)} al aceptar`]);
+    rows.push(["Saldo", `${money(data.balance)} ${when}`]);
+  } else rows.push(["Pago", `${money(total)} ${when}`]);
+  if (leadTimeDays) {
+    rows.push(["Entrega", `${leadTimeDays === 1 ? "1 día hábil" : `${leadTimeDays} días hábiles`} a partir ${data.depositPercent > 0 ? "del anticipo" : "de la aceptación"}`]);
+  }
+  const pendingDeposit = paid !== undefined && paid !== null && data.deposit !== null && data.depositPercent > 0
+    ? Number(data.deposit) - Number(paid)
+    : 0;
+  return (
+    <div className="payment-conditions">
+      <strong>Condiciones de pago</strong>
+      <dl>
+        {rows.map(([label, value]) => (
+          <Fragment key={label}>
+            <dt>{label}</dt>
+            <dd>{value}</dd>
+          </Fragment>
+        ))}
+      </dl>
+      {data.paymentNotes ? <p>{data.paymentNotes}</p> : null}
+      {paid !== undefined && data.depositPercent > 0 ? (
+        pendingDeposit > 0.004
+          ? <p className="payment-pending">Anticipo pendiente: {money(pendingDeposit.toFixed(2))}</p>
+          : <p className="payment-covered">Anticipo cubierto</p>
+      ) : null}
+    </div>
+  );
+}
+
+function marginLabel(totals: { revenue: string; profit: string | null }) {
+  const revenue = Number(totals.revenue);
+  if (totals.profit === null || !revenue) return "—";
+  return `${((Number(totals.profit) / revenue) * 100).toFixed(1)}%`;
+}
+
+function QuoteBreakdown({ quote, costing }: { quote: QuoteDetail; costing: QuoteCosting }) {
+  const costById = new Map(costing.lines.map((line) => [line.id, line]));
+  const costByPrint = new Map(costing.prints.map((print) => [print.id, print]));
+  const sections = quote.mode === "prints"
+    ? [
+        ...quote.prints.map((print) => {
+          const cost = costByPrint.get(print.id);
+          return {
+            key: print.id,
+            title: `${print.name} · ${print.quantity} piezas · precio por pieza ${money(print.unitTotal)} · costo por pieza ${money(cost?.unitCost ?? null)}`,
+            lines: print.lines,
+            subtotal: { discount: print.discount, revenue: print.subtotal, cost: cost?.cost ?? null, profit: cost?.profit ?? null },
+          };
+        }),
+        ...(quote.lines.length ? [{ key: "loose", title: "Otras partidas", lines: quote.lines, subtotal: null }] : []),
+      ]
+    : [{ key: "all", title: null, lines: quote.lines, subtotal: null }];
+  return (
+    <div style={{ display: "grid", gap: 12 }}>
+      <div className="costing-kpis">
+        <div><span>Costo para surtir</span><strong>{money(costing.cost)}</strong></div>
+        <div><span>Venta sin IVA</span><strong>{money(costing.revenue)}</strong></div>
+        <div><span>Utilidad</span><strong className={profitClass(costing.profit)}>{money(costing.profit)}</strong></div>
+        <div><span>Margen</span><strong className={profitClass(costing.profit)}>{costing.marginPct === null ? "—" : `${costing.marginPct}%`}</strong></div>
+      </div>
+      <p className="costing-hint" style={{ margin: 0 }}>Costo y utilidad son solo para el taller y no salen en el PDF del cliente. Se calculan con los costos vigentes del catálogo sobre el importe sin IVA.</p>
+      {costing.missing > 0 ? (
+        <p className="costing-warn">
+          {costing.missing} partida{costing.missing === 1 ? "" : "s"} sin costo en el catálogo. La utilidad real es menor; captura el costo en Filamentos, Insumos, Productos o Servicios.
+        </p>
+      ) : null}
+      <div className="scroll-x">
+        <table className="quote-breakdown">
+          <thead>
+            <tr>
+              <th>Concepto</th>
+              <th>Cantidad</th>
+              <th>Precio unitario</th>
+              <th>Descuento</th>
+              <th>Importe</th>
+              <th>Costo unitario</th>
+              <th>Costo</th>
+              <th>Utilidad</th>
+              <th>Margen</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sections.map((section) => (
+              <Fragment key={section.key}>
+                {section.title ? <tr className="costing-section"><td colSpan={9}>{section.title}</td></tr> : null}
+                {section.lines.map((line) => {
+                  const cost = costById.get(line.id);
+                  return (
+                    <tr key={line.id}>
+                      <td>{line.description}{line.terms ? <div className="costing-hint">{line.terms}</div> : null}</td>
+                      <td>{line.quantity} {line.uom}</td>
+                      <td>{money(line.unitPrice)}</td>
+                      <td>{money(line.discount)}</td>
+                      <td>{money(line.net)}</td>
+                      <td>{cost?.unitCost ? `${money(cost.unitCost)}/${cost.unitBasis}` : <span className="costing-warn">Sin costo</span>}</td>
+                      <td>{money(cost?.cost ?? null)}</td>
+                      <td className={profitClass(cost?.profit ?? null)}>{money(cost?.profit ?? null)}</td>
+                      <td className={profitClass(cost?.profit ?? null)}>{cost ? marginLabel(cost) : "—"}</td>
+                    </tr>
+                  );
+                })}
+                {section.subtotal ? (
+                  <tr className="costing-subtotal">
+                    <td colSpan={3}>Subtotal de la impresión</td>
+                    <td>{money(section.subtotal.discount)}</td>
+                    <td>{money(section.subtotal.revenue)}</td>
+                    <td></td>
+                    <td>{money(section.subtotal.cost)}</td>
+                    <td className={profitClass(section.subtotal.profit)}>{money(section.subtotal.profit)}</td>
+                    <td className={profitClass(section.subtotal.profit)}>{marginLabel({ revenue: section.subtotal.revenue ?? "0", profit: section.subtotal.profit })}</td>
+                  </tr>
+                ) : null}
+              </Fragment>
+            ))}
+            {costing.groups.map((group) => (
+              <tr key={group.label} className="costing-subtotal">
+                <td colSpan={4}>Total {group.label.toLowerCase()}</td>
+                <td>{money(group.revenue)}</td>
+                <td></td>
+                <td>{money(group.cost)}</td>
+                <td className={profitClass(group.profit)}>{money(group.profit)}</td>
+                <td className={profitClass(group.profit)}>{marginLabel(group)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
 
 function QuoteLinesTable({ lines }: { lines: QuoteLine[] }) {
   return (
+    <Paged rows={lines}>
+    {(pageLines) => (
     <table>
       <thead>
         <tr>
@@ -1232,7 +1897,7 @@ function QuoteLinesTable({ lines }: { lines: QuoteLine[] }) {
         </tr>
       </thead>
       <tbody>
-        {lines.map((line) => (
+        {pageLines.map((line) => (
           <tr key={line.id}>
             <td>{line.description}{line.terms ? <div>{line.terms}</div> : null}</td>
             <td>{line.quantity}</td>
@@ -1246,6 +1911,8 @@ function QuoteLinesTable({ lines }: { lines: QuoteLine[] }) {
         ))}
       </tbody>
     </table>
+    )}
+    </Paged>
   );
 }
 
@@ -1264,36 +1931,81 @@ function freshPart(items: CatalogItem[]): PartDraft {
   return { key: crypto.randomUUID(), catalogId: first?.id ?? "", quantity: "1", unitPrice: first?.salePrice ?? "", discount: "0", terms: first?.terms ?? "" };
 }
 
+function perPieceQty(total: string, pieces: string) {
+  const count = Number(pieces);
+  const amount = Number(total);
+  if (!count || !Number.isFinite(amount)) return total;
+  return String(Math.round((amount / count) * 10000) / 10000);
+}
+
+function partFromLine(line: QuoteLine, pieces: string): PartDraft {
+  return {
+    key: crypto.randomUUID(),
+    catalogId: line.catalogId ?? "",
+    quantity: perPieceQty(line.quantity, pieces),
+    unitPrice: line.unitPrice ?? "",
+    discount: line.discount ?? "0",
+    terms: line.terms ?? "",
+  };
+}
+
+function quoteToDraft(quote: QuoteDetail): QuoteDraft {
+  return {
+    customerId: quote.customerId,
+    mode: quote.mode,
+    serviceTerms: quote.serviceTerms ?? "",
+    paymentTerms: quote.paymentTerms,
+    depositPercent: quote.depositPercent,
+    paymentNotes: quote.paymentNotes ?? "",
+    leadTimeDays: quote.leadTimeDays,
+    prints: quote.prints.map((print) => ({
+      key: crypto.randomUUID(),
+      name: print.name,
+      quantity: print.quantity,
+      filaments: print.lines.filter((line) => line.lineKind === "filament").map((line) => partFromLine(line, print.quantity)),
+      services: print.lines.filter((line) => line.lineKind === "service").map((line) => partFromLine(line, print.quantity)),
+    })),
+    lines: quote.lines.map((line) => partFromLine(line, "1")),
+  };
+}
+
 function QuoteBuilder({
   customers,
   products,
   filaments,
   services,
+  initial,
   error,
+  pending = false,
+  submitLabel = "Guardar cotización",
   onSubmit,
 }: {
   customers: Customer[];
   products: CatalogItem[];
   filaments: CatalogItem[];
   services: CatalogItem[];
+  initial?: QuoteDraft;
   error: string | null;
+  pending?: boolean;
+  submitLabel?: string;
   onSubmit: (body: unknown) => void;
 }) {
-  const [mode, setMode] = useState<"prints" | "products">("prints");
-  const starter = useRef(blankPrint(filaments, services));
-  const [prints, setPrints] = useState<PrintDraft[]>([starter.current]);
-  const [openKey, setOpenKey] = useState<string | null>(starter.current.key);
-  const [productLines, setProductLines] = useState<PartDraft[]>(products[0] ? [freshPart(products)] : []);
+  const [mode, setMode] = useState<"prints" | "products">(initial?.mode ?? "prints");
+  const starter = useRef(initial?.prints[0] ?? blankPrint(filaments, services));
+  const [prints, setPrints] = useState<PrintDraft[]>(initial?.prints.length ? initial.prints : [starter.current]);
+  const [openKey, setOpenKey] = useState<string | null>(initial?.prints[0]?.key ?? starter.current.key);
+  const [productLines, setProductLines] = useState<PartDraft[]>(initial ? initial.lines : products[0] ? [freshPart(products)] : []);
+  const [paymentTerms, setPaymentTerms] = useState(initial?.paymentTerms ?? customers[0]?.paymentTerms ?? "pue");
   const seeded = useRef(false);
   useEffect(() => {
-    if (seeded.current) return;
+    if (initial || seeded.current) return;
     if (!filaments[0] && !services[0] && !products[0]) return;
     seeded.current = true;
     const created = blankPrint(filaments, services);
     setPrints([created]);
     setOpenKey(created.key);
     if (products[0]) setProductLines([freshPart(products)]);
-  }, [filaments, services, products]);
+  }, [filaments, services, products, initial]);
 
   function patchPart(list: PartDraft[], key: string, patch: Partial<PartDraft>, catalog: CatalogItem[]) {
     return list.map((line) => {
@@ -1315,13 +2027,19 @@ function QuoteBuilder({
       onSubmit={(event: FormEvent<HTMLFormElement>) => {
         event.preventDefault();
         const data = new FormData(event.currentTarget);
-        const serviceTerms = String(data.get("serviceTerms") || "") || undefined;
-        const customerId = data.get("customerId");
+        const leadTime = String(data.get("leadTimeDays") || "");
+        const conditions = {
+          customerId: data.get("customerId"),
+          serviceTerms: String(data.get("serviceTerms") || "") || undefined,
+          paymentTerms,
+          depositPercent: Number(data.get("depositPercent") || 0),
+          paymentNotes: String(data.get("paymentNotes") || "") || undefined,
+          leadTimeDays: leadTime ? Number(leadTime) : undefined,
+        };
         if (mode === "products") {
           onSubmit({
             mode,
-            customerId,
-            serviceTerms,
+            ...conditions,
             lines: productLines.map((line) => ({
               productId: line.catalogId,
               description: products.find((item) => item.id === line.catalogId)?.name ?? "Producto",
@@ -1334,8 +2052,7 @@ function QuoteBuilder({
         }
         onSubmit({
           mode,
-          customerId,
-          serviceTerms,
+          ...conditions,
           prints: prints.map((print) => ({
             name: print.name || "Impresión",
             quantity: print.quantity,
@@ -1360,7 +2077,12 @@ function QuoteBuilder({
     >
       <label>
         Cliente
-        <select name="customerId" required>
+        <select
+          name="customerId"
+          required
+          defaultValue={initial?.customerId}
+          onChange={(event) => setPaymentTerms(customers.find((customer) => customer.id === event.target.value)?.paymentTerms ?? "pue")}
+        >
           {customers.map((customer) => <option key={customer.id} value={customer.id}>{customer.legalName}</option>)}
         </select>
       </label>
@@ -1373,6 +2095,8 @@ function QuoteBuilder({
       </label>
       {mode === "prints" ? (
         <div className="scroll-x">
+        <Paged rows={prints}>
+        {(pagePrints) => (
         <table>
           <thead>
             <tr>
@@ -1385,7 +2109,7 @@ function QuoteBuilder({
             </tr>
           </thead>
           <tbody>
-            {prints.map((print) => {
+            {pagePrints.map((print) => {
               const open = openKey === print.key;
               return (
                 <Fragment key={print.key}>
@@ -1453,6 +2177,8 @@ function QuoteBuilder({
             })}
           </tbody>
         </table>
+        )}
+        </Paged>
         </div>
       ) : productLines.map((line) => (
         <div key={line.key} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 8 }}>
@@ -1476,9 +2202,35 @@ function QuoteBuilder({
       ) : (
         <button className="ghost" type="button" disabled={!products.length} onClick={() => setProductLines((current) => [...current, freshPart(products)])}>Agregar producto</button>
       )}
-      <label>Términos del documento<textarea name="serviceTerms" rows={3} placeholder="Plazo, revisiones y qué queda fuera." /></label>
-      <button className="primary" type="submit">Guardar cotización</button>
-      {error ? <p className="error">{error}</p> : null}
+      <fieldset className="payment-terms">
+        <legend>Condiciones de pago y entrega</legend>
+        <label>
+          Forma de pago
+          <select value={paymentTerms} onChange={(event) => setPaymentTerms(event.target.value)}>
+            <option value="pue">Contado</option>
+            <option value="net_15">Crédito 15 días</option>
+            <option value="net_30">Crédito 30 días</option>
+          </select>
+        </label>
+        <label>
+          Anticipo (%)
+          <input name="depositPercent" type="number" min={0} max={100} step={1} defaultValue={initial?.depositPercent ?? 0} />
+        </label>
+        <label>
+          Entrega en días hábiles
+          <input name="leadTimeDays" type="number" min={1} max={365} step={1} placeholder="5" defaultValue={initial?.leadTimeDays ?? ""} />
+        </label>
+        <label className="payment-terms-wide">
+          Nota de pago
+          <input name="paymentNotes" maxLength={500} placeholder="Transferencia o depósito. El saldo se liquida antes de entregar." defaultValue={initial?.paymentNotes ?? ""} />
+        </label>
+        <p className="payment-terms-wide muted-note">El anticipo y el saldo se calculan sobre el total con IVA. Al convertir en pedido, la fecha compromiso se llena con los días hábiles.</p>
+      </fieldset>
+      <label>Términos del documento<textarea name="serviceTerms" rows={3} placeholder="Revisiones incluidas y qué queda fuera." defaultValue={initial?.serviceTerms ?? ""} /></label>
+      <FormActions>
+        <SaveButton pending={pending} label={submitLabel} />
+        {error ? <p className="error">{error}</p> : null}
+      </FormActions>
     </form>
   );
 }
@@ -1504,6 +2256,7 @@ function DocumentForm({
   error,
   submitLabel,
   shipping,
+  pending = false,
   onSubmit,
 }: {
   customers: Customer[];
@@ -1513,6 +2266,7 @@ function DocumentForm({
   error: string | null;
   submitLabel: string;
   shipping?: boolean;
+  pending?: boolean;
   onSubmit: (body: unknown) => void;
 }) {
   const [lines, setLines] = useState<DraftLine[]>([]);
@@ -1630,16 +2384,16 @@ function DocumentForm({
       </div>
       <label>Términos del documento<textarea name="serviceTerms" rows={3} placeholder="Plazo de entrega, revisiones incluidas y qué queda fuera." /></label>
       {shipping ? <label>Envío<input name="shipping" placeholder="0.00" /></label> : null}
-      <button className="primary" type="submit">{submitLabel}</button>
+      <button className="primary" type="submit" disabled={pending} aria-busy={pending}>{submitLabel}</button>
       {localError || error ? <p className="error">{localError || error}</p> : null}
     </form>
   );
 }
 
-function Action({ label, onClick, pending = false, disabled = false }: { label: string; onClick: () => void; pending?: boolean; disabled?: boolean }) {
+function Action({ label, onClick, pending = false, disabled = false, tone }: { label: string; onClick: () => void; pending?: boolean; disabled?: boolean; tone?: string }) {
   return (
-    <button className="ghost" type="button" disabled={pending || disabled} aria-busy={pending} onClick={onClick}>
-      {pending ? <Spinner /> : label}
+    <button className={tone ? `ghost res res-${tone}` : "ghost"} type="button" disabled={pending || disabled} aria-busy={pending} onClick={onClick}>
+      {label}
     </button>
   );
 }
@@ -1651,10 +2405,18 @@ async function transitionQuote(client: ReturnType<typeof useQueryClient>, id: st
 }
 
 async function convertQuote(client: ReturnType<typeof useQueryClient>, id: string) {
-  await api(`/quotes/${id}/convert`, { method: "POST" });
+  const order = await api<{ id: string }>(`/quotes/${id}/convert`, { method: "POST" });
   await client.invalidateQueries({ queryKey: ["quotes"] });
   await client.invalidateQueries({ queryKey: ["quote", id] });
   await client.invalidateQueries({ queryKey: ["orders"] });
+  return order;
+}
+
+async function cancelOrder(client: ReturnType<typeof useQueryClient>, id: string) {
+  await api(`/orders/${id}/cancel`, { method: "POST", body: JSON.stringify({ reason: "Cancelado desde el pedido" }) });
+  await client.invalidateQueries({ queryKey: ["orders"] });
+  await client.invalidateQueries({ queryKey: ["order", id] });
+  await client.invalidateQueries({ queryKey: ["dashboard"] });
 }
 
 async function transitionOrder(client: ReturnType<typeof useQueryClient>, id: string, to: string) {
@@ -1673,6 +2435,60 @@ async function transitionOrder(client: ReturnType<typeof useQueryClient>, id: st
   await client.invalidateQueries({ queryKey: ["dashboard"] });
 }
 
+const NEXT_ACTION: Record<string, "submit" | "confirm" | "ship" | "deliver" | "complete"> = {
+  pending: "submit",
+  confirmed: "confirm",
+  shipped: "ship",
+  delivered: "deliver",
+  completed: "complete",
+};
+
+function OrderNextStep({
+  order,
+  pendingKey,
+  onAct,
+  onPdf,
+  onCancel,
+}: {
+  order: OrderDetail;
+  pendingKey: string | null;
+  onAct: (to: string) => void;
+  onPdf: () => void;
+  onCancel: () => void;
+}) {
+  const next = nextOrderAction(order.status);
+  const gate = next ? order.actions?.find((action) => action.action === NEXT_ACTION[next.to]) : undefined;
+  const blocked = Boolean(gate && !gate.allowed);
+  const cancel = order.actions?.find((action) => action.action === "cancel");
+  const due = order.amountDue !== null && Number(order.amountDue) > 0;
+  return (
+    <div style={{ display: "grid", gap: 8 }}>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <Action label="PDF" pending={pendingKey === "pdf"} disabled={pendingKey !== null} onClick={onPdf} />
+        {next ? (
+          <Action label={next.label} pending={pendingKey === "status"} disabled={pendingKey !== null || blocked} onClick={() => onAct(next.to)} />
+        ) : null}
+        {due && order.status !== "cancelled" && order.status !== "draft" ? (
+          <Link className="primary" to={`/app/cobranza/nuevo?pedido=${order.id}`}>Registrar cobro</Link>
+        ) : null}
+        {order.status !== "cancelled" && cancel ? (
+          <Action
+            label="Cancelar pedido"
+            pending={pendingKey === "cancel"}
+            disabled={pendingKey !== null || !cancel.allowed}
+            onClick={() => {
+              if (!window.confirm("¿Cancelar este pedido? Esta acción no se puede deshacer.")) return;
+              onCancel();
+            }}
+          />
+        ) : null}
+      </div>
+      {blocked && gate?.reason ? <p style={{ margin: 0 }}>{gate.reason}</p> : null}
+      {cancel && !cancel.allowed && order.status !== "cancelled" ? <p style={{ margin: 0 }}>{cancel.reason}</p> : null}
+    </div>
+  );
+}
+
 function nextOrderAction(status: string): { label: string; to: string } | null {
   const steps: Record<string, { label: string; to: string }> = {
     draft: { label: "A pendiente", to: "pending" },
@@ -1686,8 +2502,10 @@ function nextOrderAction(status: string): { label: string; to: string } | null {
 
 interface Customer {
   id: string;
+  kind: string;
   legalName: string;
   rfc: string | null;
+  phone: string | null;
   paymentTerms: string;
   creditLimit: string | null;
   status: string;
@@ -1698,7 +2516,7 @@ interface CustomerDetail extends Customer {
   phone: string | null;
   balance: string | null;
   fiscal: { line1: string; neighborhood: string; postalCode: string; state: string } | null;
-  orders: Array<{ id: string; folio: string; status: string; total: string | null }>;
+  orders: Array<{ id: string; folio: string; status: string; paymentStatus: string; total: string | null }>;
   quotes: Array<{ id: string; folio: string; status: string; total: string | null }>;
   payments: Array<{ id: string; orderId: string; folio: string; method: string; status: string; amount: string | null; reference: string | null }>;
 }
@@ -1713,7 +2531,7 @@ function ActivityColumn({ title, empty, children }: { title: string; empty: stri
   );
 }
 
-function ActivityRow({ title, detail, to }: { title: string; detail: string; to: string }) {
+function ActivityRow({ title, detail, to }: { title: string; detail: ReactNode; to: string }) {
   return (
     <div className="activity-row">
       <div>
@@ -1742,9 +2560,30 @@ interface PrintDraft {
   services: PartDraft[];
 }
 
-interface QuoteDetail {
+interface QuoteDraft {
+  customerId: string;
+  mode: "prints" | "products";
+  serviceTerms: string;
+  paymentTerms: string;
+  depositPercent: number;
+  paymentNotes: string;
+  leadTimeDays: number | null;
+  prints: PrintDraft[];
+  lines: PartDraft[];
+}
+
+interface PaymentConditionsData {
+  paymentTerms: string | null;
+  depositPercent: number;
+  deposit: string | null;
+  balance: string | null;
+  paymentNotes: string | null;
+}
+
+interface QuoteDetail extends PaymentConditionsData {
   id: string;
   folio: string;
+  customerId: string;
   customerName: string;
   customerRfc: string | null;
   status: string;
@@ -1754,6 +2593,7 @@ interface QuoteDetail {
   validUntil: string;
   currency: string;
   paymentTerms: string;
+  leadTimeDays: number | null;
   vatRate: string;
   subtotal: string | null;
   discount: string | null;
@@ -1772,10 +2612,42 @@ interface QuoteDetail {
     lines: QuoteLine[];
   }>;
   lines: QuoteLine[];
+  costing: QuoteCosting | null;
+}
+
+interface CostingTotals {
+  label: string;
+  cost: string;
+  revenue: string;
+  profit: string;
+}
+
+interface QuoteCosting {
+  lines: Array<{
+    id: string;
+    printId: string | null;
+    description: string;
+    group: string;
+    quantity: string;
+    uom: string;
+    unitCost: string | null;
+    unitBasis: string;
+    cost: string | null;
+    revenue: string;
+    profit: string | null;
+  }>;
+  groups: CostingTotals[];
+  prints: Array<CostingTotals & { id: string; quantity: string; unitCost: string }>;
+  cost: string;
+  revenue: string;
+  profit: string;
+  marginPct: string | null;
+  missing: number;
 }
 
 interface QuoteLine {
   id: string;
+  catalogId: string | null;
   description: string;
   quantity: string;
   uom: string;
@@ -1810,6 +2682,7 @@ interface DraftLine {
 
 interface ServiceOffering extends CatalogItem {
   code: string;
+  cost: string | null;
   unit: string;
   terms: string;
   status: string;
@@ -1839,16 +2712,33 @@ interface Order {
   currency?: string;
 }
 
-interface OrderDetail extends Order {
+interface OrderDetail extends Order, PaymentConditionsData {
   serviceTerms: string | null;
+  promisedDate?: string | null;
+  actions?: Array<{ action: string; allowed: boolean; reason: string | null }>;
+  supply?: {
+    printsOpen: boolean;
+    filamentShort: boolean;
+    productToBuy: boolean;
+    productToMake: boolean;
+  };
+  prints?: Array<{
+    id: string;
+    name: string;
+    quantity: string;
+    resolution: string;
+  }>;
   lines: Array<{
     id: string;
+    printId?: string | null;
     description: string;
     quantity: string;
     lineKind: string;
     uom?: string;
     terms: string | null;
     resolution: string;
+    productType?: string | null;
+    onHand?: string | null;
     unitPrice: string | null;
     discount: string | null;
     net: string | null;

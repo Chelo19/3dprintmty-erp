@@ -53,6 +53,26 @@ describe("operación — inventario y ventas", () => {
     expect(receipt.status).toBe(201);
     const stock = await request(app.getHttpServer()).get("/api/v1/inventory/balances").set(bearer(token));
     expect(stock.body.data[0].onHand).toBe("500");
+    const finished = await request(app.getHttpServer()).post("/api/v1/products").set(bearer(token)).send({
+      sku: "TERM-1",
+      name: "Llavero terminado",
+      productType: "finished_good",
+      cost: "10.00",
+    });
+    const resale = await request(app.getHttpServer()).post("/api/v1/products").set(bearer(token)).send({
+      sku: "REV-1",
+      name: "Pegamento",
+      productType: "resale",
+      cost: "5.00",
+    });
+    expect(finished.status).toBe(201);
+    expect(resale.status).toBe(201);
+    const inventory = await request(app.getHttpServer()).get("/api/v1/inventory").set(bearer(token));
+    expect(inventory.status).toBe(200);
+    expect(inventory.body.finished.map((row: { sku: string; onHand: string }) => [row.sku, row.onHand])).toContainEqual(["TERM-1", "0"]);
+    expect(inventory.body.resale.map((row: { sku: string }) => row.sku)).toContain("REV-1");
+    expect(inventory.body.filaments.find((row: { id: string }) => row.id === productId)).toMatchObject({ onHand: "500", available: "500", stockUom: "g" });
+    expect((await request(app.getHttpServer()).get("/api/v1/inventory").set(bearer(tokenOther))).body.filaments).toEqual([]);
     expect(stock.body.data[0].available).toBe("500");
     expect(stock.body.data[0].lowStock).toBe(false);
 
@@ -167,6 +187,33 @@ describe("operación — inventario y ventas", () => {
       .set(bearer(token))
       .send({ productId, locationId, kind: "receipt", quantity: "2", reason: "Existencia para el pedido" });
 
+    const supply = { sku: "ins-tor-m3", name: "Tornillo M3", productType: "component", cost: "1.50" };
+    const supplyRow = await request(app.getHttpServer()).post("/api/v1/products").set(bearer(token)).send(supply);
+    expect(supplyRow.status).toBe(201);
+    const filamentClash = await request(app.getHttpServer())
+      .post("/api/v1/filaments")
+      .set(bearer(token))
+      .send({ sku: "INS-TOR-M3", name: "PLA rojo", material: "PLA", color: "Rojo", diameterMm: "1.75" });
+    expect(filamentClash.status).toBe(409);
+    expect(filamentClash.body.message).toBe("Ese SKU ya lo usa el insumo «Tornillo M3».");
+    const renameClash = await request(app.getHttpServer()).patch(`/api/v1/filaments/${productId}`).set(bearer(token)).send({ sku: "ins-tor-m3" });
+    expect(renameClash.status).toBe(409);
+    const filamentSku = products.body.data[0].sku as string;
+    const productClash = await request(app.getHttpServer()).patch(`/api/v1/products/${supplyRow.body.id}`).set(bearer(token)).send({ sku: filamentSku });
+    expect(productClash.status).toBe(409);
+    expect(productClash.body.message).toContain("Ese SKU ya lo usa el filamento");
+    const renamed = await request(app.getHttpServer()).patch(`/api/v1/products/${supplyRow.body.id}`).set(bearer(token)).send({ sku: "ins-tor-m3-inox" });
+    expect(renamed.status).toBe(200);
+    expect(renamed.body.sku).toBe("INS-TOR-M3-INOX");
+    const renamedBack = await request(app.getHttpServer()).patch(`/api/v1/products/${supplyRow.body.id}`).set(bearer(token)).send({ sku: "INS-TOR-M3" });
+    expect(renamedBack.status).toBe(200);
+    const clash = await request(app.getHttpServer())
+      .post("/api/v1/products")
+      .set(bearer(token))
+      .send({ ...supply, name: "Llavero", productType: "finished_good", salePrice: "50.00" });
+    expect(clash.status).toBe(409);
+    expect(clash.body.message).toBe("Ese SKU ya lo usa el insumo «Tornillo M3».");
+
     const service = await request(app.getHttpServer()).post("/api/v1/services").set(bearer(token)).send({
       code: "DIS-01",
       name: "Diseño de pieza",
@@ -175,6 +222,15 @@ describe("operación — inventario y ventas", () => {
       terms: "Incluye dos revisiones.",
     });
     expect(service.status).toBe(201);
+
+    const byMinute = await request(app.getHttpServer()).post("/api/v1/services").set(bearer(token)).send({
+      code: "POST-01",
+      name: "Postproceso",
+      unit: "minuto",
+      salePrice: "5.00",
+    });
+    expect(byMinute.status).toBe(201);
+    expect(byMinute.body.unit).toBe("minuto");
 
     const customer = await request(app.getHttpServer()).post("/api/v1/customers").set(bearer(token)).send({
       kind: "b2c",
@@ -187,6 +243,9 @@ describe("operación — inventario y ventas", () => {
       mode: "prints",
       customerId: customer.body.id,
       serviceTerms: "Entrega en cinco días hábiles.",
+      depositPercent: 50,
+      leadTimeDays: 5,
+      paymentNotes: "Transferencia bancaria",
       prints: [{
         name: "Llavero",
         quantity: "2",
@@ -198,6 +257,9 @@ describe("operación — inventario y ventas", () => {
     expect(quote.body.subtotal).toBe("1360.00");
     expect(quote.body.vat).toBe("217.60");
     expect(quote.body.total).toBe("1577.60");
+    expect(quote.body.paymentTerms).toBe("pue");
+    expect(quote.body.deposit).toBe("788.80");
+    expect(quote.body.balance).toBe("788.80");
     const detail = await request(app.getHttpServer()).get(`/api/v1/quotes/${quote.body.id}`).set(bearer(token));
     expect(detail.body.prints).toHaveLength(1);
     expect(detail.body.prints[0].quantity).toBe("2");
@@ -220,19 +282,37 @@ describe("operación — inventario y ventas", () => {
     expect(raw.startsWith("%PDF")).toBe(true);
     expect(raw).toContain("servicio");
     expect(raw).toContain("Subtotal");
-    expect(raw).toContain("Importe por pieza");
+    expect(raw).toContain("importe por pieza");
+    expect(raw).toContain("Anticipo 50%");
+    expect(raw).toContain("Transferencia bancaria");
     expect(detail.body.serviceTerms).toBe("Entrega en cinco días hábiles.");
+    expect(detail.body.leadTimeDays).toBe(5);
 
     await request(app.getHttpServer()).post(`/api/v1/quotes/${quote.body.id}/transition`).set(bearer(token)).send({ to: "sent" });
     await request(app.getHttpServer()).post(`/api/v1/quotes/${quote.body.id}/transition`).set(bearer(token)).send({ to: "accepted" });
     const converted = await request(app.getHttpServer()).post(`/api/v1/quotes/${quote.body.id}/convert`).set(bearer(token));
     expect(converted.status).toBe(201);
+    expect(converted.body.depositPercent).toBe(50);
+    expect(converted.body.paymentNotes).toBe("Transferencia bancaria");
+    expect(converted.body.promisedDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     const orderId = converted.body.id as string;
     await request(app.getHttpServer()).post(`/api/v1/orders/${orderId}/confirm`).set(bearer(token)).send({});
     const opened = await request(app.getHttpServer()).get(`/api/v1/orders/${orderId}`).set(bearer(token));
     expect(opened.body.serviceTerms).toBe("Entrega en cinco días hábiles.");
     expect(opened.body.status).toBe("ready_to_ship");
+    expect(opened.body.supply).toMatchObject({ printsOpen: true, filamentShort: false, productToMake: false, productToBuy: false });
+    const notMade = await request(app.getHttpServer())
+      .post(`/api/v1/production-orders/from-sales-order/${orderId}`)
+      .set(bearer(token))
+      .send({});
+    expect(notMade.status).toBe(409);
+    expect(notMade.body.code).toBe("order_action_blocked");
+    const demand = await request(app.getHttpServer()).get("/api/v1/production-orders/sales-demand").set(bearer(token));
+    expect(demand.status).toBe(200);
+    expect(demand.body.data.find((row: { id: string }) => row.id === orderId)).toBeUndefined();
     const serviceLine = opened.body.lines.find((line: { lineKind: string }) => line.lineKind === "service");
+    expect(opened.body.prints).toHaveLength(1);
+    const printId = opened.body.prints[0].id as string;
 
     const blocked = await request(app.getHttpServer())
       .post(`/api/v1/orders/${orderId}/ship`)
@@ -242,16 +322,22 @@ describe("operación — inventario y ventas", () => {
     expect(blocked.status).toBe(409);
     expect(blocked.body.code).toBe("order_action_blocked");
 
-    const started = await request(app.getHttpServer())
+    const onLine = await request(app.getHttpServer())
       .post(`/api/v1/orders/${orderId}/lines/${serviceLine.id}/resolution`)
+      .set(bearer(token))
+      .send({ resolution: "in_progress" });
+    expect(onLine.status).toBe(409);
+
+    const started = await request(app.getHttpServer())
+      .post(`/api/v1/orders/${orderId}/prints/${printId}/resolution`)
       .set(bearer(token))
       .send({ resolution: "in_progress" });
     expect(started.status).toBe(201);
     const done = await request(app.getHttpServer())
-      .post(`/api/v1/orders/${orderId}/lines/${serviceLine.id}/resolution`)
+      .post(`/api/v1/orders/${orderId}/prints/${printId}/resolution`)
       .set(bearer(token))
-      .send({ resolution: "delivered", note: "Archivo STL entregado" });
-    expect(done.body.lines.find((line: { id: string }) => line.id === serviceLine.id).resolution).toBe("delivered");
+      .send({ resolution: "delivered", note: "Llavero entregado" });
+    expect(done.body.prints[0].resolution).toBe("delivered");
 
     const shipped = await request(app.getHttpServer())
       .post(`/api/v1/orders/${orderId}/ship`)

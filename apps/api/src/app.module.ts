@@ -14,6 +14,7 @@ import { PrefacturasController } from "./modules/prefacturas.controller";
 import { ProductionController } from "./modules/production.controller";
 import { PurchasingController } from "./modules/purchasing.controller";
 import { SettingsController } from "./modules/settings.controller";
+import { SpoolsController } from "./modules/spools.controller";
 import { TeamController } from "./modules/team.controller";
 
 @Module({
@@ -31,6 +32,7 @@ import { TeamController } from "./modules/team.controller";
     ManufacturingController,
     ProductionController,
     PurchasingController,
+    SpoolsController,
     PrefacturasController,
   ],
   providers: [AuthGuard, { provide: APP_GUARD, useExisting: AuthGuard }],

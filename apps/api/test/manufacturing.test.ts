@@ -51,7 +51,7 @@ describe("operación — compras, manufactura, calidad y prefacturas", () => {
       salePrice: "150.00",
     });
     expect(keychain.body.qcRigor).toBe("basic");
-    const stand = await api.post(owner, "/products", { sku: "EXH-01", name: "Exhibidor", productType: "component" });
+    const stand = await api.post(owner, "/products", { sku: "EXH-01", name: "Exhibidor", productType: "finished_good" });
 
     const bom = await api.post(owner, "/boms", {
       productId: keychain.body.id,
@@ -136,6 +136,9 @@ describe("operación — compras, manufactura, calidad y prefacturas", () => {
     const lots = await api.get(owner, "/lots");
     expect(lots.body.data[0]).toMatchObject({ lotNumber: "REC-1-1", vendorLot: "FN-2026-09", receivedQty: "1000" });
 
+    const demand = await api.get(owner, "/production-orders/sales-demand");
+    expect(demand.status).toBe(200);
+    expect(demand.body.data.map((row: { id: string }) => row.id)).toContain(order.body.id);
     const made = await api.post(owner, `/production-orders/from-sales-order/${order.body.id}`, {});
     expect(made.status).toBe(201);
     expect(made.body.data).toHaveLength(1);
@@ -148,8 +151,8 @@ describe("operación — compras, manufactura, calidad y prefacturas", () => {
     const released = await api.post(floor, `/production-orders/${opId}/release`, {});
     expect(released.status).toBe(201);
     expect(released.body.shortages).toEqual([]);
-    expect(released.body.materials[0]).toMatchObject({ required: "252", allocated: "252" });
-    expect(await plaBalance(owner, pla.body.id)).toMatchObject({ onHand: "1000", allocated: "252", available: "748" });
+    expect(released.body.materials[0]).toMatchObject({ required: "252", allocated: "0", shortage: "0", tracksStock: false });
+    expect(await plaBalance(owner, pla.body.id)).toMatchObject({ onHand: "1000", allocated: "0", available: "1000" });
     const noPrefacturas = await api.get(floor, "/prefacturas");
     expect(noPrefacturas.status).toBe(403);
 
@@ -160,13 +163,13 @@ describe("operación — compras, manufactura, calidad y prefacturas", () => {
     });
     expect(consumed.status).toBe(201);
     expect(consumed.body.status).toBe("in_progress");
-    expect(consumed.body.materials[0]).toMatchObject({ consumed: "200", allocated: "52" });
+    expect(consumed.body.materials[0]).toMatchObject({ consumed: "200", allocated: "0" });
 
     const completed = await api.post(floor, `/production-orders/${opId}/complete`, { quantityGood: "2" });
     expect(completed.status).toBe(201);
     expect(completed.body).toMatchObject({ status: "qc_hold", qcStatus: "pending", actualCost: "98.00" });
     expect(completed.body.materials[0]).toMatchObject({ consumed: "252", allocated: "0" });
-    expect(await plaBalance(owner, pla.body.id)).toMatchObject({ onHand: "748", allocated: "0" });
+    expect(await plaBalance(owner, pla.body.id)).toMatchObject({ onHand: "1000", allocated: "0" });
 
     const blocked = await api.post(floor, `/production-orders/${opId}/inspections`, {
       result: "fail",
@@ -231,11 +234,121 @@ describe("operación — compras, manufactura, calidad y prefacturas", () => {
 
     expect((await api.get(other, "/production-orders")).body.data).toEqual([]);
     expect((await api.get(other, "/prefacturas")).body.data).toEqual([]);
+    const spent = await api.post(owner, "/expenses", {
+      kind: "filament",
+      itemId: pla.body.id,
+      quantity: "1",
+      amount: "180.00",
+      occurredOn: "2026-09-01",
+      paidAmount: "180.00",
+      paidOn: "2026-09-01",
+    });
+    expect(spent.status).toBe(201);
+    expect(spent.body.folio).toMatch(/^GAS-/);
+    expect(await plaBalance(owner, pla.body.id)).toMatchObject({ onHand: "2000" });
+    const utility = await api.post(owner, "/expenses", {
+      kind: "service",
+      description: "Luz del taller",
+      amount: "900.00",
+      occurredOn: "2026-09-01",
+      paidAmount: "300.00",
+      paidOn: "2026-09-15",
+    });
+    expect(utility.status).toBe(201);
+    expect(utility.body).toMatchObject({
+      kind: "service",
+      description: "Luz del taller",
+      occurredOn: "2026-09-01",
+      amount: "900.00",
+      paid: "300.00",
+      balance: "600.00",
+      paymentStatus: "partial",
+    });
+    const rest = await api.post(owner, `/expenses/${utility.body.id}/payments`, { amount: "600.00", paidOn: "2026-10-01" });
+    expect(rest.status).toBe(201);
+    const loaded = await api.get(owner, `/expenses/${utility.body.id}`);
+    expect(loaded.body.paymentStatus).toBe("paid");
+    expect(loaded.body.payments).toHaveLength(2);
+    const rent = await api.post(owner, "/expenses", { kind: "other", description: "Renta de local", amount: "12000.00", occurredOn: "2026-09-01" });
+    expect(rent.status).toBe(201);
+    expect((await api.get(owner, "/expenses")).body.data).toHaveLength(3);
+    expect((await api.get(other, "/expenses")).body.data).toEqual([]);
     expect((await api.get(other, "/purchase-orders")).body.data).toEqual([]);
     expect((await api.get(other, `/production-orders/${opId}`)).status).toBe(404);
 
     const dashboard = await api.get(owner, "/dashboard");
     expect(dashboard.body.operations).toMatchObject({ qcHold: 0, productionOpen: 0, prefacturasThisMonth: 1 });
+  });
+
+  it("fabrica sin existencia de filamento, pero no sin insumos", async () => {
+    const owner = await onboard(app, "mar@taller-mar.test", "TMA010101AAA", "Taller Mar");
+    const floor = await invite(app, owner, "piso@taller-mar.test", "production");
+    const petg = await api.post(owner, "/filaments", {
+      sku: "FIL-PETG-NEG",
+      name: "PETG negro 1.75 mm",
+      material: "PETG",
+      color: "Negro",
+      diameterMm: "1.75",
+      cost: "300.00",
+    });
+    const magnet = await api.post(owner, "/products", { sku: "INS-IMAN", name: "Imán 10 mm", productType: "component", cost: "2.00" });
+    const plain = await api.post(owner, "/products", { sku: "POR-01", name: "Portallaves liso", productType: "finished_good", salePrice: "90.00" });
+    const magnetic = await api.post(owner, "/products", { sku: "POR-02", name: "Portallaves con imán", productType: "finished_good", salePrice: "120.00" });
+    await api.post(owner, "/boms", { productId: plain.body.id, lines: [{ componentProductId: petg.body.id, quantity: "50" }] });
+    await api.post(owner, "/boms", {
+      productId: magnetic.body.id,
+      lines: [
+        { componentProductId: petg.body.id, quantity: "50" },
+        { componentProductId: magnet.body.id, quantity: "2" },
+      ],
+    });
+
+    const op = await api.post(owner, "/production-orders", { productId: plain.body.id, quantity: "3" });
+    expect(op.status).toBe(201);
+    const released = await api.post(floor, `/production-orders/${op.body.id}/release`, {});
+    expect(released.body.shortages).toEqual([]);
+    expect(released.body.materials[0]).toMatchObject({ required: "150", allocated: "0", shortage: "0", tracksStock: false });
+    const done = await api.post(floor, `/production-orders/${op.body.id}/complete`, { quantityGood: "3" });
+    expect(done.status).toBe(201);
+    expect(done.body.actualCost).toBe("45.00");
+    expect(done.body.materials[0]).toMatchObject({ consumed: "150" });
+    expect((await plaBalance(owner, petg.body.id))?.onHand ?? "0").toBe("0");
+    if (done.body.status === "qc_hold") {
+      const approved = await api.post(floor, `/production-orders/${op.body.id}/inspections`, { result: "pass", qtyPassed: "3" });
+      expect(approved.status).toBe(201);
+    }
+    const ledger = await api.get(owner, `/inventory/ledger?section=products&productId=${plain.body.id}`);
+    expect(ledger.status).toBe(200);
+    expect(ledger.body.data).toHaveLength(1);
+    expect(ledger.body.data[0]).toMatchObject({
+      kind: "receipt",
+      direction: "in",
+      quantity: "3",
+      sku: "POR-01",
+      production: { id: op.body.id, folio: op.body.folio },
+      salesOrder: null,
+      purchase: null,
+    });
+    expect((await api.get(owner, "/inventory/ledger?section=supplies")).body.data).toEqual([]);
+
+    const short = await api.post(owner, "/production-orders", { productId: magnetic.body.id, quantity: "1" });
+    const shortReleased = await api.post(floor, `/production-orders/${short.body.id}/release`, {});
+    expect(shortReleased.body.shortages).toEqual([{ productId: magnet.body.id, sku: "INS-IMAN", short: "2" }]);
+    const blocked = await api.post(floor, `/production-orders/${short.body.id}/complete`, { quantityGood: "1" });
+    expect(blocked.status).toBe(409);
+
+    const supplyRecipe = await api.post(owner, "/boms", { productId: magnet.body.id, lines: [{ componentProductId: petg.body.id, quantity: "5" }] });
+    expect(supplyRecipe.status).toBe(409);
+    expect(supplyRecipe.body.code).toBe("not_manufacturable");
+    const supplyOrder = await api.post(owner, "/production-orders", { productId: magnet.body.id, quantity: "10" });
+    expect(supplyOrder.status).toBe(409);
+    expect(supplyOrder.body.message).toBe("Solo se fabrican productos terminados. Los insumos se compran.");
+
+    const retired = await api.patch(owner, `/products/${plain.body.id}`, { status: "inactive" });
+    expect(retired.status).toBe(200);
+    const inactive = await api.post(owner, "/production-orders", { productId: plain.body.id, quantity: "1" });
+    expect(inactive.status).toBe(409);
+    expect(inactive.body).toMatchObject({ code: "product_inactive", message: "«Portallaves liso» está inactivo. Actívalo en el catálogo para fabricarlo." });
   });
 
   async function plaBalance(token: string, productId: string) {

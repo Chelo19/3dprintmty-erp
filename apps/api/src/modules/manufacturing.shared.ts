@@ -194,8 +194,11 @@ export interface NewProductionOrder {
 /** Valida que se pueda fabricar; llamar también antes de asignar folio para no dejar huecos. */
 export async function assertManufacturable(db: Db, productId: string) {
   const product = await one(db, products, products.id, productId, "No encontramos ese producto.");
-  if (product.productType !== "finished_good" && product.productType !== "component") {
-    throw new AppError("not_manufacturable", "Solo se fabrican productos terminados o componentes.", 409);
+  if (product.productType !== "finished_good") {
+    throw new AppError("not_manufacturable", "Solo se fabrican productos terminados. Los insumos se compran.", 409);
+  }
+  if (product.status === "inactive") {
+    throw new AppError("product_inactive", `«${product.name}» está inactivo. Actívalo en el catálogo para fabricarlo.`, 409);
   }
   const index = await loadBomIndex(db);
   if (!index.lookup(product.id)?.length) {

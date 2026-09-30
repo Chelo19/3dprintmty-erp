@@ -1,6 +1,7 @@
 import { Body, Controller, Get, Headers, Param, Patch, Post, Query } from "@nestjs/common";
 import {
   assertRfc,
+  canReadSalePrice,
   extendCostMinor,
   formatQty,
   Money,
@@ -19,6 +20,8 @@ import { z } from "zod";
 import { services } from "../container";
 import {
   companyProfiles,
+  expensePayments,
+  expenses,
   filaments,
   locations,
   materialLots,
@@ -77,6 +80,27 @@ const purchaseSchema = z.object({
 const transitionSchema = z.object({
   to: z.enum(["ordered", "cancelled", "closed"]),
   reason: z.string().trim().max(200).optional(),
+});
+
+const daySchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+
+const expenseSchema = z.object({
+  kind: z.enum(["product", "filament", "service", "other"]),
+  itemId: z.string().uuid().optional(),
+  description: z.string().trim().min(1).max(180).optional(),
+  quantity: z.string().default("1"),
+  amount: z.string(),
+  occurredOn: daySchema,
+  paid: z.boolean().optional(),
+  paidAmount: z.string().default("0"),
+  paidOn: daySchema.optional(),
+  note: z.string().trim().max(240).optional(),
+});
+
+const expensePaymentSchema = z.object({
+  amount: z.string(),
+  paidOn: daySchema,
+  note: z.string().trim().max(240).optional(),
 });
 
 const receiveSchema = z.object({
@@ -160,6 +184,146 @@ export class PurchasingController {
       return updated;
     });
     return mapVendor(row);
+  }
+
+  @Get("expenses")
+  async listExpenses(@CurrentUser() actor: Actor) {
+    const tenant = requireTenant(actor);
+    const seeMoney = canReadSalePrice(tenant.role);
+    const data = await this.database.asUser(tenant, async (db) => {
+      const rows = await db.select().from(expenses).orderBy(desc(expenses.occurredOn), desc(expenses.createdAt));
+      const payments = await paymentsByExpense(db, rows.map((row: ExpenseRow) => row.id));
+      return rows.map((row: ExpenseRow) => presentExpense(row, payments.get(row.id) ?? [], seeMoney));
+    });
+    return { data };
+  }
+
+  @Get("expenses/:id")
+  async getExpense(@CurrentUser() actor: Actor, @Param("id") id: string) {
+    const tenant = requireTenant(actor);
+    const seeMoney = canReadSalePrice(tenant.role);
+    return this.database.asUser(tenant, async (db) => {
+      const expense = await one(db, expenses, expenses.id, id, "No encontramos ese gasto.");
+      const payments = await paymentsByExpense(db, [expense.id]);
+      return { ...presentExpense(expense, payments.get(expense.id) ?? [], seeMoney), payments: presentPayments(payments.get(expense.id) ?? [], seeMoney) };
+    });
+  }
+
+  @Post("expenses")
+  async createExpense(@CurrentUser() actor: Actor, @Body() body: unknown) {
+    const tenant = assertRole(actor, [...BUYERS]);
+    const input = expenseSchema.parse(body);
+    const quantity = parseQty(input.quantity);
+    if (quantity <= 0n) throw new AppError("invalid_quantity", "La cantidad debe ser mayor a cero.");
+    const amount = Money.fromMajor(input.amount).minor;
+    if (amount < 0n) throw new AppError("invalid_money", "El importe no puede ser negativo.");
+    const paid = input.paid === undefined ? Money.fromMajor(input.paidAmount).minor : input.paid ? amount : 0n;
+    if (paid < 0n) throw new AppError("invalid_money", "La cantidad pagada no puede ser negativa.");
+    if (paid > amount) throw new AppError("payment_exceeds_expense", "La cantidad pagada no puede ser mayor que el importe.");
+    if (input.paid && !input.paidOn) input.paidOn = input.occurredOn;
+    if (paid > 0n && !input.paidOn) throw new AppError("paid_on_required", "Indica la fecha del pago.");
+    if ((input.kind === "product" || input.kind === "filament") && !input.itemId) {
+      throw new AppError("item_required", "Elige el artículo del gasto.");
+    }
+    if ((input.kind === "service" || input.kind === "other") && !input.description) {
+      throw new AppError("description_required", "Describe el gasto.");
+    }
+
+    const kind = input.kind;
+    if (kind === "product" || kind === "filament") {
+      const purchaseFolio = await allocateFolio(this.database, tenant.tenantId, "purchase_order", "OC");
+      const draft = await this.database.asUser(tenant, async (db) => {
+        const vendor = await directVendor(db, tenant);
+        const description = await itemDescription(db, kind, input.itemId as string);
+        const order = await createPurchaseOrder(db, tenant, {
+          folio: `OC-${purchaseFolio}`,
+          vendorId: vendor.id,
+          notes: input.note ?? "Gasto directo",
+          lines: [{
+            productId: input.itemId as string,
+            quantity,
+            unitCostMinor: roundDiv(amount * 10_000n, quantity),
+            description,
+          }],
+        });
+        await db
+          .update(purchaseOrders)
+          .set({ status: "ordered", orderedAt: new Date(), updatedAt: new Date() })
+          .where(eq(purchaseOrders.id, order.id));
+        const loaded = await loadPurchaseOrder(db, order.id);
+        const line = loaded.lines[0];
+        if (!line) throw new AppError("invalid_quantity", "La compra no tiene líneas.");
+        return { orderId: order.id, lineId: line.id as string, description };
+      });
+      await this.doReceive(tenant, draft.orderId, { lines: [{ lineId: draft.lineId, quantity: input.quantity }] });
+      const expenseFolio = await allocateFolio(this.database, tenant.tenantId, "expense", "GAS");
+      return this.database.asUser(tenant, (db) =>
+        insertExpense(db, tenant, {
+          folio: `GAS-${expenseFolio}`,
+          kind,
+          itemId: input.itemId as string,
+          description: draft.description,
+          quantity,
+          amount,
+          occurredOn: input.occurredOn,
+          paid,
+          paidOn: input.paidOn ?? null,
+          purchaseOrderId: draft.orderId,
+          note: input.note ?? null,
+        }),
+      );
+    }
+
+    const folio = await allocateFolio(this.database, tenant.tenantId, "expense", "GAS");
+    return this.database.asUser(tenant, (db) =>
+      insertExpense(db, tenant, {
+        folio: `GAS-${folio}`,
+        kind: input.kind,
+        itemId: null,
+        description: input.description as string,
+        quantity,
+        amount,
+        occurredOn: input.occurredOn,
+        paid,
+        paidOn: input.paidOn ?? null,
+        purchaseOrderId: null,
+        note: input.note ?? null,
+      }),
+    );
+  }
+
+  @Post("expenses/:id/payments")
+  async addExpensePayment(@CurrentUser() actor: Actor, @Param("id") id: string, @Body() body: unknown) {
+    const tenant = assertRole(actor, [...BUYERS]);
+    const input = expensePaymentSchema.parse(body);
+    const amount = Money.fromMajor(input.amount).minor;
+    if (amount <= 0n) throw new AppError("invalid_money", "El pago debe ser mayor a cero.");
+    return this.database.asUser(tenant, async (db) => {
+      const expense = await one(db, expenses, expenses.id, id, "No encontramos ese gasto.");
+      const payments = (await paymentsByExpense(db, [expense.id])).get(expense.id) ?? [];
+      const paid = payments.reduce((sum, payment) => sum + BigInt(payment.amountMinor), 0n);
+      const due = BigInt(expense.amountMinor) - paid;
+      if (due <= 0n) throw new AppError("expense_settled", "Este gasto ya está pagado.");
+      if (amount > due) throw new AppError("payment_exceeds_expense", "El pago rebasa el saldo del gasto.");
+      const [row] = await db
+        .insert(expensePayments)
+        .values({
+          tenantId: tenant.tenantId,
+          expenseId: expense.id,
+          paidOn: input.paidOn,
+          amountMinor: amount,
+          note: input.note ?? null,
+          createdBy: tenant.userId,
+        })
+        .returning();
+      await audit(db, tenant, "expense.payment_recorded", "expense", expense.id, { amountMinor: amount.toString(), paidOn: input.paidOn });
+      return {
+        id: row.id,
+        paidOn: row.paidOn,
+        amount: Money.fromMinor(BigInt(row.amountMinor)).toMajor(),
+        note: row.note,
+      };
+    });
   }
 
   @Get("purchase-orders")
@@ -587,6 +751,138 @@ function mapVendor(row: {
     notes: row.notes,
     active: row.active,
   };
+}
+
+async function directVendor(db: Db, tenant: TenantActor) {
+  const [existing] = await db.select().from(vendors).where(eq(vendors.name, "Gasto directo")).limit(1);
+  if (existing) return existing;
+  const [created] = await db
+    .insert(vendors)
+    .values({
+      tenantId: tenant.tenantId,
+      name: "Gasto directo",
+      paymentTerms: "contado",
+      leadTimeDays: 0,
+      notes: "Proveedor interno para gastos registrados directo.",
+      createdBy: tenant.userId,
+    })
+    .returning();
+  return created;
+}
+
+type ExpenseRow = typeof expenses.$inferSelect;
+type ExpensePaymentRow = typeof expensePayments.$inferSelect;
+
+function expensePaymentStatus(amount: bigint, paid: bigint) {
+  if (amount <= 0n || paid >= amount) return "paid";
+  if (paid <= 0n) return "pending";
+  return "partial";
+}
+
+async function paymentsByExpense(db: Db, ids: string[]) {
+  const grouped = new Map<string, ExpensePaymentRow[]>();
+  if (ids.length === 0) return grouped;
+  const rows = await db
+    .select()
+    .from(expensePayments)
+    .where(inArray(expensePayments.expenseId, ids))
+    .orderBy(expensePayments.paidOn, expensePayments.createdAt);
+  for (const row of rows) {
+    const list = grouped.get(row.expenseId) ?? [];
+    list.push(row);
+    grouped.set(row.expenseId, list);
+  }
+  return grouped;
+}
+
+function presentPayments(rows: ExpensePaymentRow[], seeMoney: boolean) {
+  return rows.map((row) => ({
+    id: row.id,
+    paidOn: row.paidOn,
+    amount: seeMoney ? Money.fromMinor(BigInt(row.amountMinor)).toMajor() : null,
+    note: row.note,
+  }));
+}
+
+function presentExpense(row: ExpenseRow, payments: ExpensePaymentRow[], seeMoney: boolean) {
+  const amountMinor = BigInt(row.amountMinor);
+  const paidMinor = payments.reduce((sum, payment) => sum + BigInt(payment.amountMinor), 0n);
+  return {
+    id: row.id,
+    folio: row.folio,
+    kind: row.kind,
+    description: row.description,
+    quantity: formatQty(qtyFromDb(row.quantity)),
+    occurredOn: row.occurredOn,
+    amount: seeMoney ? Money.fromMinor(amountMinor).toMajor() : null,
+    paid: seeMoney ? Money.fromMinor(paidMinor).toMajor() : null,
+    balance: seeMoney ? Money.fromMinor(amountMinor - paidMinor).toMajor() : null,
+    paymentStatus: expensePaymentStatus(amountMinor, paidMinor),
+    note: row.note,
+    createdAt: row.createdAt.toISOString(),
+  };
+}
+
+async function itemDescription(db: Db, kind: "product" | "filament", id: string) {
+  if (kind === "filament") {
+    const filament = await one(db, filaments, filaments.id, id, "No encontramos ese filamento.");
+    return `${filament.sku} ${filament.name}`;
+  }
+  const product = await one(db, products, products.id, id, "No encontramos ese producto.");
+  return `${product.sku} ${product.name}`;
+}
+
+async function insertExpense(
+  db: Db,
+  tenant: TenantActor,
+  input: {
+    folio: string;
+    kind: "product" | "filament" | "service" | "other";
+    itemId: string | null;
+    description: string;
+    quantity: bigint;
+    amount: bigint;
+    occurredOn: string;
+    paid: bigint;
+    paidOn: string | null;
+    purchaseOrderId: string | null;
+    note: string | null;
+  },
+) {
+  const [row] = await db
+    .insert(expenses)
+    .values({
+      tenantId: tenant.tenantId,
+      folio: input.folio,
+      kind: input.kind,
+      productId: input.kind === "product" ? input.itemId : null,
+      filamentId: input.kind === "filament" ? input.itemId : null,
+      serviceId: null,
+      description: input.description,
+      quantity: formatQty(input.quantity),
+      amountMinor: input.amount,
+      occurredOn: input.occurredOn,
+      purchaseOrderId: input.purchaseOrderId,
+      note: input.note,
+      createdBy: tenant.userId,
+    })
+    .returning();
+  const payments: ExpensePaymentRow[] = [];
+  if (input.paid > 0n) {
+    const [payment] = await db
+      .insert(expensePayments)
+      .values({
+        tenantId: tenant.tenantId,
+        expenseId: row.id,
+        paidOn: input.paidOn as string,
+        amountMinor: input.paid,
+        createdBy: tenant.userId,
+      })
+      .returning();
+    if (payment) payments.push(payment);
+  }
+  await audit(db, tenant, "expense.created", "expense", row.id, { folio: row.folio, kind: row.kind });
+  return { ...presentExpense(row, payments, true), payments: presentPayments(payments, true) };
 }
 
 async function purchasedItem(db: Db, id: string) {

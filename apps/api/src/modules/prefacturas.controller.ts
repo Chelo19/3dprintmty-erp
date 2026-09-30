@@ -302,7 +302,7 @@ async function buildPrefactura(db: Db, salesOrderId: string) {
     }));
   const ledger: PaymentRow[] = await db.select().from(payments).where(eq(payments.salesOrderId, order.id));
 
-  const intendedPayment: "PUE" | "PPD" = customer.paymentTerms === "pue" ? "PUE" : "PPD";
+  const intendedPayment: "PUE" | "PPD" = (order.paymentTerms ?? customer.paymentTerms) === "pue" ? "PUE" : "PPD";
   const completed = ledger.filter((row) => row.status === "completed" && row.kind === "payment");
   const methods = [...new Set(completed.map((row) => row.method))];
   const satPaymentForm =

@@ -34,8 +34,10 @@ import {
   products,
   salesOrderEvents,
   salesOrderLines,
+  salesOrderPrints,
   salesOrders,
   serviceOfferings,
+  stockBalances,
 } from "../db/schema";
 import { renderQuotePdf } from "./quote-pdf";
 import { assertRole, CurrentUser, requireTenant, type Actor, type TenantActor } from "../http/actor";
@@ -55,6 +57,8 @@ import {
   orderLocation,
   orderSupply,
   paidMinor,
+  manufacturableIds,
+  supplyPicture,
   priceLines,
   productionFor,
   refreshPaymentStatus,
@@ -68,7 +72,7 @@ import {
   type OrderRow,
   type PaymentRow,
 } from "./orders.shared";
-import { allocateFolio, audit, isoDate, one, postStock, unwrap, withIdempotency, type Db } from "./support";
+import { allocateFolio, audit, isoDate, one, postStock, reserveStock, unwrap, withIdempotency, type Db } from "./support";
 
 const lineSchema = z
   .object({
@@ -175,7 +179,7 @@ export class OrdersController {
         issuedAt: issued.toLocaleDateString("es-MX"),
         customerName: order.customerName,
         customerRfc: order.customerRfc,
-        paymentTerms: paymentTermsLabel(customer?.paymentTerms ?? "pue"),
+        paymentTerms: paymentTermsLabel(order.paymentTerms ?? customer?.paymentTerms ?? "pue"),
         validUntil: order.promisedDate ?? issued.toLocaleDateString("es-MX"),
         mode: "products",
         serviceTerms: order.serviceTerms,
@@ -201,6 +205,14 @@ export class OrdersController {
           vat: line.vat,
           total: line.total,
         })),
+        payment: {
+          terms: order.paymentTerms ?? customer?.paymentTerms ?? "pue",
+          depositPercent: order.depositPercent,
+          deposit: order.deposit,
+          balance: order.balance,
+          notes: order.paymentNotes,
+          leadTimeDays: null,
+        },
       });
       return { filename: `${order.folio}.pdf`, bytes };
     });
@@ -326,6 +338,7 @@ export class OrdersController {
       }
       await releaseOrderReservations(db, tenant, order, "Edición de");
       await db.delete(salesOrderLines).where(eq(salesOrderLines.salesOrderId, order.id));
+      await db.delete(salesOrderPrints).where(eq(salesOrderPrints.salesOrderId, order.id));
       await db.insert(salesOrderLines).values(
         priced.stored.map(({ uom: _uom, sku: _sku, ...line }, position) => ({
           ...line,
@@ -499,9 +512,22 @@ export class OrdersController {
         const locationId = await orderLocation(db, order);
         for (const line of lines) {
           const reserved = qtyFromDb(line.reservedQty);
-          if (reserved <= 0n || !(line.productId || line.filamentId)) continue;
+          if (line.filamentId) {
+            if (reserved > 0n) {
+              await reserveStock(db, tenant, {
+                filamentId: line.filamentId,
+                locationId,
+                quantity: -reserved,
+                reason: `El filamento de ${order.folio} se ajusta al pesar el rollo`,
+                reference: { type: "sales_order", id: order.id },
+              });
+              await db.update(salesOrderLines).set({ reservedQty: "0" }).where(eq(salesOrderLines.id, line.id));
+            }
+            continue;
+          }
+          if (reserved <= 0n || !line.productId) continue;
           await postStock(db, tenant, {
-            ...(line.filamentId ? { filamentId: line.filamentId } : { productId: line.productId }),
+            productId: line.productId,
             locationId,
             kind: "issue",
             delta: -reserved,
@@ -568,8 +594,16 @@ export class OrdersController {
       }
       const line = (await loadOrderLines(db, order.id)).find((row) => row.id === lineId);
       if (!line) throw new AppError("not_found", "No encontramos esa partida.", 404);
-      if (line.lineKind !== "service") {
-        throw new AppError("not_a_service", "Solo las partidas de servicio tienen resolución.", 409);
+      if (line.printId) {
+        throw new AppError("print_resolution", "La resolución se marca en la impresión, no en cada servicio.", 409);
+      }
+      if (line.lineKind === "product" && line.productId) {
+        const [product] = await db.select({ productType: products.productType }).from(products).where(eq(products.id, line.productId)).limit(1);
+        if (product?.productType !== "finished_good") {
+          throw new AppError("not_a_service", "Solo las impresiones, los servicios y los productos terminados se marcan como prestados.", 409);
+        }
+      } else if (line.lineKind !== "service") {
+        throw new AppError("not_a_service", "Solo las impresiones, los servicios y los productos terminados se marcan como prestados.", 409);
       }
       const next = transitionServiceResolution(line.resolution as ServiceResolution, input.resolution);
       if (!next.ok) throw next.error;
@@ -581,6 +615,46 @@ export class OrdersController {
         from: line.resolution,
         to: next.value,
         note: input.note ?? line.description,
+      });
+      return orderDetail(db, tenant, order.id);
+    });
+  }
+
+  @Post("orders/:id/prints/:printId/resolution")
+  async resolvePrint(
+    @CurrentUser() actor: Actor,
+    @Param("id") id: string,
+    @Param("printId") printId: string,
+    @Body() body: unknown,
+  ) {
+    const tenant = assertRole(actor, [...SALES_ROLES]);
+    const input = z
+      .object({
+        resolution: z.enum(SERVICE_RESOLUTIONS),
+        note: z.string().trim().max(300).optional(),
+      })
+      .parse(body);
+    return this.database.asUser(tenant, async (db) => {
+      const order = await loadOrder(db, id);
+      if (order.status === "completed" || order.status === "cancelled") {
+        throw new AppError("order_action_blocked", "El pedido ya está cerrado.", 409);
+      }
+      const [print] = await db
+        .select()
+        .from(salesOrderPrints)
+        .where(and(eq(salesOrderPrints.id, printId), eq(salesOrderPrints.salesOrderId, order.id)))
+        .limit(1);
+      if (!print) throw new AppError("not_found", "No encontramos esa impresión.", 404);
+      const next = transitionServiceResolution(print.resolution as ServiceResolution, input.resolution);
+      if (!next.ok) throw next.error;
+      await db
+        .update(salesOrderPrints)
+        .set({ resolution: next.value, resolutionNote: input.note ?? print.resolutionNote })
+        .where(eq(salesOrderPrints.id, print.id));
+      await orderEvent(db, tenant, order.id, "print_resolution", {
+        from: print.resolution,
+        to: next.value,
+        note: input.note ?? print.name,
       });
       return orderDetail(db, tenant, order.id);
     });
@@ -649,6 +723,11 @@ async function defaultShipTo(db: Db, customerId: string) {
 export async function orderDetail(db: Db, tenant: TenantActor, id: string) {
   const order = await loadOrder(db, id);
   const lines = await loadOrderLines(db, order.id);
+  const prints = await db
+    .select()
+    .from(salesOrderPrints)
+    .where(eq(salesOrderPrints.salesOrderId, order.id))
+    .orderBy(asc(salesOrderPrints.position));
   const ledger: PaymentRow[] = await orderLedger(db, order.id);
   const context = await orderContext(db, tenant, order);
   const production = await db
@@ -683,18 +762,36 @@ export async function orderDetail(db: Db, tenant: TenantActor, id: string) {
     .where(eq(salesOrderEvents.salesOrderId, order.id))
     .orderBy(asc(salesOrderEvents.createdAt));
   const skus = new Map<string, string>();
+  const productTypes = new Map<string, string>();
   const serviceUnits = new Map<string, string>();
   for (const line of lines) {
     if (line.productId && !skus.has(line.productId)) {
-      const [product] = await db.select({ sku: products.sku }).from(products).where(eq(products.id, line.productId)).limit(1);
+      const [product] = await db.select({ sku: products.sku, productType: products.productType }).from(products).where(eq(products.id, line.productId)).limit(1);
       if (product) skus.set(line.productId, product.sku);
+      if (product) productTypes.set(line.productId, product.productType);
     }
     if (line.serviceId && !serviceUnits.has(line.serviceId)) {
       const [service] = await db.select({ unit: serviceOfferings.unit }).from(serviceOfferings).where(eq(serviceOfferings.id, line.serviceId)).limit(1);
       if (service) serviceUnits.set(line.serviceId, service.unit);
     }
   }
+  const filamentIds = [...new Set(lines.flatMap((line) => (line.filamentId ? [line.filamentId] : [])))];
+  const onHandByFilament = new Map<string, bigint>();
+  if (filamentIds.length) {
+    const balances: Array<{ filamentId: string | null; onHand: string }> = await db
+      .select({ filamentId: stockBalances.filamentId, onHand: stockBalances.onHand })
+      .from(stockBalances)
+      .where(inArray(stockBalances.filamentId, filamentIds));
+    for (const row of balances) {
+      if (!row.filamentId) continue;
+      onHandByFilament.set(row.filamentId, (onHandByFilament.get(row.filamentId) ?? 0n) + qtyFromDb(row.onHand));
+    }
+  }
   const supply = await orderSupply(db, lines);
+  const shortageIds = supply.flatMap((line, index) =>
+    line.productId && !lines[index]?.filamentId && openQuantity(line) > 0n ? [line.productId] : [],
+  );
+  const picture = supplyPicture(lines, supply, await manufacturableIds(db, shortageIds), context.servicesOpen);
   const due = dueMinor(BigInt(order.totalMinor), ledger);
   const canSeeMoney = canReadSalePrice(tenant.role);
   return {
@@ -702,14 +799,24 @@ export async function orderDetail(db: Db, tenant: TenantActor, id: string) {
     amountDue: canSeeMoney ? Money.fromMinor(due).toMajor() : null,
     globalDiscount: canSeeMoney ? Money.fromMinor(globalDiscountMinor(order, lines)).toMajor() : null,
     fullyAllocated: context.fullyAllocated,
+    prints: prints.map((print) => ({
+      id: print.id,
+      name: print.name,
+      quantity: formatQty(qtyFromDb(print.quantity)),
+      resolution: print.resolution,
+      resolutionNote: print.resolutionNote,
+    })),
     lines: lines.map((line, index) => ({
       ...mapOrderLine(line, tenant.role),
       uom: line.lineKind === "filament" ? "g" : line.lineKind === "service" ? (line.serviceId ? (serviceUnits.get(line.serviceId) ?? "servicio") : "servicio") : "pza",
       sku: line.productId ? (skus.get(line.productId) ?? null) : null,
+      productType: line.productId ? (productTypes.get(line.productId) ?? null) : null,
       stocked: supply[index]?.stocked ?? false,
       open: formatQty(supply[index] ? openQuantity(supply[index]) : 0n),
+      onHand: line.filamentId ? formatQty(onHandByFilament.get(line.filamentId) ?? 0n) : null,
     })),
     actions: orderActions(context),
+    supply: picture,
     production: production.map((row: { quantityOrdered: string; quantityCompleted: string }) => ({
       ...row,
       quantityOrdered: formatQty(qtyFromDb(row.quantityOrdered)),

@@ -280,6 +280,7 @@ export const serviceOfferings = pgTable(
     name: text("name").notNull(),
     description: text("description"),
     unit: text("unit").notNull().default("servicio"),
+    costMinor: bigint("cost_minor", { mode: "bigint" }),
     salePriceMinor: bigint("sale_price_minor", { mode: "bigint" }),
     terms: text("terms").notNull().default(""),
     status: text("status").notNull().default("active"),
@@ -305,6 +306,9 @@ export const quotes = pgTable("quotes", {
   totalMinor: bigint("total_minor", { mode: "bigint" }).notNull(),
   serviceTerms: text("service_terms"),
   paymentTerms: text("payment_terms").notNull().default("pue"),
+  depositPercent: integer("deposit_percent").notNull().default(0),
+  paymentNotes: text("payment_notes"),
+  leadTimeDays: integer("lead_time_days"),
   mode: text("mode").notNull().default("products"),
   createdBy: uuid("created_by").notNull(),
   ...timestamps,
@@ -372,14 +376,30 @@ export const salesOrders = pgTable("sales_orders", {
   closedShortReason: text("closed_short_reason"),
   notes: text("notes"),
   serviceTerms: text("service_terms"),
+  paymentTerms: text("payment_terms"),
+  depositPercent: integer("deposit_percent").notNull().default(0),
+  paymentNotes: text("payment_notes"),
   createdBy: uuid("created_by").notNull(),
   ...timestamps,
+});
+
+export const salesOrderPrints = pgTable("sales_order_prints", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  tenantId: uuid("tenant_id").notNull().references(() => tenants.id),
+  salesOrderId: uuid("sales_order_id").notNull().references(() => salesOrders.id),
+  position: integer("position").notNull().default(0),
+  name: text("name").notNull(),
+  quantity: numeric("quantity", { precision: 14, scale: 4 }).notNull(),
+  resolution: text("resolution").notNull().default("pending"),
+  resolutionNote: text("resolution_note"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
 export const salesOrderLines = pgTable("sales_order_lines", {
   id: uuid("id").primaryKey().defaultRandom(),
   tenantId: uuid("tenant_id").notNull().references(() => tenants.id),
   salesOrderId: uuid("sales_order_id").notNull().references(() => salesOrders.id),
+  printId: uuid("print_id").references(() => salesOrderPrints.id),
   productId: uuid("product_id").references(() => products.id),
   filamentId: uuid("filament_id").references(() => filaments.id),
   serviceId: uuid("service_id").references(() => serviceOfferings.id),
@@ -442,6 +462,37 @@ export const idempotencyKeys = pgTable(
 const qty = (name: string) => numeric(name, { precision: 14, scale: 4 });
 const tenantId = () => uuid("tenant_id").notNull().references(() => tenants.id);
 const createdAt = () => timestamp("created_at", { withTimezone: true }).notNull().defaultNow();
+
+export const spools = pgTable(
+  "spools",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: tenantId(),
+    spoolNumber: text("spool_number").notNull(),
+    filamentId: uuid("filament_id").notNull().references(() => filaments.id),
+    locationId: uuid("location_id").notNull().references(() => locations.id),
+    lotId: uuid("lot_id"),
+    initialGrams: qty("initial_grams").notNull(),
+    currentGrams: qty("current_grams").notNull(),
+    status: text("status").notNull().default("available"),
+    notes: text("notes"),
+    createdBy: uuid("created_by").notNull(),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [unique("spools_number_unique").on(table.tenantId, table.spoolNumber)],
+);
+
+export const spoolEvents = pgTable("spool_events", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  tenantId: tenantId(),
+  spoolId: uuid("spool_id").notNull().references(() => spools.id),
+  kind: text("kind").notNull(),
+  grams: qty("grams").notNull(),
+  reason: text("reason").notNull(),
+  createdBy: uuid("created_by").notNull(),
+  createdAt: createdAt(),
+});
 
 export const materialLots = pgTable("material_lots", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -692,6 +743,35 @@ export const receiptLines = pgTable("receipt_lines", {
   stockQuantity: qty("stock_quantity").notNull(),
   lotId: uuid("lot_id"),
   valueMinor: bigint("value_minor", { mode: "bigint" }).notNull().default(0n),
+});
+
+export const expenses = pgTable("expenses", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  tenantId: tenantId(),
+  folio: text("folio").notNull(),
+  kind: text("kind").notNull(),
+  productId: uuid("product_id").references(() => products.id),
+  filamentId: uuid("filament_id").references(() => filaments.id),
+  serviceId: uuid("service_id").references(() => serviceOfferings.id),
+  description: text("description").notNull(),
+  quantity: qty("quantity").notNull(),
+  amountMinor: bigint("amount_minor", { mode: "bigint" }).notNull(),
+  occurredOn: date("occurred_on").notNull(),
+  purchaseOrderId: uuid("purchase_order_id").references(() => purchaseOrders.id),
+  note: text("note"),
+  createdBy: uuid("created_by").notNull(),
+  createdAt: createdAt(),
+});
+
+export const expensePayments = pgTable("expense_payments", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  tenantId: tenantId(),
+  expenseId: uuid("expense_id").notNull().references(() => expenses.id),
+  paidOn: date("paid_on").notNull(),
+  amountMinor: bigint("amount_minor", { mode: "bigint" }).notNull(),
+  note: text("note"),
+  createdBy: uuid("created_by").notNull(),
+  createdAt: createdAt(),
 });
 
 export const commercialDocuments = pgTable("commercial_documents", {

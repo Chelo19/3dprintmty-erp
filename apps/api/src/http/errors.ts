@@ -47,6 +47,9 @@ function readDbError(error: unknown): string | null {
     const current = queue.shift();
     if (!current || typeof current !== "object") continue;
     const record = current as { code?: string; message?: string; constraint?: string; cause?: unknown };
+    if (record.code === "23503") {
+      return "No se puede eliminar porque ya se usó en el taller. Márcalo como inactivo.";
+    }
     if (record.code === "23505") {
       const name = `${record.constraint ?? ""} ${record.message ?? ""}`;
       if (name.includes("rfc")) return "Ese RFC ya está registrado.";
