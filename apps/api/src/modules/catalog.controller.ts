@@ -1,11 +1,11 @@
 import { Body, Controller, Delete, Get, Headers, Param, Patch, Post, Query } from "@nestjs/common";
-import { canReadSalePrice, canWriteCatalog, Money, QC_RIGOR, type TenantRole } from "@3dprintmty/domain";
+import { canReadMargins, canReadSalePrice, canWriteCatalog, Money, QC_RIGOR, STOCK_UOMS, uomShort, type TenantRole } from "@3dprintmty/domain";
 import { countryPolicy } from "@3dprintmty/fiscal";
 import { AppError } from "@3dprintmty/shared";
 import { and, count, desc, eq, ilike, ne, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { services } from "../container";
-import { filaments, products, productsVisible, serviceOfferings } from "../db/schema";
+import { filaments, products, productsVisible, serviceOfferings, stockBalances } from "../db/schema";
 import { assertRole, CurrentUser, requireTenant, type Actor, type TenantActor } from "../http/actor";
 import { one, withIdempotency, type Db } from "./support";
 
@@ -13,9 +13,7 @@ const productSchema = z.object({
   sku: z.string().trim().min(1).max(40),
   name: z.string().trim().min(1).max(160),
   productType: z.enum(["raw_material", "component", "finished_good", "service", "resale"]),
-  material: z.string().trim().max(40).optional(),
-  color: z.string().trim().max(40).optional(),
-  diameterMm: z.enum(["1.75", "2.85"]).optional(),
+  stockUom: z.enum(STOCK_UOMS).optional(),
   cost: z.string().optional(),
   salePrice: z.string().optional(),
   qcRigor: z.enum(QC_RIGOR).optional(),
@@ -24,6 +22,7 @@ const productSchema = z.object({
 const productPatchSchema = z.object({
   sku: z.string().trim().min(1).max(40).optional(),
   name: z.string().trim().min(1).max(160).optional(),
+  stockUom: z.enum(STOCK_UOMS).optional(),
   cost: z.string().nullable().optional(),
   salePrice: z.string().nullable().optional(),
   qcRigor: z.enum(QC_RIGOR).optional(),
@@ -142,14 +141,14 @@ export class CatalogController {
     if (input.productType === "raw_material") {
       throw new AppError("use_filament_catalog", "Los filamentos se capturan en el catálogo de filamentos.", 409);
     }
-    return withIdempotency(this.database, tenant.userId, idempotencyKey, { route: "products", input }, async () => {
+    return withIdempotency(this.database, tenant, idempotencyKey, { route: "products", input }, async () => {
       const values = productValues(tenant.tenantId, tenant.userId, input);
       const [created] = await this.database.asUser(tenant, async (db) => {
         await assertSkuFree(db, tenant.tenantId, values.sku);
         return db.insert(products).values(values).returning({ id: products.id });
       });
       return this.load(tenant, created.id);
-    });
+    }, { required: false });
   }
 
   @Patch("products/:id")
@@ -160,11 +159,14 @@ export class CatalogController {
       const product = await one(db, products, products.id, id, "No encontramos ese producto.");
       const sku = input.sku?.toUpperCase();
       if (sku && sku !== product.sku) await assertSkuFree(db, tenant.tenantId, sku, { table: "product", id: product.id });
+      const uomChanged = input.stockUom !== undefined && input.stockUom !== product.stockUom;
+      if (uomChanged) await assertNoStock(db, product.id, product.stockUom);
       await db
         .update(products)
         .set({
           ...(sku ? { sku } : {}),
           ...(input.name !== undefined ? { name: input.name } : {}),
+          ...(uomChanged ? { stockUom: input.stockUom, purchaseUom: input.stockUom, uomFactor: "1.0000" } : {}),
           ...(input.cost !== undefined ? { costMinor: majorOrNull(input.cost) } : {}),
           ...(input.salePrice !== undefined ? { salePriceMinor: majorOrNull(input.salePrice) } : {}),
           ...(input.qcRigor !== undefined ? { qcRigor: input.qcRigor } : {}),
@@ -213,7 +215,7 @@ export class CatalogController {
   ) {
     const tenant = this.writer(actor);
     const input = filamentSchema.parse(body);
-    return withIdempotency(this.database, tenant.userId, idempotencyKey, { route: "filaments", input }, async () => {
+    return withIdempotency(this.database, tenant, idempotencyKey, { route: "filaments", input }, async () => {
       const [created] = await this.database.asUser(tenant, async (db) => {
         await assertSkuFree(db, tenant.tenantId, input.sku.toUpperCase());
         return db
@@ -232,7 +234,7 @@ export class CatalogController {
           .returning();
       });
       return mapFilament(created, tenant.role);
-    });
+    }, { required: false });
   }
 
   @Patch("filaments/:id")
@@ -380,9 +382,6 @@ interface ProductRow {
   name: string;
   productType: string;
   status: string;
-  material: string | null;
-  color: string | null;
-  diameterMm: string | null;
   stockUom: string;
   purchaseUom: string;
   uomFactor: string;
@@ -411,7 +410,7 @@ function mapService(row: ServiceRow, role: TenantRole) {
     name: row.name,
     description: row.description,
     unit: row.unit,
-    cost: moneyOrNull(row.costMinor),
+    cost: canReadMargins(role) ? moneyOrNull(row.costMinor) : null,
     salePrice: hidePrice ? null : moneyOrNull(row.salePriceMinor),
     terms: row.terms,
     status: row.status,
@@ -428,13 +427,10 @@ function mapProduct(row: ProductRow, role: TenantRole) {
     name: row.name,
     productType: row.productType,
     status: row.status,
-    material: row.material,
-    color: row.color,
-    diameterMm: row.diameterMm,
     stockUom: row.stockUom,
     purchaseUom: row.purchaseUom,
     uomFactor: row.uomFactor,
-    cost: moneyOrNull(row.costMinor),
+    cost: canReadMargins(role) ? moneyOrNull(row.costMinor) : null,
     salePrice: hidePrice ? null : moneyOrNull(row.salePriceMinor),
     pricesHidden: hidePrice,
     qcRigor: row.qcRigor,
@@ -466,7 +462,7 @@ function mapFilament(row: FilamentRow, role: TenantRole) {
     status: row.status,
     stockUom: "G",
     purchaseUom: "KG",
-    cost: moneyOrNull(row.costMinor),
+    cost: canReadMargins(role) ? moneyOrNull(row.costMinor) : null,
     salePrice: hidePrice ? null : moneyOrNull(row.salePriceMinor),
     pricesHidden: hidePrice,
     currency: "MXN",
@@ -514,17 +510,33 @@ async function assertSkuFree(db: Db, tenantId: string, sku: string, self?: { tab
   throw new AppError("sku_taken", `Ese SKU ya lo usa ${who} «${owner.name}»${inactive}.`, 409);
 }
 
+/** Las cantidades del kardex están en la unidad del producto; cambiarla con existencia las reinterpretaría. */
+async function assertNoStock(db: Db, productId: string, currentUom: string) {
+  const [balance] = await db
+    .select({ onHand: sql<string>`coalesce(sum(${stockBalances.onHand}), 0)`, allocated: sql<string>`coalesce(sum(${stockBalances.allocated}), 0)` })
+    .from(stockBalances)
+    .where(eq(stockBalances.productId, productId));
+  const onHand = Number(balance?.onHand ?? 0);
+  const allocated = Number(balance?.allocated ?? 0);
+  if (onHand !== 0 || allocated !== 0) {
+    const unit = uomShort(currentUom);
+    const detail = allocated !== 0 ? `${onHand} ${unit} en existencia y ${allocated} ${unit} apartados` : `${onHand} ${unit} en existencia`;
+    throw new AppError(
+      "uom_has_stock",
+      `No se puede cambiar la unidad: hay ${detail}. Las cantidades no se convierten; deja la existencia en cero primero.`,
+      409,
+    );
+  }
+}
+
 function productValues(tenantId: string, createdBy: string, input: z.infer<typeof productSchema>) {
   return {
     tenantId,
     sku: input.sku.toUpperCase(),
     name: input.name,
     productType: input.productType,
-    material: null,
-    color: null,
-    diameterMm: null,
-    stockUom: "EA",
-    purchaseUom: "EA",
+    stockUom: input.stockUom ?? "EA",
+    purchaseUom: input.stockUom ?? "EA",
     uomFactor: "1.0000",
     costMinor: input.cost ? majorOrNull(input.cost) : null,
     salePriceMinor: input.salePrice ? Money.fromMajor(input.salePrice).minor : null,

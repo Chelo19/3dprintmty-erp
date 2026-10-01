@@ -22,8 +22,8 @@ import { effectiveLineDiscount, effectiveQty, type OrderLineRow } from "./orders
 import { allocateFolio, audit, minorToMajor, one, withIdempotency, type Db } from "./support";
 import { createZip } from "./zip";
 
-const READERS = ["owner", "admin", "sales", "viewer", "warehouse"] as const;
-const ISSUERS = ["owner", "admin", "sales"] as const;
+const READERS = ["owner", "admin", "sales", "operator", "viewer", "warehouse"] as const;
+const ISSUERS = ["owner", "admin", "sales", "operator"] as const;
 const EXPORTERS = ["owner", "admin", "viewer"] as const;
 
 const NOT_CFDI_NOTICE =
@@ -68,7 +68,7 @@ export class PrefacturasController {
   ) {
     const tenant = assertRole(actor, [...ISSUERS]);
     const input = issueSchema.parse(body);
-    return withIdempotency(this.database, tenant.userId, idempotencyKey, { route: "prefacturas", input }, () =>
+    return withIdempotency(this.database, tenant, idempotencyKey, { route: "prefacturas", input }, () =>
       this.doIssue(tenant, input.salesOrderId),
     );
   }

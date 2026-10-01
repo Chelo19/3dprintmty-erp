@@ -24,11 +24,6 @@ export function postJson<T>(path: string, body: unknown, headers: Record<string,
   return api<T>(path, { method: "POST", body: JSON.stringify(body), headers });
 }
 
-/** Llave nueva por intento de captura: un doble clic no duplica la operación. */
-export function idempotencyHeader(): Record<string, string> {
-  return { "Idempotency-Key": crypto.randomUUID() };
-}
-
 export async function download(path: string, filename: string): Promise<void> {
   const token = localStorage.getItem("printmty.token");
   const response = await fetch(`/api/v1${path}`, {

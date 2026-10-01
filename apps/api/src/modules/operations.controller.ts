@@ -4,6 +4,7 @@ import {
   assertPostalCode,
   assertRfc,
   assertTaxRegime,
+  canReadMargins,
   canReadSalePrice,
   formatQty as fromQty,
   Money,
@@ -52,13 +53,14 @@ import {
   mapPayment,
   orderEvent,
   paymentConditions,
+  assertPendingPaymentsFit,
   priceLines,
   refreshPaymentStatus,
   type PaymentRow,
 } from "./orders.shared";
 import { quoteCosting } from "./quote-costing";
 import { renderQuotePdf, type QuotePdfInput } from "./quote-pdf";
-import { allocateFolio, defaultLocationId, one, postStock, withIdempotency, type Db } from "./support";
+import { allocateFolio, audit, defaultLocationId, one, postStock, withIdempotency, type Db } from "./support";
 
 const addressSchema = z.object({
   line1: z.string().trim().min(1).max(160),
@@ -239,12 +241,12 @@ export class OperationsController {
   async inventory(@CurrentUser() actor: Actor) {
     const tenant = requireTenant(actor);
     const data = await this.database.asUser(tenant, async (db) => {
-      const goods = await db
+      const goods: Array<{ id: string; sku: string; name: string; stockUom: string; status: string; productType: string }> = await db
         .select({ id: products.id, sku: products.sku, name: products.name, productType: products.productType, stockUom: products.stockUom, status: products.status })
         .from(products)
         .where(inArray(products.productType, ["finished_good", "resale", "component"]))
         .orderBy(asc(products.sku));
-      const rolls = await db
+      const rolls: Array<{ id: string; sku: string; name: string; status: string }> = await db
         .select({ id: filaments.id, sku: filaments.sku, name: filaments.name, status: filaments.status })
         .from(filaments)
         .orderBy(asc(filaments.sku));
@@ -436,7 +438,7 @@ export class OperationsController {
 
   @Post("inventory/movements")
   async move(@CurrentUser() actor: Actor, @Body() body: unknown) {
-    const tenant = assertRole(actor, ["owner", "admin", "warehouse"]);
+    const tenant = assertRole(actor, ["owner", "admin", "warehouse", "operator"]);
     const input = movementSchema.parse(body);
     const delta = movementDelta(input.kind, input.quantity);
     const reorder = input.reorderPoint ? toQty(input.reorderPoint) : undefined;
@@ -463,7 +465,7 @@ export class OperationsController {
   /** El filamento no se descuenta al imprimir: se resta el consumo o se captura lo que se contó. */
   @Post("inventory/filaments/:id/adjust")
   async adjustFilament(@CurrentUser() actor: Actor, @Param("id") id: string, @Body() body: unknown) {
-    const tenant = assertRole(actor, ["owner", "admin", "warehouse", "production"]);
+    const tenant = assertRole(actor, ["owner", "admin", "warehouse", "production", "operator"]);
     const input = filamentAdjustSchema.parse(body);
     const grams = toQty(input.grams.trim().replace(",", "."));
     if (grams < 0n) throw new AppError("invalid_quantity", "Los gramos no pueden ser negativos.");
@@ -507,7 +509,7 @@ export class OperationsController {
 
   @Post("customers")
   async createCustomer(@CurrentUser() actor: Actor, @Body() body: unknown) {
-    const tenant = assertRole(actor, ["owner", "admin", "sales"]);
+    const tenant = assertRole(actor, ["owner", "admin", "sales", "operator"]);
     const input = customerSchema.parse(body);
     const rfc = input.kind === "b2b" || input.rfc?.trim() ? assertRfc(input.rfc ?? "") : null;
     const phone = input.phone?.trim() ? normalizeMxPhone(input.phone) : null;
@@ -691,7 +693,7 @@ export class OperationsController {
   @Header("Content-Type", "application/pdf")
   async quoteWorkshopPdf(@CurrentUser() actor: Actor, @Param("id") id: string): Promise<StreamableFile> {
     const tenant = requireTenant(actor);
-    if (!canReadSalePrice(tenant.role)) {
+    if (!canReadSalePrice(tenant.role) || !canReadMargins(tenant.role)) {
       throw new AppError("forbidden", "Tu rol no puede ver costos ni utilidad.", 403);
     }
     const file = await this.database.asUser(tenant, async (db) => {
@@ -708,7 +710,7 @@ export class OperationsController {
 
   @Post("quotes")
   async createQuote(@CurrentUser() actor: Actor, @Body() body: unknown) {
-    const tenant = assertRole(actor, ["owner", "admin", "sales"]);
+    const tenant = assertRole(actor, ["owner", "admin", "sales", "operator"]);
     const input = quoteSchema.parse(body);
     const folio = await allocateFolio(this.database, tenant.tenantId, "quote", "COT");
     const quote = await this.database.asUser(tenant, (db) => insertQuote(db, tenant, input, folio));
@@ -819,10 +821,10 @@ export class OperationsController {
           createdBy: tenant.userId,
         })
         .returning();
-      const quotePrintRows = await db.select().from(quotePrints).where(eq(quotePrints.quoteId, quote.id)).orderBy(asc(quotePrints.position));
+      const quotePrintRows: Array<typeof quotePrints.$inferSelect> = await db.select().from(quotePrints).where(eq(quotePrints.quoteId, quote.id)).orderBy(asc(quotePrints.position));
       const printIds = new Map<string, string>();
       if (quotePrintRows.length) {
-        const createdPrints = await db
+        const createdPrints: Array<typeof salesOrderPrints.$inferSelect> = await db
           .insert(salesOrderPrints)
           .values(quotePrintRows.map((print) => ({
             tenantId: tenant.tenantId,
@@ -898,9 +900,10 @@ export class OperationsController {
     @Body() body: unknown,
     @Headers("idempotency-key") idempotencyKey?: string,
   ) {
-    const tenant = assertRole(actor, ["owner", "admin", "sales"]);
+    const tenant = assertRole(actor, ["owner", "admin", "sales", "operator"]);
     const input = paymentSchema.parse(body);
-    return withIdempotency(this.database, tenant.userId, idempotencyKey, { route: "payments", input }, () =>
+    if (tenant.role === "operator" && input.kind !== "payment") throw new AppError("forbidden", "El operador no puede registrar reembolsos.", 403);
+    return withIdempotency(this.database, tenant, idempotencyKey, { route: "payments", input }, () =>
       this.recordPayment(tenant, input),
     );
   }
@@ -932,11 +935,16 @@ export class OperationsController {
       const ledger = await db.select().from(payments).where(eq(payments.salesOrderId, order.id));
       const due = dueMinor(order.totalMinor, ledger);
       const paid = order.totalMinor - due;
-      if (input.kind === "payment" && input.method !== "cod" && amount.minor > due) {
+      if (input.kind === "payment" && amount.minor > due) {
         throw new AppError("overpayment", "El cobro supera el saldo.", 409);
       }
       if (input.kind === "refund" && amount.minor > paid) {
         throw new AppError("overpayment", "El reembolso supera lo cobrado.", 409);
+      }
+      if (input.kind === "payment" && input.method === "cod") {
+        const committed = ledger.filter((entry: PaymentRow) => entry.kind === "payment" && entry.method === "cod" && entry.status === "pending")
+          .reduce((sum: bigint, entry: PaymentRow) => sum + BigInt(entry.amountMinor), 0n);
+        if (amount.minor > due - committed) throw new AppError("overpayment", "Los cobros contra entrega pendientes ya cubren ese saldo.", 409);
       }
       const status = input.method === "cod" && input.kind === "payment" ? "pending" : "completed";
       const [created] = await db
@@ -954,6 +962,7 @@ export class OperationsController {
         })
         .returning();
       await refreshPaymentStatus(db, order.id, order.totalMinor);
+      await audit(db, tenant, "payment.recorded", "payment", created.id, { orderId: order.id, kind: input.kind, amountMinor: amount.minor.toString(), method: input.method, status });
       return created;
     });
     return mapPayment(
@@ -974,13 +983,30 @@ export class OperationsController {
       if (payment.status !== "pending") {
         throw new AppError("invalid_transition", "Ese cobro ya no está pendiente.", 409);
       }
-      const [row] = await db.update(payments).set({ status: "completed" }).where(eq(payments.id, payment.id)).returning();
       const order = await one(db, salesOrders, salesOrders.id, payment.salesOrderId, "No encontramos ese pedido.");
+      if (order.status === "cancelled") throw new AppError("order_not_billable", "Ese pedido está cancelado.", 409);
+      const ledger = await db.select().from(payments).where(eq(payments.salesOrderId, order.id));
+      assertPendingPaymentsFit(BigInt(order.totalMinor), ledger, [payment]);
+      const [row] = await db.update(payments).set({ status: "completed" }).where(eq(payments.id, payment.id)).returning();
+      await audit(db, tenant, "payment.completed", "payment", payment.id, { orderId: order.id });
       await refreshPaymentStatus(db, order.id, order.totalMinor);
       return row;
     });
     return mapPayment({ ...updated, orderId: updated.salesOrderId, folio: "" }, tenant.role);
   }
+  @Post("payments/:id/void")
+  async voidPendingPayment(@CurrentUser() actor: Actor, @Param("id") id: string, @Body() body: unknown) {
+    const tenant = assertRole(actor, ["owner", "admin", "sales"]);
+    const { reason } = z.object({ reason: z.string().trim().min(3).max(200) }).parse(body);
+    return this.database.asUser(tenant, async (db) => {
+      const payment = await one(db, payments, payments.id, id, "No encontramos ese cobro.");
+      if (payment.status !== "pending") throw new AppError("invalid_transition", "Solo se anulan cobros pendientes. Para dinero recibido registra un reembolso.", 409);
+      const [row] = await db.update(payments).set({ status: "voided" }).where(eq(payments.id, id)).returning();
+      await audit(db, tenant, "payment.voided", "payment", id, { reason, orderId: payment.salesOrderId });
+      return mapPayment({ ...row, orderId: payment.salesOrderId, folio: "" }, tenant.role);
+    });
+  }
+
 }
 
 async function quoteLineTarget(db: Db, line: StoredLine) {
@@ -1005,7 +1031,7 @@ async function loadQuote(db: Db, id: string, role: TenantRole) {
   const prints = await db.select().from(quotePrints).where(eq(quotePrints.quoteId, quote.id)).orderBy(asc(quotePrints.position));
   const lines = await db.select().from(quoteLines).where(eq(quoteLines.quoteId, quote.id)).orderBy(asc(quoteLines.position));
   const mapped = lines.map((line: StoredLine) => mapLine(line, role));
-  const costing = canReadSalePrice(role) ? await quoteCosting(db, lines, prints) : null;
+  const costing = canReadSalePrice(role) && canReadMargins(role) ? await quoteCosting(db, lines, prints) : null;
   return {
     ...mapQuote(quote, role),
     costing,

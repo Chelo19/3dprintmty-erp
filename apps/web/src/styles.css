@@ -504,16 +504,35 @@ a.kpi.owe {
 
 label {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 6px;
   font-size: 14px;
+  min-width: 0;
 }
 
 input,
-select {
+select,
+textarea {
   border: 1px solid var(--color-line);
   background: white;
   border-radius: 8px;
   padding: 10px 12px;
+  line-height: 20px;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+/* Un select toma el ancho de su opción más larga; sin esto se sale del label y tapa al campo vecino. */
+label > input:not([type="checkbox"]):not([type="radio"]),
+label > select,
+label > textarea {
+  width: 100%;
+}
+
+select {
+  height: 42px;
+  text-overflow: ellipsis;
 }
 
 button.primary,
@@ -825,6 +844,46 @@ fieldset.open-rolls legend {
 
 tr.row-selected td {
   background: #eff6ff;
+}
+
+.res-badge[class*="role-"] {
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.res-badge.role-owner { background: #fff4eb; color: var(--color-secondary); border-color: #ffd7b8; }
+.res-badge.role-admin { background: #eff6ff; color: #1d4ed8; border-color: #bfdbfe; }
+.res-badge.role-sales { background: #e7f4ee; color: var(--color-pine); border-color: #b7dcc8; }
+.res-badge.role-production { background: #fef3c7; color: #b45309; border-color: #fcd34d; }
+.res-badge.role-warehouse { background: #f3e8ff; color: #7e22ce; border-color: #e9d5ff; }
+.res-badge.role-viewer { background: #f1f5f9; color: #475569; border-color: #e2e8f0; }
+
+.role-guide {
+  display: grid;
+  gap: 12px;
+}
+
+.role-guide > div {
+  display: grid;
+  grid-template-columns: 140px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.role-guide .res-badge {
+  justify-self: start;
+}
+
+@media (max-width: 640px) {
+  .role-guide > div {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+  }
+}
+
+.line-remove {
+  align-self: end;
+  padding-bottom: 3px;
 }
 
 button.form-inline-submit {
@@ -1178,6 +1237,13 @@ button.quote-btn {
   color: var(--color-secondary);
 }
 
+.quote-btn.pay {
+  --btn-ink: #166534;
+  background: #dcfce7;
+  border-color: #86efac;
+  color: #166534;
+}
+
 .quote-btn.neutral {
   --btn-ink: #475569;
   color: #475569;
@@ -1255,7 +1321,7 @@ button.quote-btn {
 }
 
 .filters > label {
-  flex: 0 1 180px;
+  flex: 0 1 200px;
   min-width: 150px;
 }
 

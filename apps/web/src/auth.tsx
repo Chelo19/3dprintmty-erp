@@ -89,6 +89,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => data.subscription.unsubscribe();
   }, []);
 
+  useEffect(() => {
+    function refresh() {
+      if (!localStorage.getItem("printmty.token")) return;
+      void api<{ user: SessionUser }>("/auth/me")
+        .then((me) => {
+          const token = localStorage.getItem("printmty.token");
+          if (!token) return;
+          writeSession(token, me.user);
+          setUser(me.user);
+        })
+        .catch((error: unknown) => {
+          if (!supabase && error instanceof ApiError && error.code === "unauthenticated") {
+            clearSession();
+            setToken(null);
+            setUser(null);
+          }
+        });
+    }
+    refresh();
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
+  }, []);
+
   const value = useMemo<AuthState>(
     () => ({
       token,

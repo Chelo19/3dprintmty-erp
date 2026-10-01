@@ -1,3 +1,4 @@
+import { uomShort } from "@3dprintmty/domain";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
@@ -172,9 +173,9 @@ export function InventoryPage() {
                     <strong>{formatKg(Number(row.onHand))}</strong>
                     <div className="costing-hint">{row.onHand} g{Number(row.onHand) > 0 ? ` · ${rollsHint(Number(row.onHand))}` : ""}</div>
                   </td>
-                ) : <td>{row.onHand} {row.stockUom}</td>}
-                {isFilament ? null : <td>{row.allocated} {row.stockUom}</td>}
-                {isFilament ? null : <td>{row.available} {row.stockUom}</td>}
+                ) : <td>{row.onHand} {uomShort(row.stockUom)}</td>}
+                {isFilament ? null : <td>{row.allocated} {uomShort(row.stockUom)}</td>}
+                {isFilament ? null : <td>{row.available} {uomShort(row.stockUom)}</td>}
                 <td>
                   <div className="record-actions">
                     {isFilament ? (
@@ -280,7 +281,7 @@ function Movements({
                 <td>{row.sku} · {row.name}</td>
                 <td><span className={`res res-badge mov-${row.direction}`}>{movementLabel(row)}</span></td>
                 <td className={row.direction === "in" ? "profit-positive" : "profit-negative"} style={{ whiteSpace: "nowrap", fontWeight: 600 }}>
-                  {row.direction === "in" ? "+" : ""}{row.quantity} {row.stockUom}
+                  {row.direction === "in" ? "+" : ""}{row.quantity} {uomShort(row.stockUom)}
                 </td>
                 {isFilament ? null : <td>{row.production ? <Link to={`/app/produccion/${row.production.id}`}>{row.production.folio}</Link> : "—"}</td>}
                 {isFilament ? null : (

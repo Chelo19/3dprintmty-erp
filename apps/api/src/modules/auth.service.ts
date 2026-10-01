@@ -51,20 +51,40 @@ export class AuthService {
   }
 
   private async verifyLocal(token: string): Promise<Actor> {
+    let payload: JWTPayload;
     try {
-      const { payload } = await jwtVerify(token, jwtSecret());
-      const role = typeof payload.role === "string" && isTenantRole(payload.role) ? payload.role : null;
-      return {
-        userId: String(payload.sub),
-        email: String(payload.email ?? ""),
-        tenantId: typeof payload.tenant_id === "string" ? payload.tenant_id : null,
-        role,
-        platformAdmin: payload.platform_admin === true,
-        impersonator: typeof payload.impersonator === "string" ? payload.impersonator : null,
-      };
+      ({ payload } = await jwtVerify(token, jwtSecret()));
     } catch {
       throw new AppError("unauthenticated", "La sesión no es válida. Vuelve a entrar.", 401);
     }
+    const userId = String(payload.sub);
+    const impersonator = typeof payload.impersonator === "string" ? payload.impersonator : null;
+    // Una sesión de soporte fija el taller en el token; las demás leen la membresía actual para que
+    // un cambio de rol o una baja del equipo apliquen sin esperar a que venza el token.
+    const membership = impersonator
+      ? {
+          tenantId: typeof payload.tenant_id === "string" ? payload.tenant_id : null,
+          role: typeof payload.role === "string" && isTenantRole(payload.role) ? payload.role : null,
+        }
+      : await this.membershipFor(userId);
+    return {
+      userId,
+      email: String(payload.email ?? ""),
+      tenantId: membership.tenantId,
+      role: membership.role,
+      platformAdmin: payload.platform_admin === true,
+      impersonator,
+    };
+  }
+
+  private async membershipFor(userId: string): Promise<{ tenantId: string | null; role: TenantRole | null }> {
+    const [membership] = await this.database.asAdmin((db) =>
+      db.select().from(tenantMemberships).where(eq(tenantMemberships.userId, userId)).limit(1),
+    );
+    return {
+      tenantId: membership?.tenantId ?? null,
+      role: membership && isTenantRole(membership.role) ? membership.role : null,
+    };
   }
 
   private async verifySupabase(token: string): Promise<Actor> {

@@ -99,6 +99,15 @@ describe("operación — compras, manufactura, calidad y prefacturas", () => {
     });
     expect(order.body.total).toBe("348.00");
     await api.post(owner, `/orders/${order.body.id}/submit`, {});
+    const keychainLine = (await api.get(owner, `/orders/${order.body.id}`)).body.lines[0].id as string;
+    const notPrestado = await api.post(owner, `/orders/${order.body.id}/confirm`, {
+      creditOverrideReason: "Pago contra entrega autorizado",
+    });
+    expect(notPrestado.status).toBe(409);
+    expect(notPrestado.body.code).toBe("order_action_blocked");
+    await api.post(owner, `/orders/${order.body.id}/lines/${keychainLine}/resolution`, { resolution: "in_progress" });
+    const prestado = await api.post(owner, `/orders/${order.body.id}/lines/${keychainLine}/resolution`, { resolution: "delivered" });
+    expect(prestado.status).toBe(201);
     const confirmed = await api.post(owner, `/orders/${order.body.id}/confirm`, {
       creditOverrideReason: "Pago contra entrega autorizado",
     });
@@ -362,7 +371,7 @@ function client(app: INestApplication) {
   return {
     get: (token: string, path: string) => request(server()).get(`/api/v1${path}`).set(bearer(token)),
     post: (token: string, path: string, body: unknown, headers: Record<string, string> = {}) =>
-      request(server()).post(`/api/v1${path}`).set(bearer(token)).set(headers).send(body as object),
+      request(server()).post(`/api/v1${path}`).set(bearer(token)).set({ "Idempotency-Key": crypto.randomUUID(), ...headers }).send(body as object),
     patch: (token: string, path: string, body: unknown) =>
       request(server()).patch(`/api/v1${path}`).set(bearer(token)).send(body as object),
   };

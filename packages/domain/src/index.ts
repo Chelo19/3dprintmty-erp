@@ -6,7 +6,7 @@ export {
   transitionServiceResolution,
   type ServiceResolution,
 } from "./services";
-export { convertQuantity, valueStock, STOCK_UOMS, type StockUom } from "./uom";
+export { convertQuantity, valueStock, STOCK_UOMS, UOM_LABELS, uomShort, type StockUom } from "./uom";
 export {
   formatQty,
   maxQty,
@@ -52,8 +52,21 @@ export {
   type MxState,
 } from "./mx";
 export {
+  canReadMargins,
+  canCreateSales,
+  canAccessModule,
+  canAccessPath,
+  moduleForPath,
+  roleHome,
+  MODULE_ROLES,
+  type AppModule,
+  assignableRoles,
   canApproveNegativeStock,
   canEditFiscalSettings,
+  canManageMember,
+  ROLE_DESCRIPTIONS,
+  ROLE_LABELS,
+  roleLabel,
   canOverrideCredit,
   canWriteInventory,
   canWriteSales,

@@ -12,7 +12,7 @@ import { and, eq, sql } from "drizzle-orm";
 import type { DatabaseService } from "../db/database.service";
 import {
   auditEvents,
-  idempotencyKeys,
+  idempotencyRequests,
   filaments,
   locations,
   materialLots,
@@ -71,34 +71,52 @@ export function unwrap<T>(result: Result<T>): T {
 
 export async function withIdempotency<T>(
   database: DatabaseService,
-  userId: string,
+  actor: TenantActor,
   key: string | undefined,
-  payload: unknown,
+  payload: { route: string; [field: string]: unknown },
   fn: () => Promise<T>,
+  options: { required?: boolean } = {},
 ): Promise<T> {
-  if (!key) return fn();
-  if (key.length > 80) {
-    throw new AppError("invalid_idempotency_key", "La llave de idempotencia es demasiado larga.");
+  if (!key) {
+    if (options.required !== false) throw new AppError("idempotency_key_required", "Falta la llave de idempotencia.");
+    return fn();
   }
-  const hash = createHash("sha256").update(JSON.stringify(payload)).digest("hex");
-  const [existing] = await database.asAdmin((db) =>
-    db
-      .select()
-      .from(idempotencyKeys)
-      .where(and(eq(idempotencyKeys.userId, userId), eq(idempotencyKeys.key, key)))
-      .limit(1),
-  );
-  if (existing) {
-    if (existing.requestHash !== hash) {
-      throw new AppError("idempotency_conflict", "Esa llave ya se usó con otros datos.", 409);
+  if (key.trim().length === 0 || key.length > 80) {
+    throw new AppError("invalid_idempotency_key", "La llave de idempotencia debe tener entre 1 y 80 caracteres.");
+  }
+  const hash = createHash("sha256").update(canonicalJson(payload)).digest("hex");
+  return database.atomic(async () => {
+    const match = and(eq(idempotencyRequests.tenantId, actor.tenantId),
+      eq(idempotencyRequests.userId, actor.userId), eq(idempotencyRequests.operation, payload.route),
+      eq(idempotencyRequests.key, key));
+    // El bloqueo se conserva hasta el commit que incluye tanto el efecto como la respuesta.
+    if (database.driver === "postgres") {
+      await database.asAdmin((db) => db.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`erp:idempotency:${actor.tenantId}:${actor.userId}:${payload.route}:${key}`}, 0))`));
     }
-    return existing.response as T;
-  }
-  const response = await fn();
-  await database.asAdmin((db) =>
-    db.insert(idempotencyKeys).values({ userId, key, requestHash: hash, response: toJson(response) }),
-  );
-  return response;
+    const [existing] = await database.asAdmin((db) => db.select().from(idempotencyRequests).where(match).limit(1));
+    if (existing) {
+      if (existing.requestHash !== hash) throw new AppError("idempotency_conflict", "Esa llave ya se usó con otros datos.", 409);
+      return existing.response as T;
+    }
+    await database.asAdmin((db) => db.insert(idempotencyRequests).values({
+      tenantId: actor.tenantId, userId: actor.userId, operation: payload.route, key, requestHash: hash,
+    }));
+    const response = await fn();
+    await database.asAdmin((db) => db.update(idempotencyRequests).set({
+      status: "completed", response: toJson(response), completedAt: new Date(),
+    }).where(match));
+    return response;
+  });
+}
+
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, (_key, item) => {
+    if (typeof item === "bigint") return item.toString();
+    if (item && typeof item === "object" && !Array.isArray(item)) {
+      return Object.fromEntries(Object.entries(item).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0));
+    }
+    return item;
+  });
 }
 
 function toJson(value: unknown): unknown {

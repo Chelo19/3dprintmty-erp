@@ -39,13 +39,16 @@ Copia `.env.example` a `.env` cuando quieras fijar `JWT_SECRET`.
 
 ## Supabase
 
-Cuando tengas un proyecto:
+La autenticación puede usar Supabase Auth. La API obtiene la membresía actual del usuario y consulta el negocio mediante RLS con un rol interno `erp_api`. El navegador no consulta directamente las tablas del ERP; `authenticated`/`anon` no tienen acceso a ellas.
 
-1. Aplica `supabase/migrations` en el SQL editor o con la CLI.
-2. No ejecutes `supabase/local/auth_stubs.sql` ahí: Supabase ya trae `auth.jwt()`.
-3. Define `DATABASE_URL` y, en producción, `AUTH_DRIVER=supabase` con `JWT_SECRET` de al menos 32 caracteres.
+Para PostgreSQL/Supabase:
 
-El gancho de claims `tenant_id` y `role` queda documentado para cuando la identidad pase a Supabase Auth. Hoy el JWT lo firma la API local.
+1. Configura `DATABASE_URL`, `AUTH_DRIVER=supabase` y las claves de Auth en `.env`.
+2. Configura `MIGRATION_DATABASE_URL` para la credencial de despliegue si es distinta. Ejecuta `npm run db:migrate` antes de iniciar la API; el comando usa conexión dedicada, bloqueo y checksums.
+3. Despliega/reinicia la API compatible inmediatamente después de la migración de cimientos: una API anterior que use `authenticated` para negocio dejará de tener permisos.
+4. El arranque con PostgreSQL verifica el esquema y falla si falta una migración; nunca ejecuta DDL. PGlite prepara su esquema local automáticamente.
+
+No ejecutes `supabase/local/auth_stubs.sql` en Supabase: el migrador solo lo usa si `auth.jwt()` no existe. La separación definitiva de privilegios del runtime debe contemplar las operaciones administrativas de onboarding, equipo y soporte; los detalles están en `DECISIONS.md`.
 
 ## Pruebas
 
@@ -56,3 +59,13 @@ El gancho de claims `tenant_id` y `role` queda documentado para cuando la identi
 ## Qué sigue
 
 Surtir el terminado al embarcar el pedido, MRP automático al confirmar y PDF de la prefactura. Las decisiones están en `DECISIONS.md`.
+
+## Pruebas de cimientos con PostgreSQL local
+
+`TEST_DATABASE_URL` debe apuntar a un PostgreSQL local desechable y permitir crear bases. La suite crea una base aislada por ejecución y la elimina al terminar:
+
+```bash
+TEST_DATABASE_URL=postgresql://postgres:password@127.0.0.1:55439/postgres npm run test -w @3dprintmty/api -- test/foundations.test.ts
+```
+
+Sin esa variable se ejecutan los escenarios PGlite y se omiten los de PostgreSQL. Se prueban permisos directos, FK entre talleres, reintentos, rollback de folios/efectos, COD y cobros/stock/recepciones simultáneos.

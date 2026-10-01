@@ -1,10 +1,12 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { api, download, idempotencyHeader, postJson } from "./api";
-import { Action, useFilaments, useProducts } from "./factory";
-import { FormActions, NewLink, SaveButton, ViewLink, money, useError } from "./operations";
+import { api, download, postJson } from "./api";
+import { useIdempotencyAttempt } from "./idempotency";
+import { useFilaments, useProducts } from "./factory";
+import { BanIcon, CheckIcon, DownloadIcon, FormActions, NewLink, PayIcon, PlusIcon, QuoteButton, SaveButton, SendIcon, ViewLink, money, useError } from "./operations";
 import { DetailSkeleton, FormSkeleton, TableSkeleton } from "./skeleton";
+import { useRole } from "./roles";
 import { Paged } from "./pager";
 
 const grid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 } as const;
@@ -42,12 +44,18 @@ function ExpensePaymentBadge({ status }: { status: string }) {
 function PayLink({ to }: { to: string }) {
   return (
     <Link className="icon-btn pay" to={to} aria-label="Abonar" title="Abonar">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-        <rect x="2" y="6" width="20" height="12" rx="2" />
-        <circle cx="12" cy="12" r="2" />
-        <path d="M6 12h.01M18 12h.01" />
-      </svg>
+      <PayIcon />
     </Link>
+  );
+}
+
+function PrintIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+      <path d="M6 9V2h12v7" />
+      <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" />
+      <rect x="6" y="14" width="12" height="8" />
+    </svg>
   );
 }
 
@@ -295,6 +303,7 @@ export function ExpensePage() {
 }
 
 export function PurchaseOrderPage() {
+  const attempt = useIdempotencyAttempt();
   const { id } = useParams();
   const client = useQueryClient();
   const { error, pendingKey, run } = useError();
@@ -324,21 +333,34 @@ export function PurchaseOrderPage() {
         <div><span>IVA</span><strong>{money(data.vat)}</strong></div>
         <div><span>Total</span><strong>{money(data.total)}</strong></div>
       </div>
-      <div style={{ display: "flex", gap: 8 }}>
-        {data.status === "draft" ? <button className="primary" type="button" disabled={pendingKey !== null} aria-busy={pendingKey === "ordered"} onClick={() => void move("ordered")}>Colocar con el proveedor</button> : null}
-        {data.status === "partially_received" || data.status === "received" ? <Action label="Cerrar" pending={pendingKey === "closed"} disabled={pendingKey !== null} onClick={() => void move("closed")} /> : null}
-        {data.status === "draft" || data.status === "ordered" ? (
-          <Action
-            label="Cancelar"
-            pending={pendingKey === "cancelled"}
-            disabled={pendingKey !== null}
-            onClick={() => {
-              const reason = window.prompt("¿Por qué se cancela?");
-              if (reason) void move("cancelled", reason);
-            }}
-          />
-        ) : null}
-      </div>
+      {data.status === "draft" || data.status === "ordered" || data.status === "partially_received" || data.status === "received" ? (
+        <div className="card quote-actions">
+          <div className="quote-actions-group">
+            <span className="quote-actions-label">Siguiente paso</span>
+            <div className="quote-actions-row">
+              {data.status === "draft" ? (
+                <QuoteButton label="Colocar con el proveedor" tone="send" icon={<SendIcon />} pending={pendingKey === "ordered"} disabled={pendingKey !== null} onClick={() => void move("ordered")} />
+              ) : null}
+              {data.status === "partially_received" || data.status === "received" ? (
+                <QuoteButton label="Cerrar compra" tone="accept" icon={<CheckIcon />} pending={pendingKey === "closed"} disabled={pendingKey !== null} onClick={() => void move("closed")} />
+              ) : null}
+              {data.status === "draft" || data.status === "ordered" ? (
+                <QuoteButton
+                  label="Cancelar compra"
+                  tone="danger"
+                  icon={<BanIcon />}
+                  pending={pendingKey === "cancelled"}
+                  disabled={pendingKey !== null}
+                  onClick={() => {
+                    const reason = window.prompt("¿Por qué se cancela?");
+                    if (reason) void move("cancelled", reason);
+                  }}
+                />
+              ) : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
       {error ? <p className="error">{error}</p> : null}
       {result ? <p className="banner">{result}</p> : null}
       <Paged rows={data.lines}>
@@ -368,20 +390,12 @@ export function PurchaseOrderPage() {
             const form = event.currentTarget;
             const values = new FormData(form);
             void run(async () => {
+              const payload = { lines: [{ lineId: values.get("lineId"), quantity: values.get("quantity"),
+                lotNumber: String(values.get("lotNumber") || "") || undefined,
+                vendorLot: String(values.get("vendorLot") || "") || undefined }] };
               const response = await postJson<{ receipt: { folio: string } }>(
-                `/purchase-orders/${id}/receive`,
-                {
-                  lines: [
-                    {
-                      lineId: values.get("lineId"),
-                      quantity: values.get("quantity"),
-                      lotNumber: String(values.get("lotNumber") || "") || undefined,
-                      vendorLot: String(values.get("vendorLot") || "") || undefined,
-                    },
-                  ],
-                },
-                idempotencyHeader(),
-              );
+                `/purchase-orders/${id}/receive`, payload, attempt.headers(payload));
+              attempt.complete();
               setResult(`Recepción ${response.receipt.folio}`);
               form.reset();
               await refresh();
@@ -415,6 +429,8 @@ export function PurchaseOrderPage() {
 }
 
 export function PrefacturasPage() {
+  const attempt = useIdempotencyAttempt();
+  const operator = useRole() === "operator";
   const client = useQueryClient();
   const { error, pendingKey, run } = useError();
   const documents = useQuery({ queryKey: ["prefacturas"], queryFn: () => api<{ data: Prefactura[] }>("/prefacturas") });
@@ -439,7 +455,9 @@ export function PrefacturasPage() {
           event.preventDefault();
           const data = new FormData(event.currentTarget);
           void run(async () => {
-            await postJson("/prefacturas", { salesOrderId: data.get("salesOrderId") }, idempotencyHeader());
+            const payload = { salesOrderId: data.get("salesOrderId") };
+            await postJson("/prefacturas", payload, attempt.headers(payload));
+            attempt.complete();
             await client.invalidateQueries({ queryKey: ["prefacturas"] });
           }, "issue");
         }}
@@ -450,20 +468,22 @@ export function PrefacturasPage() {
             {billable.map((order) => <option key={order.id} value={order.id}>{order.folio} · {order.customerName}</option>)}
           </select>
         </label>
-        <button className="primary" type="submit" disabled={pendingKey !== null} aria-busy={pendingKey === "issue"}>Emitir prefactura</button>
+        <button className="primary new-link form-inline-submit" type="submit" disabled={pendingKey !== null} aria-busy={pendingKey === "issue"}>
+          <PlusIcon />
+          Emitir prefactura
+        </button>
         {error ? <p className="error">{error}</p> : null}
       </form>
-      <div className="card" style={grid}>
+      {operator ? null : <div className="card" style={grid}>
         <strong style={{ gridColumn: "1 / -1" }}>Paquete para el contador</strong>
         <label>Desde<input type="date" value={period.from} onChange={(event) => setPeriod({ ...period, from: event.target.value })} /></label>
         <label>Hasta<input type="date" value={period.to} onChange={(event) => setPeriod({ ...period, to: event.target.value })} /></label>
-        <button className="primary" type="button" disabled={pendingKey !== null} aria-busy={pendingKey === "zip"} onClick={() => void run(() => download(`/exports/accountant?from=${period.from}&to=${period.to}&format=zip`, `paquete_contador_${period.from}_${period.to}.zip`), "zip")}>
-          Descargar ZIP
-        </button>
-        <button className="ghost" type="button" disabled={pendingKey !== null} aria-busy={pendingKey === "csv"} onClick={() => void run(() => download(`/exports/accountant?from=${period.from}&to=${period.to}&format=csv`, `prefacturas_${period.from}_${period.to}.csv`), "csv")}>
-          Solo CSV
-        </button>
+        <div className="quote-actions-row" style={{ gridColumn: "1 / -1" }}>
+          <QuoteButton label="Descargar ZIP" tone="doc" icon={<DownloadIcon />} pending={pendingKey === "zip"} disabled={pendingKey !== null} onClick={() => void run(() => download(`/exports/accountant?from=${period.from}&to=${period.to}&format=zip`, `paquete_contador_${period.from}_${period.to}.zip`), "zip")} />
+          <QuoteButton label="Solo CSV" tone="neutral" icon={<DownloadIcon />} pending={pendingKey === "csv"} disabled={pendingKey !== null} onClick={() => void run(() => download(`/exports/accountant?from=${period.from}&to=${period.to}&format=csv`, `prefacturas_${period.from}_${period.to}.csv`), "csv")} />
+        </div>
       </div>
+      }
       {documents.isPending ? <TableSkeleton columns={6} /> : (
       <Paged rows={documents.data?.data ?? []}>
       {(pageDocuments) => (
@@ -490,6 +510,7 @@ export function PrefacturasPage() {
 }
 
 export function PrefacturaPage() {
+  const operator = useRole() === "operator";
   const { id } = useParams();
   const client = useQueryClient();
   const { error, pendingKey, run } = useError();
@@ -499,27 +520,7 @@ export function PrefacturaPage() {
   const data = document.data;
   return (
     <section style={{ display: "grid", gap: 16 }}>
-      <div className="no-print" style={{ display: "flex", gap: 8 }}>
-        <Link to="/app/prefacturas">← Prefacturas</Link>
-        <button className="primary" type="button" onClick={() => window.print()}>Imprimir</button>
-        {data.status === "issued" ? (
-          <Action
-            label="Cancelar prefactura"
-            pending={pendingKey === "void"}
-            disabled={pendingKey !== null}
-            onClick={() => {
-              const reason = window.prompt("Motivo de cancelación");
-              if (!reason) return;
-              void run(async () => {
-                await postJson(`/prefacturas/${id}/void`, { reason });
-                await client.invalidateQueries({ queryKey: ["prefactura", id] });
-                await client.invalidateQueries({ queryKey: ["prefacturas"] });
-              }, "void");
-            }}
-          />
-        ) : null}
-      </div>
-      {error ? <p className="error">{error}</p> : null}
+      <p className="no-print"><Link to="/app/prefacturas">Prefacturas</Link></p>
       <article className="card printable" style={{ display: "grid", gap: 12 }}>
         <header style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", gap: 16 }}>
           <div>
@@ -575,6 +576,33 @@ export function PrefacturaPage() {
         ) : null}
         <p style={{ margin: 0, fontWeight: 600 }}>{data.notice}</p>
       </article>
+      <div className="card quote-actions no-print">
+        <div className="quote-actions-group">
+          <span className="quote-actions-label">Documento</span>
+          <div className="quote-actions-row">
+            <QuoteButton label="Imprimir" tone="doc" icon={<PrintIcon />} onClick={() => window.print()} />
+            {!operator && data.status === "issued" ? (
+              <QuoteButton
+                label="Cancelar prefactura"
+                tone="danger"
+                icon={<BanIcon />}
+                pending={pendingKey === "void"}
+                disabled={pendingKey !== null}
+                onClick={() => {
+                  const reason = window.prompt("Motivo de cancelación");
+                  if (!reason) return;
+                  void run(async () => {
+                    await postJson(`/prefacturas/${id}/void`, { reason });
+                    await client.invalidateQueries({ queryKey: ["prefactura", id] });
+                    await client.invalidateQueries({ queryKey: ["prefacturas"] });
+                  }, "void");
+                }}
+              />
+            ) : null}
+          </div>
+        </div>
+      </div>
+      {error ? <p className="error no-print">{error}</p> : null}
     </section>
   );
 }

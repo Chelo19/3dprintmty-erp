@@ -403,7 +403,7 @@ export class PurchasingController {
   ) {
     const tenant = assertRole(actor, [...BUYERS]);
     const input = receiveSchema.parse(body);
-    return withIdempotency(this.database, tenant.userId, idempotencyKey, { route: "receive", id, input }, () =>
+    return withIdempotency(this.database, tenant, idempotencyKey, { route: "receive", id, input }, () =>
       this.doReceive(tenant, id, input),
     );
   }

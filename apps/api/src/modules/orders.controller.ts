@@ -18,6 +18,7 @@ import {
   type FulfillmentState,
   type OrderAction,
   type SalesOrderState,
+  uomShort,
 } from "@3dprintmty/domain";
 import { AppError } from "@3dprintmty/shared";
 import { and, asc, desc, eq, inArray, isNotNull, or } from "drizzle-orm";
@@ -44,6 +45,7 @@ import { assertRole, CurrentUser, requireTenant, type Actor, type TenantActor } 
 import {
   allocateOrder,
   assertCredit,
+  assertPendingPaymentsFit,
   dueMinor,
   globalDiscountMinor,
   loadOrder,
@@ -252,7 +254,7 @@ export class OrdersController {
 
   @Post("orders")
   async create(@CurrentUser() actor: Actor, @Body() body: unknown) {
-    const tenant = assertRole(actor, [...SALES_ROLES]);
+    const tenant = assertRole(actor, [...SALES_ROLES, "operator"]);
     const input = createSchema.parse(body);
     const folio = await allocateFolio(this.database, tenant.tenantId, "order", "PED");
     const order = await this.database.asUser(tenant, async (db) => {
@@ -502,7 +504,7 @@ export class OrdersController {
       throw new AppError("idempotency_key_required", "Falta la llave de idempotencia del embarque.");
     }
     const input = shipSchema.parse(body);
-    return withIdempotency(this.database, tenant.userId, idempotencyKey, { route: "orders.ship", id, input }, async () => {
+    return withIdempotency(this.database, tenant, idempotencyKey, { route: "orders.ship", id, input }, async () => {
       await this.database.asUser(tenant, async (db) => {
         assertOrderAction(await orderContext(db, tenant, await loadOrder(db, id)), "ship");
       });
@@ -559,11 +561,15 @@ export class OrdersController {
   @Post("orders/:id/deliver")
   async deliver(@CurrentUser() actor: Actor, @Param("id") id: string) {
     return this.step(actor, id, "deliver", async (db, tenant, order) => {
+      const ledger = await db.select().from(payments).where(eq(payments.salesOrderId, order.id));
+      const pending = ledger.filter((entry: PaymentRow) => entry.kind === "payment" && entry.method === "cod" && entry.status === "pending");
+      assertPendingPaymentsFit(BigInt(order.totalMinor), ledger, pending);
       const collected = await db
         .update(payments)
         .set({ status: "completed" })
-        .where(and(eq(payments.salesOrderId, order.id), eq(payments.method, "cod"), eq(payments.status, "pending")))
+        .where(and(eq(payments.salesOrderId, order.id), eq(payments.method, "cod"), eq(payments.kind, "payment"), eq(payments.status, "pending")))
         .returning();
+      for (const payment of pending) await audit(db, tenant, "payment.completed", "payment", payment.id, { orderId: order.id, source: "delivery" });
       await db
         .update(salesOrders)
         .set({ fulfillmentStatus: "delivered", deliveredAt: new Date() })
@@ -723,7 +729,7 @@ async function defaultShipTo(db: Db, customerId: string) {
 export async function orderDetail(db: Db, tenant: TenantActor, id: string) {
   const order = await loadOrder(db, id);
   const lines = await loadOrderLines(db, order.id);
-  const prints = await db
+  const prints: Array<typeof salesOrderPrints.$inferSelect> = await db
     .select()
     .from(salesOrderPrints)
     .where(eq(salesOrderPrints.salesOrderId, order.id))
@@ -763,12 +769,20 @@ export async function orderDetail(db: Db, tenant: TenantActor, id: string) {
     .orderBy(asc(salesOrderEvents.createdAt));
   const skus = new Map<string, string>();
   const productTypes = new Map<string, string>();
+  const productUnits = new Map<string, string>();
   const serviceUnits = new Map<string, string>();
   for (const line of lines) {
     if (line.productId && !skus.has(line.productId)) {
-      const [product] = await db.select({ sku: products.sku, productType: products.productType }).from(products).where(eq(products.id, line.productId)).limit(1);
-      if (product) skus.set(line.productId, product.sku);
-      if (product) productTypes.set(line.productId, product.productType);
+      const [product] = await db
+        .select({ sku: products.sku, productType: products.productType, stockUom: products.stockUom })
+        .from(products)
+        .where(eq(products.id, line.productId))
+        .limit(1);
+      if (product) {
+        skus.set(line.productId, product.sku);
+        productTypes.set(line.productId, product.productType);
+        productUnits.set(line.productId, uomShort(product.stockUom));
+      }
     }
     if (line.serviceId && !serviceUnits.has(line.serviceId)) {
       const [service] = await db.select({ unit: serviceOfferings.unit }).from(serviceOfferings).where(eq(serviceOfferings.id, line.serviceId)).limit(1);
@@ -808,7 +822,11 @@ export async function orderDetail(db: Db, tenant: TenantActor, id: string) {
     })),
     lines: lines.map((line, index) => ({
       ...mapOrderLine(line, tenant.role),
-      uom: line.lineKind === "filament" ? "g" : line.lineKind === "service" ? (line.serviceId ? (serviceUnits.get(line.serviceId) ?? "servicio") : "servicio") : "pza",
+      uom: line.lineKind === "filament"
+        ? "g"
+        : line.lineKind === "service"
+          ? (line.serviceId ? (serviceUnits.get(line.serviceId) ?? "servicio") : "servicio")
+          : (line.productId ? (productUnits.get(line.productId) ?? "pza") : "pza"),
       sku: line.productId ? (skus.get(line.productId) ?? null) : null,
       productType: line.productId ? (productTypes.get(line.productId) ?? null) : null,
       stocked: supply[index]?.stocked ?? false,

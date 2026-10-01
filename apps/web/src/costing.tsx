@@ -1,9 +1,9 @@
-import { Money } from "@3dprintmty/domain";
+import { Money, uomShort } from "@3dprintmty/domain";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { ApiError, api } from "./api";
-import { FormActions, PlusIcon, SaveButton } from "./operations";
+import { FormActions, IconAction, PlusIcon, SaveButton, TrashIcon } from "./operations";
 import { FormSkeleton } from "./skeleton";
 
 interface CatalogItem {
@@ -149,7 +149,7 @@ export function CostCalculatorPage() {
     const unitCost = item?.cost ? (amount(item.cost) * 100) / (line.kind === "filament" ? 1000 : 1) : null;
     const cost = unitCost === null ? 0 : quantity * unitCost;
     const revenue = quantity * amount(line.unitPrice) * 100;
-    const uom = line.kind === "filament" ? "g" : line.kind === "service" ? item?.unit ?? "servicio" : item?.stockUom ?? "pza";
+    const uom = line.kind === "filament" ? "g" : line.kind === "service" ? item?.unit ?? "servicio" : uomShort(item?.stockUom ?? "EA");
     return { line, item, quantity, cost, revenue, uom, missingCost: Boolean(item && unitCost === null) };
   });
 
@@ -326,7 +326,9 @@ export function CostCalculatorPage() {
                     <td className={profitClass(lineProfit)}>{lineProfit === null ? "—" : pesos(lineProfit)}</td>
                     <td className={profitClass(lineProfit)}>{missingCost ? "—" : marginLabel(cost, revenue)}</td>
                     <td>
-                      <button className="ghost" type="button" onClick={() => setLines((current) => current.filter((entry) => entry.key !== line.key))}>Quitar</button>
+                      <IconAction label="Quitar partida" tone="delete" onClick={() => setLines((current) => current.filter((entry) => entry.key !== line.key))}>
+                        <TrashIcon />
+                      </IconAction>
                     </td>
                   </tr>
                 );

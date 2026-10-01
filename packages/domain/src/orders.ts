@@ -141,7 +141,7 @@ export interface OrderContext {
 
 const SALES: readonly TenantRole[] = ["owner", "admin", "sales"];
 const SHIPPERS: readonly TenantRole[] = ["owner", "admin", "sales", "warehouse"];
-const MAKERS: readonly TenantRole[] = ["owner", "admin", "production"];
+const MAKERS: readonly TenantRole[] = ["owner", "admin", "production", "operator"];
 const LIVE: readonly SalesOrderState[] = ["draft", "pending", "confirmed", "in_production", "ready_to_ship", "on_hold"];
 
 const STATE_LABEL: Record<SalesOrderState, string> = {

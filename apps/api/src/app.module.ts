@@ -1,5 +1,6 @@
 import { Module } from "@nestjs/common";
-import { APP_GUARD } from "@nestjs/core";
+import { APP_GUARD, APP_INTERCEPTOR } from "@nestjs/core";
+import { OperatorCostsInterceptor } from "./http/operator-costs.interceptor";
 import { AuthGuard } from "./http/auth.guard";
 import { HealthController } from "./http/health.controller";
 import { AuthController } from "./modules/auth.controller";
@@ -35,6 +36,6 @@ import { TeamController } from "./modules/team.controller";
     SpoolsController,
     PrefacturasController,
   ],
-  providers: [AuthGuard, { provide: APP_GUARD, useExisting: AuthGuard }],
+  providers: [{ provide: APP_INTERCEPTOR, useClass: OperatorCostsInterceptor }, AuthGuard, { provide: APP_GUARD, useExisting: AuthGuard }],
 })
 export class AppModule {}

@@ -2,7 +2,7 @@
   "name": "3dprintmty-erp",
   "private": true,
   "version": "0.0.1",
-  "description": "ERP operativo para granjas de impresión 3D. México primero.",
+  "description": "ERP operativo para granjas de impresi\u00f3n 3D. M\u00e9xico primero.",
   "engines": {
     "node": ">=22"
   },
@@ -16,7 +16,8 @@
     "dev:web": "npm run dev -w @3dprintmty/web",
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "db:reset": "rm -rf .data"
+    "db:reset": "rm -rf .data",
+    "db:migrate": "npm run db:migrate -w @3dprintmty/api"
   },
   "devDependencies": {
     "concurrently": "^9.2.1"

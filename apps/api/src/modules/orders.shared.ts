@@ -21,6 +21,7 @@ import {
   type OrderLineSupply,
   type SalesOrderState,
   type TenantRole,
+  uomShort,
 } from "@3dprintmty/domain";
 import { calculateMxTax } from "@3dprintmty/fiscal";
 import { amountDue } from "@3dprintmty/payments";
@@ -365,7 +366,7 @@ export async function activePrefactura(db: Db, orderId: string) {
 }
 
 async function printsOpen(db: Db, orderId: string, lines: OrderLineRow[]): Promise<boolean> {
-  const prints = await db
+  const prints: Array<{ resolution: string }> = await db
     .select({ resolution: salesOrderPrints.resolution })
     .from(salesOrderPrints)
     .where(eq(salesOrderPrints.salesOrderId, orderId));
@@ -376,6 +377,22 @@ async function printsOpen(db: Db, orderId: string, lines: OrderLineRow[]): Promi
 
 export async function orderLedger(db: Db, orderId: string): Promise<PaymentRow[]> {
   return db.select().from(payments).where(eq(payments.salesOrderId, orderId));
+}
+
+/** Completar dinero pendiente vuelve a validar contra el libro actual. */
+export function assertPendingPaymentsFit(total: bigint, ledger: PaymentRow[], pending: PaymentRow[]): void {
+  let due = dueMinor(total, ledger);
+  for (const entry of pending) {
+    const amount = BigInt(entry.amountMinor);
+    if (entry.status !== "pending" || amount <= 0n) throw new AppError("invalid_transition", "Ese cobro no se puede completar.", 409);
+    if (entry.kind === "payment") {
+      if (amount > due) throw new AppError("overpayment", "El cobro pendiente supera el saldo actual. Anúlalo y registra el importe correcto.", 409);
+      due -= amount;
+    } else {
+      if (amount > total - due) throw new AppError("overpayment", "El reembolso supera lo cobrado.", 409);
+      due += amount;
+    }
+  }
 }
 
 export function paidMinor(totalMinor: bigint, ledger: PaymentRow[]): bigint {
@@ -408,7 +425,7 @@ export async function orderContext(db: Db, tenant: TenantActor, order: OrderRow)
 }
 
 async function articlesArePrestados(db: Db, orderId: string, lines: OrderLineRow[]): Promise<boolean> {
-  const prints = await db
+  const prints: Array<{ resolution: string }> = await db
     .select({ resolution: salesOrderPrints.resolution })
     .from(salesOrderPrints)
     .where(eq(salesOrderPrints.salesOrderId, orderId));
@@ -556,8 +573,8 @@ export function globalDiscountMinor(order: Pick<OrderRow, "discountMinor">, line
 }
 
 function saleUom(lineKind: string, raw: string): string {
-  if (lineKind === "filament" || raw === "G") return "g";
-  if (raw === "EA") return "pza";
+  if (lineKind === "filament") return "g";
+  if (lineKind === "product") return uomShort(raw);
   return raw;
 }
 

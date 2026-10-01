@@ -65,7 +65,7 @@ import {
   type Db,
 } from "./support";
 
-const SHOP_FLOOR = ["owner", "admin", "production"] as const;
+const SHOP_FLOOR = ["owner", "admin", "production", "operator"] as const;
 const RUNNING: ProductionOrderState[] = ["released", "scheduled", "in_progress"];
 
 const createSchema = z.object({

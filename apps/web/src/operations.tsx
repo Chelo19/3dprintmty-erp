@@ -4,10 +4,12 @@ import { Fragment, useEffect, useRef, useState, type FormEvent, type ReactNode }
 import { createPortal } from "react-dom";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ApiError, api, download } from "./api";
+import { useIdempotencyAttempt } from "./idempotency";
 import { CustomerSkeleton, DetailSkeleton, FormSkeleton, TableSkeleton } from "./skeleton";
 import { Paged } from "./pager";
-import { CostPriceFields, MarginValue } from "./margin";
+import { CostOnly, CostPriceFields, MarginValue } from "./margin";
 import { FilterBar, FilterSelect, NoMatches, StatusBadge, distinct, matchesStatus, matchesText, useFilters } from "./filters";
+import { useCanWrite, useRole } from "./roles";
 
 export function money(value: string | null | undefined) {
   if (!value) return "—";
@@ -54,6 +56,7 @@ export function PlusIcon() {
 }
 
 export function NewLink({ to, children }: { to: string; children: ReactNode }) {
+  if (!useCanWrite(to)) return null;
   return (
     <Link className="primary new-link" to={to}>
       <PlusIcon />
@@ -85,6 +88,7 @@ export function DeleteButton({ pending = false, label = "Eliminar", onClick }: {
 }
 
 export function EditLink({ to }: { to: string }) {
+  if (!useCanWrite(to)) return null;
   return (
     <Link className="icon-btn edit" to={to} aria-label="Editar" title="Editar">
       <PencilIcon />
@@ -93,14 +97,17 @@ export function EditLink({ to }: { to: string }) {
 }
 
 export function RecordActions({ detailTo, editTo }: { detailTo: string; editTo: string }) {
+  const canEdit = useCanWrite(editTo);
   return (
     <div className="record-actions">
       <Link className="icon-btn view" to={detailTo} aria-label="Ver detalle" title="Ver detalle">
         <EyeIcon />
       </Link>
-      <Link className="icon-btn edit" to={editTo} aria-label="Editar" title="Editar">
-        <PencilIcon />
-      </Link>
+      {canEdit ? (
+        <Link className="icon-btn edit" to={editTo} aria-label="Editar" title="Editar">
+          <PencilIcon />
+        </Link>
+      ) : null}
     </div>
   );
 }
@@ -163,7 +170,7 @@ export function CustomersPage() {
     <section style={{ display: "grid", gap: 16 }}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
         <h1 style={{ margin: 0 }}>Clientes</h1>
-        <Link className="primary" to="/app/clientes/nuevo">Nuevo cliente</Link>
+        <NewLink to="/app/clientes/nuevo">Nuevo cliente</NewLink>
       </div>
       {query.isPending ? <TableSkeleton columns={6} /> : !all.length ? <p>Todavía no hay clientes.</p> : (
       <>
@@ -226,8 +233,7 @@ export function CustomerNewPage() {
       <p><Link to="/app/clientes">Clientes</Link></p>
       <h1>Nuevo cliente</h1>
       <form
-        className="card"
-        style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10 }}
+        className="card form-vertical"
         onSubmit={(event) => {
           event.preventDefault();
           const data = new FormData(event.currentTarget);
@@ -271,8 +277,10 @@ export function CustomerNewPage() {
         <label>Colonia<input name="neighborhood" required /></label>
         <label>C.P.<input name="postalCode" required pattern="\d{5}" /></label>
         <label>Estado<select name="state">{MX_STATES.map((state) => <option key={state}>{state}</option>)}</select></label>
-        <button className="primary" type="submit" disabled={pendingKey !== null} aria-busy={pendingKey !== null}>Guardar cliente</button>
-        {error ? <p className="error">{error}</p> : null}
+        <FormActions>
+          <SaveButton pending={pendingKey !== null} label="Guardar cliente" />
+          {error ? <p className="error">{error}</p> : null}
+        </FormActions>
       </form>
     </section>
   );
@@ -316,16 +324,16 @@ export function ServicesPage() {
       <Paged rows={rows}>
       {(offerings) => (
       <table>
-        <thead><tr><th>Clave</th><th>Nombre</th><th>Unidad</th><th>Costo</th><th>Precio</th><th>Margen de utilidad</th><th>Términos</th><th>Estado</th><th></th></tr></thead>
+        <thead><tr><th>Clave</th><th>Nombre</th><th>Unidad</th><CostOnly><th>Costo</th></CostOnly><th>Precio</th><CostOnly><th>Margen de utilidad</th></CostOnly><th>Términos</th><th>Estado</th><th></th></tr></thead>
         <tbody>
           {offerings.map((service) => (
             <tr key={service.id}>
               <td>{service.code}</td>
               <td>{service.name}</td>
               <td>{service.unit}</td>
-              <td>{money(service.cost)}</td>
+              <CostOnly><td>{money(service.cost)}</td></CostOnly>
               <td>{money(service.salePrice)}</td>
-              <td><MarginValue cost={service.cost} price={service.salePrice} /></td>
+              <CostOnly><td><MarginValue cost={service.cost} price={service.salePrice} /></td></CostOnly>
               <td>{service.terms || "—"}</td>
               <td><StatusBadge status={service.status} /></td>
               <td><RecordActions detailTo={`/app/servicios/${service.id}`} editTo={`/app/servicios/${service.id}/editar`} /></td>
@@ -480,8 +488,7 @@ export function CustomerEditPage() {
       <p><Link to={`/app/clientes/${id}`}>Cliente</Link></p>
       <h1>Editar cliente</h1>
       <form
-        className="card"
-        style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10 }}
+        className="card form-vertical"
         onSubmit={(event) => {
           event.preventDefault();
           const form = new FormData(event.currentTarget);
@@ -559,9 +566,9 @@ export function ServiceDetailPage() {
       </div>
       <article className="card">
         <p>Clave {data.code} · unidad {data.unit} · {data.status === "active" ? "Activo" : "Inactivo"}</p>
-        <p>Costo {money(data.cost)}</p>
+        <CostOnly><p>Costo {money(data.cost)}</p></CostOnly>
         <p>Precio {money(data.salePrice)}</p>
-        <p>Margen de utilidad <MarginValue cost={data.cost} price={data.salePrice} /></p>
+        <CostOnly><p>Margen de utilidad <MarginValue cost={data.cost} price={data.salePrice} /></p></CostOnly>
         <p style={{ margin: 0 }}>{data.terms || "Sin términos."}</p>
       </article>
     </section>
@@ -668,7 +675,7 @@ export function QuotesPage() {
     <section style={{ display: "grid", gap: 16 }}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
         <h1 style={{ margin: 0 }}>Cotizaciones</h1>
-        <Link className="primary" to="/app/cotizaciones/nueva">Nueva cotización</Link>
+        <NewLink to="/app/cotizaciones/nueva">Nueva cotización</NewLink>
       </div>
       <p>Una cotización es de impresiones o de productos. Cada impresión lleva sus servicios y sus filamentos, en gramos. Vigencia de 30 días. Aceptada, se convierte en pedido.</p>
       {quotes.isPending ? <TableSkeleton columns={5} /> : (
@@ -715,7 +722,8 @@ export function QuotesPage() {
   );
 }
 
-export function IconAction({ label, tone, pending = false, disabled = false, onClick, children }: { label: string; tone: string; pending?: boolean; disabled?: boolean; onClick: () => void; children: ReactNode }) {
+export function IconAction({ label, tone, pending = false, disabled = false, onClick, children, operatorAllowed = false }: { label: string; tone: string; pending?: boolean; disabled?: boolean; onClick: () => void; children: ReactNode; operatorAllowed?: boolean }) {
+  if (useRole() === "operator" && !operatorAllowed && tone !== "delete") return null;
   return (
     <button className={`icon-btn ${tone}`} type="button" aria-label={pending ? `${label}, en proceso` : label} title={label} disabled={pending || disabled} aria-busy={pending} onClick={onClick}>
       {children}
@@ -723,7 +731,7 @@ export function IconAction({ label, tone, pending = false, disabled = false, onC
   );
 }
 
-function SendIcon() {
+export function SendIcon() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
       <path d="m22 2-7 20-4-9-9-4 20-7Z" />
@@ -813,7 +821,7 @@ export function OrdersPage() {
     <section style={{ display: "grid", gap: 16 }}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
         <h1 style={{ margin: 0 }}>Pedidos</h1>
-        <Link className="primary" to="/app/pedidos/nuevo">Nuevo pedido</Link>
+        <NewLink to="/app/pedidos/nuevo">Nuevo pedido</NewLink>
       </div>
       <p>El pedido nace de una cotización o se captura directo. Una impresión se cierra aquí, sin descontar filamento: el consumo real se resta en Inventario ▸ Filamentos. Producción solo fabrica productos con receta. El cobro y la entrega avanzan por separado.</p>
       {orders.isPending ? <TableSkeleton columns={6} /> : (
@@ -1183,19 +1191,24 @@ function OrderPanel({
 }
 
 export function CollectionsPage() {
+  const client = useQueryClient();
+  const canManage = ["owner", "admin", "sales"].includes(useRole() ?? "");
+  const { error, pendingKey, run } = useError();
+  const [voidId, setVoidId] = useState<string | null>(null);
+  const [reason, setReason] = useState("");
   const payments = useQuery({ queryKey: ["payments"], queryFn: () => api<{ data: Payment[] }>("/payments") });
   return (
     <section style={{ display: "grid", gap: 16 }}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
         <h1 style={{ margin: 0 }}>Cobranza</h1>
-        <Link className="primary" to="/app/cobranza/nuevo">Registrar cobro</Link>
+        <NewLink to="/app/cobranza/nuevo">Registrar cobro</NewLink>
       </div>
       <p>Efectivo, SPEI, tarjeta o contra entrega. El saldo sale del libro de pagos, no de una casilla.</p>
       {payments.isPending ? <TableSkeleton columns={5} /> : (
       <Paged rows={payments.data?.data ?? []}>
       {(pagePayments) => (
       <table>
-        <thead><tr><th>Pedido</th><th>Método</th><th>Estado</th><th>Importe</th><th>Referencia</th></tr></thead>
+        <thead><tr><th>Pedido</th><th>Método</th><th>Estado</th><th>Importe</th><th>Referencia</th>{canManage ? <th>Acciones</th> : null}</tr></thead>
         <tbody>
           {pagePayments.map((payment) => (
             <tr key={payment.id}>
@@ -1204,6 +1217,7 @@ export function CollectionsPage() {
               <td>{payment.status}</td>
               <td>{money(payment.amount)}</td>
               <td>{payment.reference ?? "—"}</td>
+              {canManage ? <td>{payment.status === "pending" ? <button type="button" className="btn" onClick={() => { setVoidId(payment.id); setReason(""); }}>Anular pendiente</button> : null}</td> : null}
             </tr>
           ))}
         </tbody>
@@ -1211,11 +1225,28 @@ export function CollectionsPage() {
       )}
       </Paged>
       )}
+      {error ? <p className="error">{error}</p> : null}
+      {voidId ? <form className="card form-vertical" onSubmit={(event) => {
+        event.preventDefault();
+        void run(async () => {
+          await api(`/payments/${voidId}/void`, { method: "POST", body: JSON.stringify({ reason }) });
+          setVoidId(null);
+          await client.invalidateQueries({ queryKey: ["payments"] });
+          await client.invalidateQueries({ queryKey: ["orders"] });
+        }, "void");
+      }}>
+        <h2>Anular cobro pendiente</h2>
+        <p>La anulación conserva el historial. Para dinero recibido registra un reembolso.</p>
+        <label>Motivo<input value={reason} onChange={(event) => setReason(event.target.value)} minLength={3} maxLength={200} required /></label>
+        <SaveButton label="Anular pendiente" pending={pendingKey === "void"} />
+        <button type="button" className="btn" onClick={() => setVoidId(null)} disabled={pendingKey !== null}>Volver</button>
+      </form> : null}
     </section>
   );
 }
 
 export function PaymentNewPage() {
+  const attempt = useIdempotencyAttempt();
   const client = useQueryClient();
   const navigate = useNavigate();
   const [params] = useSearchParams();
@@ -1228,22 +1259,17 @@ export function PaymentNewPage() {
       <h1>Registrar cobro</h1>
       {orders.isPending ? <FormSkeleton fields={5} /> : (
       <form
-        className="card"
-        style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10 }}
+        className="card form-vertical"
         onSubmit={(event) => {
           event.preventDefault();
           const data = new FormData(event.currentTarget);
           void run(async () => {
-            await api("/payments", {
-              method: "POST",
-              body: JSON.stringify({
-                orderId: data.get("orderId"),
-                method: data.get("method"),
-                amount: data.get("amount"),
-                reference: String(data.get("reference") || "") || undefined,
-                note: String(data.get("note") || "") || undefined,
-              }),
-            });
+            const payload = {
+              orderId: data.get("orderId"), method: data.get("method"), amount: data.get("amount"),
+              reference: String(data.get("reference") || "") || undefined,
+              note: String(data.get("note") || "") || undefined,
+            };
+            await api("/payments", { method: "POST", headers: attempt.headers(payload), body: JSON.stringify(payload) });
             await client.invalidateQueries({ queryKey: ["payments"] });
             await client.invalidateQueries({ queryKey: ["orders"] });
             await client.invalidateQueries({ queryKey: ["order", data.get("orderId")] });
@@ -1272,8 +1298,10 @@ export function PaymentNewPage() {
         <label>Importe<input name="amount" required placeholder="100.00" defaultValue={preset ? (orders.data?.data ?? []).find((order) => order.id === preset)?.amountDue ?? undefined : undefined} /></label>
         <label>Referencia<input name="reference" placeholder="Folio bancario" /></label>
         <label>Nota<input name="note" /></label>
-        <button className="primary" type="submit" disabled={pendingKey !== null} aria-busy={pendingKey !== null}>Guardar cobro</button>
-        {error ? <p className="error">{error}</p> : null}
+        <FormActions>
+          <SaveButton pending={pendingKey !== null} label="Guardar cobro" />
+          {error ? <p className="error">{error}</p> : null}
+        </FormActions>
       </form>
       )}
     </section>
@@ -1372,6 +1400,7 @@ export function QuoteEditPage() {
 }
 
 export function QuoteDetailPage() {
+  const canModify = useRole() !== "operator";
   const { id } = useParams();
   const client = useQueryClient();
   const navigate = useNavigate();
@@ -1424,7 +1453,7 @@ export function QuoteDetailPage() {
             <p style={{ margin: 0, fontWeight: 600 }}>Documento comercial. No es un CFDI.</p>
           </article>
           <div className="card quote-actions">
-            <div className="quote-actions-group">
+            {canModify ? <div className="quote-actions-group">
               <span className="quote-actions-label">Siguiente paso</span>
               <p className="quote-actions-hint">{QUOTE_NEXT_HINT[data.status] ?? ""}</p>
               <div className="quote-actions-row">
@@ -1461,6 +1490,7 @@ export function QuoteDetailPage() {
                 ) : null}
               </div>
             </div>
+            : null}
             <div className="quote-actions-group">
               <span className="quote-actions-label">Documentos</span>
               <div className="quote-actions-row">
@@ -1468,7 +1498,7 @@ export function QuoteDetailPage() {
                 {data.costing ? (
                   <QuoteButton label="PDF del taller" tone="shop" icon={<DownloadIcon />} pending={pendingKey === "pdf-taller"} disabled={pendingKey !== null} onClick={() => run(() => download(`/quotes/${data.id}/pdf/taller`, `${data.folio}-taller.pdf`), "pdf-taller")} />
                 ) : null}
-                <QuoteButton
+                {canModify ? <QuoteButton
                   label="Duplicar"
                   tone="neutral"
                   icon={<CopyIcon />}
@@ -1479,7 +1509,7 @@ export function QuoteDetailPage() {
                     await client.invalidateQueries({ queryKey: ["quotes"] });
                     navigate(`/app/cotizaciones/${copy.id}/editar`);
                   }, "clone")}
-                />
+                /> : null}
               </div>
             </div>
           </div>
@@ -1604,7 +1634,17 @@ export function QuoteButton({
   );
 }
 
-function DownloadIcon() {
+export function PayIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+      <rect x="2" y="6" width="20" height="12" rx="2" />
+      <circle cx="12" cy="12" r="2" />
+      <path d="M6 12h.01M18 12h.01" />
+    </svg>
+  );
+}
+
+export function DownloadIcon() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
       <path d="M12 3v12" />
@@ -1614,7 +1654,7 @@ function DownloadIcon() {
   );
 }
 
-function CopyIcon() {
+export function CopyIcon() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
       <rect x="9" y="9" width="12" height="12" rx="2" />
@@ -1824,8 +1864,8 @@ function QuoteBreakdown({ quote, costing }: { quote: QuoteDetail; costing: Quote
               <th>Descuento</th>
               <th>Importe</th>
               <th>Costo unitario</th>
-              <th>Costo</th>
-              <th>Utilidad</th>
+              <CostOnly><th>Costo</th></CostOnly>
+              <CostOnly><th>Utilidad</th></CostOnly>
               <th>Margen</th>
             </tr>
           </thead>
@@ -2124,7 +2164,9 @@ function QuoteBuilder({
                     <td>{print.filaments.length}</td>
                     <td>{print.services.length}</td>
                     <td>
-                      <button className="ghost" type="button" onClick={() => setPrints((current) => current.filter((item) => item.key !== print.key))}>Quitar</button>
+                      <IconAction label={`Quitar ${print.name || "impresión"}`} tone="delete" onClick={() => setPrints((current) => current.filter((item) => item.key !== print.key))}>
+                        <TrashIcon />
+                      </IconAction>
                     </td>
                   </tr>
                   {open ? (
@@ -2145,7 +2187,11 @@ function QuoteBuilder({
                               </label>
                               <label>Gramos por pieza<input value={line.quantity} onChange={(event) => setPrints((current) => current.map((item) => item.key === print.key ? { ...item, filaments: patchPart(item.filaments, line.key, { quantity: event.target.value }, filaments) } : item))} required /></label>
                               <label>Precio por gramo<input value={line.unitPrice} onChange={(event) => setPrints((current) => current.map((item) => item.key === print.key ? { ...item, filaments: patchPart(item.filaments, line.key, { unitPrice: event.target.value }, filaments) } : item))} required /></label>
-                              <button className="ghost" type="button" onClick={() => setPrints((current) => current.map((item) => item.key === print.key ? { ...item, filaments: item.filaments.filter((part) => part.key !== line.key) } : item))}>Quitar</button>
+                              <div className="line-remove">
+                                <IconAction label="Quitar filamento" tone="delete" onClick={() => setPrints((current) => current.map((item) => item.key === print.key ? { ...item, filaments: item.filaments.filter((part) => part.key !== line.key) } : item))}>
+                                  <TrashIcon />
+                                </IconAction>
+                              </div>
                             </div>
                           ))}
                           <strong>Servicios</strong>
@@ -2161,7 +2207,11 @@ function QuoteBuilder({
                               <label>Precio<input value={line.unitPrice} onChange={(event) => setPrints((current) => current.map((item) => item.key === print.key ? { ...item, services: patchPart(item.services, line.key, { unitPrice: event.target.value }, services) } : item))} required /></label>
                               <label>UM<input value={services.find((item) => item.id === line.catalogId)?.unit ?? ""} readOnly /></label>
                               <label>Términos<input value={line.terms} onChange={(event) => setPrints((current) => current.map((item) => item.key === print.key ? { ...item, services: patchPart(item.services, line.key, { terms: event.target.value }, services) } : item))} /></label>
-                              <button className="ghost" type="button" onClick={() => setPrints((current) => current.map((item) => item.key === print.key ? { ...item, services: item.services.filter((part) => part.key !== line.key) } : item))}>Quitar</button>
+                              <div className="line-remove">
+                                <IconAction label="Quitar servicio" tone="delete" onClick={() => setPrints((current) => current.map((item) => item.key === print.key ? { ...item, services: item.services.filter((part) => part.key !== line.key) } : item))}>
+                                  <TrashIcon />
+                                </IconAction>
+                              </div>
                             </div>
                           ))}
                           <div style={{ display: "flex", gap: 8 }}>
@@ -2189,7 +2239,11 @@ function QuoteBuilder({
           </label>
           <label>Cantidad<input value={line.quantity} onChange={(event) => setProductLines((current) => patchPart(current, line.key, { quantity: event.target.value }, products))} required /></label>
           <label>Precio<input value={line.unitPrice} onChange={(event) => setProductLines((current) => patchPart(current, line.key, { unitPrice: event.target.value }, products))} required /></label>
-          <button className="ghost" type="button" onClick={() => setProductLines((current) => current.filter((item) => item.key !== line.key))}>Quitar</button>
+          <div className="line-remove">
+            <IconAction label="Quitar producto" tone="delete" onClick={() => setProductLines((current) => current.filter((item) => item.key !== line.key))}>
+              <TrashIcon />
+            </IconAction>
+          </div>
         </div>
       ))}
       {mode === "prints" ? (
@@ -2372,9 +2426,11 @@ function DocumentForm({
           {line.kind === "service" ? (
             <label>Términos de la partida<input value={line.terms} onChange={(event) => update(line.key, { terms: event.target.value })} /></label>
           ) : null}
-          <button className="ghost" type="button" onClick={() => setLines((current) => current.filter((item) => item.key !== line.key))}>
-            Quitar {index + 1}
-          </button>
+          <div className="line-remove">
+            <IconAction label={`Quitar partida ${index + 1}`} tone="delete" onClick={() => setLines((current) => current.filter((item) => item.key !== line.key))}>
+              <TrashIcon />
+            </IconAction>
+          </div>
         </div>
       ))}
       <div style={{ display: "flex", gap: 8 }}>
@@ -2384,13 +2440,16 @@ function DocumentForm({
       </div>
       <label>Términos del documento<textarea name="serviceTerms" rows={3} placeholder="Plazo de entrega, revisiones incluidas y qué queda fuera." /></label>
       {shipping ? <label>Envío<input name="shipping" placeholder="0.00" /></label> : null}
-      <button className="primary" type="submit" disabled={pending} aria-busy={pending}>{submitLabel}</button>
-      {localError || error ? <p className="error">{localError || error}</p> : null}
+      <FormActions>
+        <SaveButton pending={pending} label={submitLabel} />
+        {localError || error ? <p className="error">{localError || error}</p> : null}
+      </FormActions>
     </form>
   );
 }
 
 function Action({ label, onClick, pending = false, disabled = false, tone }: { label: string; onClick: () => void; pending?: boolean; disabled?: boolean; tone?: string }) {
+  if (useRole() === "operator") return null;
   return (
     <button className={tone ? `ghost res res-${tone}` : "ghost"} type="button" disabled={pending || disabled} aria-busy={pending} onClick={onClick}>
       {label}
@@ -2425,7 +2484,7 @@ async function transitionOrder(client: ReturnType<typeof useQueryClient>, id: st
   else if (to === "shipped") {
     await api(`/orders/${id}/ship`, {
       method: "POST",
-      headers: { "idempotency-key": crypto.randomUUID() },
+      headers: { "idempotency-key": `ship-${id}` },
       body: JSON.stringify({ carrier: "Local" }),
     });
   } else if (to === "delivered") await api(`/orders/${id}/deliver`, { method: "POST" });
@@ -2456,35 +2515,57 @@ function OrderNextStep({
   onPdf: () => void;
   onCancel: () => void;
 }) {
-  const next = nextOrderAction(order.status);
+  const operator = useRole() === "operator";
+  const next = operator ? null : nextOrderAction(order.status);
   const gate = next ? order.actions?.find((action) => action.action === NEXT_ACTION[next.to]) : undefined;
   const blocked = Boolean(gate && !gate.allowed);
   const cancel = order.actions?.find((action) => action.action === "cancel");
   const due = order.amountDue !== null && Number(order.amountDue) > 0;
+  const canPay = due && order.status !== "cancelled" && order.status !== "draft";
+  const canCancel = !operator && order.status !== "cancelled" && Boolean(cancel);
   return (
-    <div style={{ display: "grid", gap: 8 }}>
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-        <Action label="PDF" pending={pendingKey === "pdf"} disabled={pendingKey !== null} onClick={onPdf} />
-        {next ? (
-          <Action label={next.label} pending={pendingKey === "status"} disabled={pendingKey !== null || blocked} onClick={() => onAct(next.to)} />
-        ) : null}
-        {due && order.status !== "cancelled" && order.status !== "draft" ? (
-          <Link className="primary" to={`/app/cobranza/nuevo?pedido=${order.id}`}>Registrar cobro</Link>
-        ) : null}
-        {order.status !== "cancelled" && cancel ? (
-          <Action
-            label="Cancelar pedido"
-            pending={pendingKey === "cancel"}
-            disabled={pendingKey !== null || !cancel.allowed}
-            onClick={() => {
-              if (!window.confirm("¿Cancelar este pedido? Esta acción no se puede deshacer.")) return;
-              onCancel();
-            }}
-          />
-        ) : null}
+    <div className="card quote-actions">
+      {next || canPay || canCancel ? (
+        <div className="quote-actions-group">
+          <span className="quote-actions-label">Siguiente paso</span>
+          {blocked && gate?.reason ? <p className="quote-actions-hint">{gate.reason}</p> : null}
+          {canCancel && cancel && !cancel.allowed ? <p className="quote-actions-hint">{cancel.reason}</p> : null}
+          <div className="quote-actions-row">
+            {next ? (
+              <QuoteButton
+                label={next.label}
+                tone={next.to === "delivered" ? "accept" : orderActionTone(next.to)}
+                icon={<OrderActionIcon to={next.to} />}
+                pending={pendingKey === "status"}
+                disabled={pendingKey !== null || blocked}
+                onClick={() => onAct(next.to)}
+              />
+            ) : null}
+            {canPay ? (
+              <Link className="quote-btn pay" to={`/app/cobranza/nuevo?pedido=${order.id}`}><PayIcon /><span>Registrar cobro</span></Link>
+            ) : null}
+            {canCancel && cancel ? (
+              <QuoteButton
+                label="Cancelar pedido"
+                tone="danger"
+                icon={<BanIcon />}
+                pending={pendingKey === "cancel"}
+                disabled={pendingKey !== null || !cancel.allowed}
+                onClick={() => {
+                  if (!window.confirm("¿Cancelar este pedido? Esta acción no se puede deshacer.")) return;
+                  onCancel();
+                }}
+              />
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+      <div className="quote-actions-group">
+        <span className="quote-actions-label">Documentos</span>
+        <div className="quote-actions-row">
+          <QuoteButton label="PDF del pedido" tone="doc" icon={<DownloadIcon />} pending={pendingKey === "pdf"} disabled={pendingKey !== null} onClick={onPdf} />
+        </div>
       </div>
-      {blocked && gate?.reason ? <p style={{ margin: 0 }}>{gate.reason}</p> : null}
-      {cancel && !cancel.allowed && order.status !== "cancelled" ? <p style={{ margin: 0 }}>{cancel.reason}</p> : null}
     </div>
   );
 }

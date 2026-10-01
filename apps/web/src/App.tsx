@@ -1,4 +1,4 @@
-import { MX_STATES, MX_TAX_REGIMES, Money } from "@3dprintmty/domain";
+import { canAccessModule, canAccessPath, roleHome, MX_STATES, MX_TAX_REGIMES, Money, STOCK_UOMS, UOM_LABELS, canEditFiscalSettings, canReadSalePrice, canWriteLocations, roleLabel, uomShort } from "@3dprintmty/domain";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
@@ -11,10 +11,12 @@ import { InventoryPage } from "./inventory";
 import { FilamentAdjustPage } from "./filament-stock";
 import { CostCalculatorPage, clearCalculatorDraft, type CalculatorDraft } from "./costing";
 import { FilterBar, FilterSelect, NoMatches, StatusBadge, distinct, matchesStatus, matchesText, useFilters } from "./filters";
-import { CostPriceFields, MarginValue } from "./margin";
+import { CostOnly, CostPriceFields, MarginValue, ProfitValue } from "./margin";
 import { ExpenseNewPage, ExpensePage, PrefacturaPage, PrefacturasPage, PurchaseOrderPage, PurchasingPage } from "./purchasing";
 import { CardsSkeleton, DetailSkeleton, FormSkeleton, TableSkeleton } from "./skeleton";
 import { Paged } from "./pager";
+import { canWritePath, homeFor, useRole } from "./roles";
+import { InvitePage, TeamPage } from "./team";
 import { authErrorMessage, registerWithPassword, signInWithGoogle, signInWithPassword, supabase } from "./supabase";
 
 export function App() {
@@ -91,8 +93,7 @@ function readField(data: FormData, key: string, fallback: string) {
 function Gate() {
   const { token, user } = useAuth();
   if (!token || !user) return <Navigate to="/entrar" replace />;
-  if (!user.tenantId) return <Navigate to="/alta" replace />;
-  return <Navigate to="/app" replace />;
+  return <Navigate to={homeFor(user)} replace />;
 }
 
 function AuthPage({ mode }: { mode: "login" | "register" }) {
@@ -125,7 +126,7 @@ function AuthPage({ mode }: { mode: "login" | "register" }) {
         }
         const user = await auth.adoptSupabaseSession();
         if (!user) return;
-        navigate(user.tenantId ? "/app" : "/alta");
+        navigate(homeFor(user));
         return;
       }
       const session = await api<{ token: string; user: SessionUser }>(
@@ -133,7 +134,7 @@ function AuthPage({ mode }: { mode: "login" | "register" }) {
         { method: "POST", body: JSON.stringify({ email, password }) },
       );
       auth.setSession(session.token, session.user);
-      navigate(session.user.tenantId ? "/app" : "/alta");
+      navigate(homeFor(session.user));
     } catch (caught) {
       setError(caught instanceof ApiError ? caught.message : t("common.loading"));
     } finally {
@@ -207,7 +208,7 @@ function AuthCallback() {
     );
   }
   if (auth.token && auth.user) {
-    return <Navigate to={auth.user.tenantId ? "/app" : "/alta"} replace />;
+    return <Navigate to={homeFor(auth.user)} replace />;
   }
   return (
     <main className="main" style={{ maxWidth: 440 }}>
@@ -443,14 +444,18 @@ function Shell() {
   const location = useLocation();
   const formCanvas = /\/(nuevo|nueva|editar)(\/|$)/.test(location.pathname);
   const at = (...paths: string[]) => paths.some((path) => location.pathname.startsWith(path));
+  const role = useRole();
+  // Producción no ve precios de venta; prefacturas, cobranza y compras quedarían vacías o prohibidas.
+  const seesMoney = canAccessModule(role, "sales");
   if (!auth.token || !auth.user) return <Navigate to="/entrar" replace />;
-  if (!auth.user.tenantId && !auth.user.platformAdmin) return <Navigate to="/alta" replace />;
+  if (!auth.user.tenantId && !auth.user.platformAdmin) return <Navigate to={homeFor(auth.user)} replace />;
   return (
     <div className={formCanvas ? "shell form-canvas" : "shell"}>
       <aside className="sidebar">
         <div>
           <p className="brand">{t("app.name")}</p>
           <p style={{ margin: 0, opacity: 0.7 }}>{auth.user.email}</p>
+          {auth.user.role ? <p style={{ margin: 0, opacity: 0.7, fontSize: 13 }}>{roleLabel(auth.user.role)}</p> : null}
         </div>
         <nav className="side-nav">
           <Nav to="/app">{t("nav.home")}</Nav>
@@ -459,10 +464,12 @@ function Shell() {
             <Nav to="/app/cotizaciones">{t("nav.quotes")}</Nav>
             <Nav to="/app/pedidos">{t("nav.orders")}</Nav>
           </NavGroup>
-          <NavGroup label="Finanzas" open={at("/app/prefacturas", "/app/cobranza")}>
-            <Nav to="/app/prefacturas">{t("nav.preinvoices")}</Nav>
-            <Nav to="/app/cobranza">{t("nav.collections")}</Nav>
-          </NavGroup>
+          {seesMoney ? (
+            <NavGroup label="Finanzas" open={at("/app/prefacturas", "/app/cobranza")}>
+              <Nav to="/app/prefacturas">{t("nav.preinvoices")}</Nav>
+              <Nav to="/app/cobranza">{t("nav.collections")}</Nav>
+            </NavGroup>
+          ) : null}
           <NavGroup label="Fabricación" open={at("/app/produccion", "/app/recetas")}>
             <Nav to="/app/produccion">{t("nav.production")}</Nav>
             <Nav to="/app/recetas">Recetas</Nav>
@@ -479,7 +486,7 @@ function Shell() {
             <Nav to="/app/inventario/insumos">Insumos</Nav>
             <Nav to="/app/inventario/filamentos">Filamentos</Nav>
           </NavGroup>
-          <Nav to="/app/compras">{t("nav.purchasing")}</Nav>
+          {canAccessModule(role, "purchasing") ? <Nav to="/app/compras">{t("nav.purchasing")}</Nav> : null}
           <NavGroup label={t("nav.settings")} open={at("/app/configuracion", "/app/sucursales", "/app/equipo", "/app/plataforma")}>
             <Nav to="/app/configuracion">{t("settings.title")}</Nav>
             <Nav to="/app/sucursales">{t("nav.locations")}</Nav>
@@ -494,7 +501,11 @@ function Shell() {
       <div>
         {auth.user.impersonator ? <SupportBanner /> : null}
         <main className="main">
-          <Outlet />
+          {location.pathname === "/app/plataforma"
+            ? auth.user.platformAdmin && !auth.user.impersonator ? <Outlet /> : <Navigate to={roleHome(role)} replace />
+            : !canAccessPath(role, location.pathname) || (/\/(nuevo|nueva|editar|ajustar)(\/|$)/.test(location.pathname) && !canWritePath(role, location.pathname))
+              ? role ? <Navigate to={roleHome(role)} replace /> : <p className="error">No tienes un rol válido para acceder al taller.</p>
+              : <Outlet />}
         </main>
       </div>
     </div>
@@ -502,6 +513,9 @@ function Shell() {
 }
 
 function Nav({ to, children }: { to: string; children: ReactNode }) {
+  const auth = useAuth();
+  const role = useRole();
+  if (to === "/app/plataforma" ? !auth.user?.platformAdmin || !!auth.user.impersonator : !canAccessPath(role, to)) return null;
   return <NavLink className="nav-link" to={to} end={to === "/app"}>{children}</NavLink>;
 }
 
@@ -510,6 +524,10 @@ function NavGroup({ label, open, children }: { label: string; open: boolean; chi
   useEffect(() => {
     if (open) setExpanded(true);
   }, [open]);
+  const role = useRole();
+  const auth = useAuth();
+  const links = (Array.isArray(children) ? children : [children]) as Array<{ props?: { to?: string } } | null>;
+  if (!links.some((child) => child?.props?.to && (child.props.to === "/app/plataforma" ? auth.user?.platformAdmin && !auth.user.impersonator : canAccessPath(role, child.props.to)))) return null;
   return (
     <div className="nav-group">
       <button className="nav-group-label" type="button" aria-expanded={expanded} onClick={() => setExpanded((current) => !current)}>
@@ -793,10 +811,11 @@ function ProductsPage() {
               <th>{t("products.sku")}</th>
               <th>{t("products.name")}</th>
               <th>Tipo</th>
-              <th>UOM</th>
-              <th>{t("products.cost")}</th>
+              <th>Unidad</th>
+              <CostOnly><th>{t("products.cost")}</th></CostOnly>
               <th>{t("products.sale")}</th>
-              <th>{t("products.margin")}</th>
+              <CostOnly><th>{t("products.profit")}</th></CostOnly>
+              <CostOnly><th>{t("products.margin")}</th></CostOnly>
               <th>Estado</th>
               <th></th>
             </tr>
@@ -807,10 +826,11 @@ function ProductsPage() {
                 <td>{product.sku}</td>
                 <td>{product.name}</td>
                 <td>{PRODUCT_TYPE[product.productType] ?? product.productType}</td>
-                <td>{product.stockUom}/{product.purchaseUom}</td>
-                <td>{product.cost ? Money.fromMajor(product.cost).format("es-MX") : "—"}</td>
+                <td>{uomShort(product.stockUom)}</td>
+                <CostOnly><td>{product.cost ? Money.fromMajor(product.cost).format("es-MX") : "—"}</td></CostOnly>
                 <td>{product.pricesHidden ? t("products.hidden") : product.salePrice ? Money.fromMajor(product.salePrice).format("es-MX") : "—"}</td>
-                <td>{product.pricesHidden ? t("products.hidden") : <MarginValue cost={product.cost} price={product.salePrice} />}</td>
+                <CostOnly><td>{product.pricesHidden ? t("products.hidden") : <ProfitValue cost={product.cost} price={product.salePrice} />}</td></CostOnly>
+                <CostOnly><td>{product.pricesHidden ? t("products.hidden") : <MarginValue cost={product.cost} price={product.salePrice} />}</td></CostOnly>
                 <td><StatusBadge status={product.status} /></td>
                 <td><RecordActions detailTo={`/app/productos/${product.id}`} editTo={`/app/productos/${product.id}/editar`} /></td>
               </tr>
@@ -860,7 +880,7 @@ function SuppliesPage() {
             label="Unidad"
             value={values.uom}
             onChange={(value) => set("uom", value)}
-            options={distinct(supplies.map((product) => product.stockUom)).map((uom) => ({ value: uom, label: uom }))}
+            options={distinct(supplies.map((product) => product.stockUom)).map((uom) => ({ value: uom, label: uomShort(uom) }))}
             allLabel="Todas"
           />
         </FilterBar>
@@ -872,10 +892,10 @@ function SuppliesPage() {
             <tr>
               <th>SKU</th>
               <th>Nombre</th>
-              <th>UOM</th>
-              <th>Costo</th>
+              <th>Unidad</th>
+              <CostOnly><th>Costo</th></CostOnly>
               <th>Precio de venta</th>
-              <th>Margen de utilidad</th>
+              <CostOnly><th>Margen de utilidad</th></CostOnly>
               <th>Estado</th>
               <th></th>
             </tr>
@@ -885,10 +905,10 @@ function SuppliesPage() {
               <tr key={product.id}>
                 <td>{product.sku}</td>
                 <td>{product.name}</td>
-                <td>{product.stockUom}/{product.purchaseUom}</td>
-                <td>{product.cost ? Money.fromMajor(product.cost).format("es-MX") : "—"}</td>
+                <td>{uomShort(product.stockUom)}</td>
+                <CostOnly><td>{product.cost ? Money.fromMajor(product.cost).format("es-MX") : "—"}</td></CostOnly>
                 <td>{product.pricesHidden ? "Oculto para tu rol" : product.salePrice ? Money.fromMajor(product.salePrice).format("es-MX") : "—"}</td>
-                <td>{product.pricesHidden ? "Oculto para tu rol" : <MarginValue cost={product.cost} price={product.salePrice} />}</td>
+                <CostOnly><td>{product.pricesHidden ? "Oculto para tu rol" : <MarginValue cost={product.cost} price={product.salePrice} />}</td></CostOnly>
                 <td><StatusBadge status={product.status} /></td>
                 <td><RecordActions detailTo={`/app/insumos/${product.id}`} editTo={`/app/insumos/${product.id}/editar`} /></td>
               </tr>
@@ -907,7 +927,7 @@ function SuppliesPage() {
 function FilamentsPage() {
   const query = useQuery({
     queryKey: ["filaments"],
-    queryFn: () => api<{ data: Product[] }>("/filaments"),
+    queryFn: () => api<{ data: Filament[] }>("/filaments"),
   });
   const { values, set, reset, dirty } = useFilters({ q: "", estado: "active", material: "", color: "" });
   const filaments = query.data?.data ?? [];
@@ -960,9 +980,9 @@ function FilamentsPage() {
               <th>Material</th>
               <th>Color</th>
               <th>Diámetro</th>
-              <th>Costo por kg</th>
+              <CostOnly><th>Costo por kg</th></CostOnly>
               <th>Precio por gramo</th>
-              <th>Margen de utilidad</th>
+              <CostOnly><th>Margen de utilidad</th></CostOnly>
               <th>Estado</th>
               <th></th>
             </tr>
@@ -972,12 +992,12 @@ function FilamentsPage() {
               <tr key={product.id}>
                 <td>{product.sku}</td>
                 <td>{product.name}</td>
-                <td>{product.material ?? "—"}</td>
-                <td>{product.color ?? "—"}</td>
-                <td>{product.diameterMm ?? "—"}</td>
-                <td>{product.cost ? Money.fromMajor(product.cost).format("es-MX") : "—"}</td>
+                <td>{product.material}</td>
+                <td>{product.color}</td>
+                <td>{product.diameterMm}</td>
+                <CostOnly><td>{product.cost ? Money.fromMajor(product.cost).format("es-MX") : "—"}</td></CostOnly>
                 <td>{product.pricesHidden ? "Oculto para tu rol" : product.salePrice ? Money.fromMajor(product.salePrice).format("es-MX") : "—"}</td>
-                <td>{product.pricesHidden ? "Oculto para tu rol" : <MarginValue cost={product.cost} price={product.salePrice} divisor={1000} />}</td>
+                <CostOnly><td>{product.pricesHidden ? "Oculto para tu rol" : <MarginValue cost={product.cost} price={product.salePrice} divisor={1000} />}</td></CostOnly>
                 <td><StatusBadge status={product.status} /></td>
                 <td><RecordActions detailTo={`/app/filamentos/${product.id}`} editTo={`/app/filamentos/${product.id}/editar`} /></td>
               </tr>
@@ -999,11 +1019,21 @@ interface Product {
   name: string;
   productType: string;
   status?: string;
-  material: string | null;
-  color: string | null;
-  diameterMm: string | null;
   stockUom: string;
   purchaseUom: string;
+  cost: string | null;
+  salePrice: string | null;
+  pricesHidden: boolean;
+}
+
+interface Filament {
+  id: string;
+  sku: string;
+  name: string;
+  status?: string;
+  material: string;
+  color: string;
+  diameterMm: string;
   cost: string | null;
   salePrice: string | null;
   pricesHidden: boolean;
@@ -1034,12 +1064,12 @@ function ProductDetailPage() {
       </div>
       <article className="card">
         <p>SKU {data.sku} · {PRODUCT_TYPE[data.productType] ?? data.productType} · {data.status === "inactive" ? "Inactivo" : "Activo"}</p>
-        <p>Unidad {data.stockUom} / compra {data.purchaseUom}</p>
-        <p>Costo {data.cost ? Money.fromMajor(data.cost).format("es-MX") : "—"}</p>
+        <p>Unidad de medida {UOM_LABELS[data.stockUom as keyof typeof UOM_LABELS] ?? data.stockUom}</p>
+        <CostOnly><p>Costo {data.cost ? Money.fromMajor(data.cost).format("es-MX") : "—"}</p></CostOnly>
         <p>Precio {data.pricesHidden ? "Oculto para tu rol" : data.salePrice ? Money.fromMajor(data.salePrice).format("es-MX") : "—"}</p>
-        <p style={{ margin: 0 }}>Margen de utilidad {data.pricesHidden ? "Oculto para tu rol" : <MarginValue cost={data.cost} price={data.salePrice} />}</p>
+        <CostOnly><p style={{ margin: 0 }}>Margen de utilidad {data.pricesHidden ? "Oculto para tu rol" : <MarginValue cost={data.cost} price={data.salePrice} />}</p></CostOnly>
       </article>
-      {data.productType === "finished_good" ? <p style={{ margin: 0 }}><Link to={`/app/costeo?producto=${data.id}`}>Calcular costo</Link></p> : null}
+      <CostOnly>{data.productType === "finished_good" ? <p style={{ margin: 0 }}><Link to={`/app/costeo?producto=${data.id}`}>Calcular costo</Link></p> : null}</CostOnly>
     </section>
   );
 }
@@ -1069,6 +1099,7 @@ function ProductEditPage() {
           void save.mutateAsync({
             sku: String(form.get("sku") || "").trim(),
             name: form.get("name"),
+            stockUom: form.get("stockUom"),
             cost: String(form.get("cost") || "") || null,
             salePrice: String(form.get("salePrice") || "") || null,
             status: form.get("status"),
@@ -1081,6 +1112,7 @@ function ProductEditPage() {
       >
         <label>SKU<input name="sku" required maxLength={40} defaultValue={data.sku} style={{ textTransform: "uppercase" }} /></label>
         <label>Nombre<input name="name" required defaultValue={data.name} /></label>
+        <UomSelect defaultValue={data.stockUom} hint="Si ya hay existencia, déjala en cero antes de cambiar la unidad: las cantidades no se convierten. Revisa también las recetas que lo usen." />
         <CostPriceFields costLabel="Costo" priceLabel="Precio de venta" initialCost={data.cost ?? ""} initialPrice={data.salePrice ?? ""} />
         <label>
           Estado
@@ -1112,7 +1144,7 @@ function ProductEditPage() {
 
 function FilamentDetailPage() {
   const { id } = useParams();
-  const filament = useQuery({ queryKey: ["filament", id], queryFn: () => api<Product>(`/filaments/${id}`) });
+  const filament = useQuery({ queryKey: ["filament", id], queryFn: () => api<Filament>(`/filaments/${id}`) });
   if (filament.isPending) return <DetailSkeleton />;
   if (!filament.data) return <p className="error">No se pudo cargar el filamento.</p>;
   const data = filament.data;
@@ -1125,9 +1157,9 @@ function FilamentDetailPage() {
       </div>
       <article className="card">
         <p>SKU {data.sku} · {data.material} · {data.color} · {data.diameterMm} mm · {data.status === "inactive" ? "Inactivo" : "Activo"}</p>
-        <p>Costo por kg {data.cost ? Money.fromMajor(data.cost).format("es-MX") : "—"}</p>
+        <CostOnly><p>Costo por kg {data.cost ? Money.fromMajor(data.cost).format("es-MX") : "—"}</p></CostOnly>
         <p>Precio por gramo {data.pricesHidden ? "Oculto para tu rol" : data.salePrice ? Money.fromMajor(data.salePrice).format("es-MX") : "—"}</p>
-        <p style={{ margin: 0 }}>Margen de utilidad {data.pricesHidden ? "Oculto para tu rol" : <MarginValue cost={data.cost} price={data.salePrice} divisor={1000} />}</p>
+        <CostOnly><p style={{ margin: 0 }}>Margen de utilidad {data.pricesHidden ? "Oculto para tu rol" : <MarginValue cost={data.cost} price={data.salePrice} divisor={1000} />}</p></CostOnly>
       </article>
     </section>
   );
@@ -1139,7 +1171,7 @@ function FilamentEditPage() {
   const navigate = useNavigate();
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const filament = useQuery({ queryKey: ["filament", id], queryFn: () => api<Product>(`/filaments/${id}`) });
+  const filament = useQuery({ queryKey: ["filament", id], queryFn: () => api<Filament>(`/filaments/${id}`) });
   if (filament.isPending) return <FormSkeleton fields={8} />;
   if (!filament.data) return <p className="error">No se pudo cargar el filamento.</p>;
   const data = filament.data;
@@ -1175,9 +1207,9 @@ function FilamentEditPage() {
       >
         <label>SKU<input name="sku" required maxLength={40} defaultValue={data.sku} style={{ textTransform: "uppercase" }} /></label>
         <label>Nombre<input name="name" required defaultValue={data.name} /></label>
-        <label>Material<input name="material" required defaultValue={data.material ?? ""} /></label>
-        <label>Color<input name="color" required defaultValue={data.color ?? ""} /></label>
-        <label>Diámetro<select name="diameterMm" defaultValue={data.diameterMm ?? "1.75"}><option>1.75</option><option>2.85</option></select></label>
+        <label>Material<input name="material" required defaultValue={data.material} /></label>
+        <label>Color<input name="color" required defaultValue={data.color} /></label>
+        <label>Diámetro<select name="diameterMm" defaultValue={data.diameterMm}><option>1.75</option><option>2.85</option></select></label>
         <CostPriceFields costLabel="Costo por kg" priceLabel="Precio por gramo" initialCost={data.cost ?? ""} initialPrice={data.salePrice ?? ""} divisor={1000} />
         <label>
           Estado
@@ -1204,6 +1236,18 @@ function FilamentEditPage() {
         </FormActions>
       </form>
     </section>
+  );
+}
+
+function UomSelect({ defaultValue, hint }: { defaultValue: string; hint?: string }) {
+  return (
+    <label>
+      Unidad de medida
+      <select name="stockUom" defaultValue={defaultValue}>
+        {STOCK_UOMS.map((uom) => <option key={uom} value={uom}>{UOM_LABELS[uom]}</option>)}
+      </select>
+      {hint ? <span className="costing-hint">{hint}</span> : null}
+    </label>
   );
 }
 
@@ -1234,6 +1278,7 @@ function ProductNewPage({ kind }: { kind?: "component" }) {
         sku: String(data.get("sku")),
         name: String(data.get("name")),
         productType,
+        stockUom: String(data.get("stockUom") || "EA"),
         cost: String(data.get("cost")),
         salePrice: String(data.get("salePrice") || "") || undefined,
       });
@@ -1276,7 +1321,7 @@ function ProductNewPage({ kind }: { kind?: "component" }) {
       </p>
       <h1>{supply ? "Nuevo insumo" : "Nuevo producto"}</h1>
       <form className="card form-vertical" onSubmit={onSubmit}>
-        {draft ? <p style={{ margin: 0 }}>Costo y precio vienen de la calculadora. Ajusta el precio si quieres otro margen.</p> : null}
+        {draft ? <CostOnly><p style={{ margin: 0 }}>Costo y precio vienen de la calculadora. Ajusta el precio si quieres otro margen.</p></CostOnly> : null}
         <label>{t("products.sku")}<input name="sku" required /></label>
         <label>{t("products.name")}<input name="name" required defaultValue={draft?.name} /></label>
         {supply ? null : (
@@ -1288,6 +1333,7 @@ function ProductNewPage({ kind }: { kind?: "component" }) {
             </select>
           </label>
         )}
+        <UomSelect defaultValue="EA" />
         <CostPriceFields costLabel="Costo" priceLabel={t("products.sale")} costPlaceholder="35.00" pricePlaceholder="480.00" costRequired initialCost={draft?.cost} initialPrice={draft?.salePrice} />
         {draft && draft.recipe.length > 0 && productType === "finished_good" ? (
           <fieldset className="payment-terms">
@@ -1371,12 +1417,14 @@ function LocationsPage() {
     queryKey: ["locations"],
     queryFn: () => api<Array<{ id: string; name: string; state: string; postalCode: string; kind: string }>>("/locations"),
   });
+  const role = useRole();
+  const canEdit = role !== null && canWriteLocations(role);
   return (
     <section style={{ display: "grid", gap: 16 }}>
       <h1>{t("nav.locations")}</h1>
+      {canEdit ? (
       <form
-        className="card"
-        style={{ display: "grid", gap: 10 }}
+        className="card form-vertical"
         onSubmit={async (event) => {
           event.preventDefault();
           const formElement = event.currentTarget;
@@ -1405,68 +1453,15 @@ function LocationsPage() {
           <select name="state">{MX_STATES.map((state) => <option key={state}>{state}</option>)}</select>
         </label>
         <label>{t("onboarding.postalCode")}<input name="postalCode" required pattern="\d{5}" /></label>
-        <button className="primary" type="submit" disabled={saving} aria-busy={saving}>{t("common.save")}</button>
+        <FormActions>
+          <SaveButton pending={saving} label="Agregar ubicación" />
+        </FormActions>
       </form>
+      ) : <p style={{ margin: 0 }}>Solo el dueño, un administrador o almacén pueden agregar ubicaciones.</p>}
       {query.isPending ? <TableSkeleton columns={1} rows={4} /> : (
       <ul>
         {query.data?.map((location) => (
           <li key={location.id}>{location.name} · {location.state} · CP {location.postalCode}</li>
-        ))}
-      </ul>
-      )}
-    </section>
-  );
-}
-
-function TeamPage() {
-  const { t } = useTranslation();
-  const client = useQueryClient();
-  const [link, setLink] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-  const query = useQuery({
-    queryKey: ["team"],
-    queryFn: () => api<{ members: Array<{ userId: string; email: string; role: string }> }>("/team"),
-  });
-  return (
-    <section style={{ display: "grid", gap: 16 }}>
-      <h1>{t("team.title")}</h1>
-      <form
-        className="card"
-        style={{ display: "grid", gap: 10 }}
-        onSubmit={async (event) => {
-          event.preventDefault();
-          const form = new FormData(event.currentTarget);
-          setSaving(true);
-          try {
-            const result = await api<{ acceptPath: string }>("/invitations", {
-              method: "POST",
-              body: JSON.stringify({ email: form.get("email"), role: form.get("role") }),
-            });
-            setLink(`${window.location.origin}${result.acceptPath}`);
-            await client.invalidateQueries({ queryKey: ["team"] });
-          } finally {
-            setSaving(false);
-          }
-        }}
-      >
-        <label>{t("auth.email")}<input name="email" type="email" required /></label>
-        <label>
-          {t("team.role")}
-          <select name="role">
-            <option value="admin">admin</option>
-            <option value="sales">sales</option>
-            <option value="production">production</option>
-            <option value="warehouse">warehouse</option>
-            <option value="viewer">viewer</option>
-          </select>
-        </label>
-        <button className="primary" type="submit" disabled={saving} aria-busy={saving}>{t("team.invite")}</button>
-      </form>
-      {link ? <p className="banner">{t("team.link")} <a href={link}>{link}</a></p> : null}
-      {query.isPending ? <TableSkeleton columns={1} rows={4} /> : (
-      <ul>
-        {query.data?.members.map((member) => (
-          <li key={member.userId}>{member.email} · {member.role}</li>
         ))}
       </ul>
       )}
@@ -1490,15 +1485,18 @@ function SettingsPage() {
       vatRate: string;
     }>("/company"),
   });
+  const role = useRole();
   if (company.isPending) return <FormSkeleton fields={6} />;
   if (!company.data) return <p className="error">No se pudo cargar la configuración.</p>;
+  const canEdit = role !== null && canEditFiscalSettings(role);
+  const canPreview = role !== null && ["owner", "admin", "sales"].includes(role);
   const initialVat = company.data.vatRate.startsWith("0.08") ? "0.08" : company.data.vatRate.startsWith("0.00") ? "0" : "0.16";
   return (
     <section style={{ display: "grid", gap: 16 }}>
       <h1>{t("settings.title")}</h1>
+      {canEdit ? null : <p style={{ margin: 0 }}>Solo el dueño del taller puede cambiar los datos fiscales. Aquí puedes consultarlos.</p>}
       <form
-        className="card"
-        style={{ display: "grid", gap: 10 }}
+        className="card form-vertical"
         onSubmit={async (event) => {
           event.preventDefault();
           const form = new FormData(event.currentTarget);
@@ -1524,6 +1522,7 @@ function SettingsPage() {
           }
         }}
       >
+        <fieldset disabled={!canEdit} style={{ display: "contents" }}>
         <label>{t("onboarding.legalName")}<input name="legalName" defaultValue={company.data.legalName} required /></label>
         <label>{t("onboarding.tradeName")}<input name="tradeName" defaultValue={company.data.tradeName ?? ""} /></label>
         <label>{t("onboarding.rfc")}<input name="rfc" defaultValue={company.data.rfc} required /></label>
@@ -1542,12 +1541,17 @@ function SettingsPage() {
             <option value="0">Tasa 0</option>
           </select>
         </label>
-        {error ? <p className="error">{error}</p> : null}
-        <button className="primary" type="submit" disabled={busy !== null} aria-busy={busy === "save"}>{t("common.save")}</button>
+        </fieldset>
+        {canEdit ? (
+          <FormActions>
+            <SaveButton pending={busy !== null} />
+            {error ? <p className="error">{error}</p> : null}
+          </FormActions>
+        ) : null}
       </form>
+      {canPreview ? (
       <form
-        className="card"
-        style={{ display: "grid", gap: 10 }}
+        className="card form-vertical"
         onSubmit={async (event) => {
           event.preventDefault();
           const form = new FormData(event.currentTarget);
@@ -1572,6 +1576,7 @@ function SettingsPage() {
         <button className="ghost" type="submit" disabled={busy !== null} aria-busy={busy === "preview"}>{t("settings.preview")}</button>
         {preview ? <p>{preview}</p> : null}
       </form>
+      ) : null}
     </section>
   );
 }
@@ -1623,72 +1628,6 @@ function PlatformPage() {
         </article>
       ))}
     </section>
-  );
-}
-
-function InvitePage() {
-  const { token } = useParams();
-  const { t } = useTranslation();
-  const auth = useAuth();
-  const navigate = useNavigate();
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
-  return (
-    <main className="main" style={{ maxWidth: 460 }}>
-      <h1>Aceptar invitación</h1>
-      {supabase && !auth.token ? (
-        <div className="card" style={{ display: "grid", gap: 10 }}>
-          <p style={{ margin: 0 }}>Entra con el correo de la invitación. Después podrás unirte al taller.</p>
-          <button className="ghost" type="button" disabled={busy !== null} aria-busy={busy === "google"} onClick={() => {
-            setBusy("google");
-            void signInWithGoogle().catch((caught: unknown) => setError(caught instanceof Error ? caught.message : "No se pudo entrar con Google.")).finally(() => setBusy(null));
-          }}>
-            {t("auth.google")}
-          </button>
-          <Link to="/entrar">Entrar con correo</Link>
-          {error ? <p className="error">{error}</p> : null}
-        </div>
-      ) : (
-      <form
-        className="card"
-        style={{ display: "grid", gap: 10 }}
-        onSubmit={async (event) => {
-          event.preventDefault();
-          const form = new FormData(event.currentTarget);
-          setError(null);
-          setBusy("join");
-          try {
-            const result = await api<{ token: string | null; user: { id: string; email: string; role: string | null; tenantId: string | null } }>(
-              "/invitations/accept",
-              {
-                method: "POST",
-                body: JSON.stringify(supabase ? { token } : { token, password: form.get("password") }),
-              },
-            );
-            const nextToken = result.token ?? auth.token;
-            if (!nextToken) throw new Error("No hay sesión.");
-            auth.setSession(nextToken, {
-              id: result.user.id,
-              email: result.user.email,
-              tenantId: result.user.tenantId,
-              role: result.user.role,
-              platformAdmin: auth.user?.platformAdmin ?? false,
-              impersonator: null,
-            });
-            navigate("/app");
-          } catch (caught) {
-            setError(caught instanceof ApiError ? caught.message : "No se pudo aceptar.");
-          } finally {
-            setBusy(null);
-          }
-        }}
-      >
-        {supabase ? null : <label>Contraseña<input name="password" type="password" minLength={8} required /></label>}
-        {error ? <p className="error">{error}</p> : null}
-        <button className="primary" type="submit" disabled={busy !== null} aria-busy={busy === "join"}>Unirme al taller</button>
-      </form>
-      )}
-    </main>
   );
 }
 

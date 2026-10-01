@@ -1,6 +1,9 @@
+import { uomShort } from "@3dprintmty/domain";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRef, useState, type ReactNode } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
+import { CostOnly } from "./margin";
+import { useRole } from "./roles";
 import { api, postJson } from "./api";
 import { FilterBar, FilterSelect, NoMatches, StatusBadge, matchesStatus, matchesText, useFilters } from "./filters";
 import { BanIcon, CheckIcon, IconAction, PencilIcon, PlusIcon, QuoteButton, TrashIcon, ViewLink, money, useError } from "./operations";
@@ -119,7 +122,10 @@ export function ProductionPage() {
                 {pending.map((order) => <option key={order.id} value={order.id}>{order.folio} · {order.customerName}</option>)}
               </select>
             </label>
-            <button className="ghost" type="submit" disabled={pendingKey !== null} aria-busy={pendingKey === "demand"}>Generar órdenes del pedido</button>
+            <button className="primary new-link form-inline-submit" type="submit" disabled={pendingKey !== null} aria-busy={pendingKey === "demand"}>
+              <PlusIcon />
+              Generar órdenes del pedido
+            </button>
           </form>
         ) : (
           <p style={{ margin: 0 }}>Ningún pedido confirmado tiene producto por fabricar.</p>
@@ -152,12 +158,12 @@ export function ProductionPage() {
                   <div className="record-actions">
                     <ViewLink to={`/app/produccion/${order.id}`} />
                     {step ? (
-                      <IconAction label={step.label} tone={step.tone} pending={pendingKey === order.id} disabled={pendingKey !== null} onClick={() => void run(() => finishProduction(order.id, order.status, order.quantityOrdered).then(refresh), order.id)}>
+                      <IconAction operatorAllowed label={step.label} tone={step.tone} pending={pendingKey === order.id} disabled={pendingKey !== null} onClick={() => void run(() => finishProduction(order.id, order.status, order.quantityOrdered).then(refresh), order.id)}>
                         {step.icon}
                       </IconAction>
                     ) : null}
                     {CANCELLABLE.has(order.status) ? (
-                      <IconAction label="Cancelar orden" tone="delete" pending={pendingKey === `cancel-${order.id}`} disabled={pendingKey !== null} onClick={() => {
+                      <IconAction operatorAllowed label="Cancelar orden" tone="delete" pending={pendingKey === `cancel-${order.id}`} disabled={pendingKey !== null} onClick={() => {
                         const reason = askCancelReason(order.folio);
                         if (reason) void run(() => cancelProduction(order.id, reason).then(refresh), `cancel-${order.id}`);
                       }}>
@@ -186,6 +192,7 @@ export function useRecipes() {
 }
 
 export function RecipesPage() {
+  const operator = useRole() === "operator";
   const products = useProducts();
   const recipes = useRecipes();
   const [params, setParams] = useSearchParams();
@@ -239,7 +246,7 @@ export function RecipesPage() {
         <Paged rows={rows}>
         {(pageRows) => (
         <table>
-          <thead><tr><th>SKU</th><th>Producto</th><th>Componentes</th><th>Costo de material por pieza</th><th>Estado</th><th></th></tr></thead>
+          <thead><tr><th>SKU</th><th>Producto</th><th>Componentes</th><CostOnly><th>Costo de material por pieza</th></CostOnly><th>Estado</th><th></th></tr></thead>
           <tbody>
             {pageRows.map((product) => {
               const summary = summaries.get(product.id);
@@ -249,13 +256,13 @@ export function RecipesPage() {
                   <td>{product.sku}</td>
                   <td>{product.name}</td>
                   <td>{lines ? lines : <span className="res res-badge cat-inactive">Sin receta</span>}</td>
-                  <td>{lines ? money(summary?.materialCost) : "—"}</td>
+                  <CostOnly><td>{lines ? money(summary?.materialCost) : "—"}</td></CostOnly>
                   <td><StatusBadge status={product.status} /></td>
                   <td>
                     <div className="record-actions">
-                      <IconAction label={lines ? "Editar receta" : "Armar receta"} tone="edit" onClick={() => choose(product.id)}>
+                      {operator ? <button className="ghost" type="button" onClick={() => choose(product.id)}>Ver receta</button> : <IconAction label={lines ? "Editar receta" : "Armar receta"} tone="edit" onClick={() => choose(product.id)}>
                         <PencilIcon />
-                      </IconAction>
+                      </IconAction>}
                     </div>
                   </td>
                 </tr>
@@ -276,6 +283,7 @@ export function RecipesPage() {
 }
 
 function RecipeEditor({ product, onClose }: { product: ProductOption; onClose: () => void }) {
+  const operator = useRole() === "operator";
   const client = useQueryClient();
   const products = useProducts();
   const filaments = useFilaments();
@@ -307,6 +315,14 @@ function RecipeEditor({ product, onClose }: { product: ProductOption; onClose: (
       componentId,
     );
   };
+  if (operator) return <article className="card">
+    <h2>Receta de {product.sku} · {product.name}</h2>
+    <button type="button" className="ghost" onClick={onClose}>Cerrar</button>
+    {bom.isPending ? <TableSkeleton columns={3} /> : <table>
+      <thead><tr><th>Componente</th><th>Cantidad por pieza</th><th>Merma</th></tr></thead>
+      <tbody>{recipeLines.map((line) => <tr key={line.componentProductId}><td>{line.sku} · {line.name}</td><td>{line.quantity}</td><td>{line.scrapPct}%</td></tr>)}</tbody>
+    </table>}
+  </article>;
   return (
       <div className="card" style={{ display: "grid", gap: 10 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
@@ -314,7 +330,9 @@ function RecipeEditor({ product, onClose }: { product: ProductOption; onClose: (
             Receta de {product.sku} · {product.name}
             {product.status === "inactive" ? <StatusBadge status={product.status} /> : null}
           </h2>
-          <button className="ghost" type="button" onClick={onClose}>Cerrar</button>
+          <IconAction label="Cerrar receta" tone="neutral" onClick={onClose}>
+            <XIcon />
+          </IconAction>
         </div>
         {bom.isPending ? <TableSkeleton columns={4} /> : bom.data ? (
           <>
@@ -345,9 +363,9 @@ function RecipeEditor({ product, onClose }: { product: ProductOption; onClose: (
                                 if (event.key === "Escape") setEditingId(null);
                               }}
                             />
-                            {line.stockUom}
+                            {uomShort(line.stockUom)}
                           </span>
-                        ) : `${line.quantity} ${line.stockUom}`}
+                        ) : `${line.quantity} ${uomShort(line.stockUom)}`}
                       </td>
                       <td>{money(line.extendedCost)}</td>
                       <td>
@@ -578,7 +596,7 @@ export function ProductionDetailPage() {
           {materials.map((material) => (
             <tr key={material.id}>
               <td>{material.sku} · {material.name}</td>
-              <td>{material.required} {material.stockUom}</td>
+              <td>{material.required} {uomShort(material.stockUom)}</td>
               <td>{material.consumed}</td>
               <td>
                 {!material.tracksStock ? <span className="costing-hint">Se ajusta en el inventario</span>
@@ -594,10 +612,6 @@ export function ProductionDetailPage() {
       </Paged>
     </section>
   );
-}
-
-export function Action({ label, onClick, pending = false, disabled = false }: { label: string; onClick: () => void; pending?: boolean; disabled?: boolean }) {
-  return <button className="ghost" type="button" disabled={pending || disabled} aria-busy={pending} onClick={onClick}>{label}</button>;
 }
 
 export interface ProductOption {

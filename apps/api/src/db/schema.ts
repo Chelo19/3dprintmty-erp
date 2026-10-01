@@ -133,12 +133,9 @@ export const products = pgTable("products", {
   name: text("name").notNull(),
   productType: text("product_type").notNull(),
   status: text("status").notNull().default("active"),
-  material: text("material"),
-  color: text("color"),
-  diameterMm: numeric("diameter_mm", { precision: 4, scale: 2 }),
-  stockUom: text("stock_uom").notNull().default("G"),
-  purchaseUom: text("purchase_uom").notNull().default("KG"),
-  uomFactor: numeric("uom_factor", { precision: 12, scale: 4 }).notNull().default("1000"),
+  stockUom: text("stock_uom").notNull().default("EA"),
+  purchaseUom: text("purchase_uom").notNull().default("EA"),
+  uomFactor: numeric("uom_factor", { precision: 12, scale: 4 }).notNull().default("1"),
   costMinor: bigint("cost_minor", { mode: "bigint" }),
   salePriceMinor: bigint("sale_price_minor", { mode: "bigint" }),
   qcRigor: text("qc_rigor").notNull().default("off"),
@@ -172,9 +169,6 @@ export const productsVisible = pgView("products_visible", {
   name: text("name"),
   productType: text("product_type"),
   status: text("status"),
-  material: text("material"),
-  color: text("color"),
-  diameterMm: numeric("diameter_mm", { precision: 4, scale: 2 }),
   stockUom: text("stock_uom"),
   purchaseUom: text("purchase_uom"),
   uomFactor: numeric("uom_factor", { precision: 12, scale: 4 }),
@@ -458,6 +452,19 @@ export const idempotencyKeys = pgTable(
   },
   (table) => [primaryKey({ columns: [table.userId, table.key] })],
 );
+
+// Historial de operaciones atómicas. Solo se consulta con privilegios del servidor.
+export const idempotencyRequests = pgTable("idempotency_requests", {
+  tenantId: uuid("tenant_id").notNull().references(() => tenants.id),
+  userId: uuid("user_id").notNull().references(() => userAccounts.id),
+  operation: text("operation").notNull(),
+  key: text("key").notNull(),
+  requestHash: text("request_hash").notNull(),
+  status: text("status").notNull().default("processing"),
+  response: jsonb("response"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+}, (table) => [primaryKey({ columns: [table.tenantId, table.userId, table.operation, table.key] })]);
 
 const qty = (name: string) => numeric(name, { precision: 14, scale: 4 });
 const tenantId = () => uuid("tenant_id").notNull().references(() => tenants.id);

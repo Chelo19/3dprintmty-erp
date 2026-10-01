@@ -6,7 +6,8 @@
     "dev": "tsx watch src/main.ts",
     "start": "tsx src/main.ts",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "db:migrate": "tsx src/db/migrate.ts"
   },
   "dependencies": {
     "@3dprintmty/domain": "*",

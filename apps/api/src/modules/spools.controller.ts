@@ -15,7 +15,7 @@ import { filaments, locations, spoolEvents, spools } from "../db/schema";
 import { assertRole, CurrentUser, requireTenant, type Actor, type TenantActor } from "../http/actor";
 import { allocateFolios, defaultLocationId, one, postStock, type Db } from "./support";
 
-const WAREHOUSE = ["owner", "admin", "warehouse"] as const;
+const WAREHOUSE = ["owner", "admin", "warehouse", "operator"] as const;
 
 const spoolSchema = z.object({
   filamentId: z.string().uuid(),
@@ -132,7 +132,7 @@ export class SpoolsController {
 
   @Post("spools/:id/weigh")
   async weigh(@CurrentUser() actor: Actor, @Param("id") id: string, @Body() body: unknown) {
-    const tenant = assertRole(actor, ["owner", "admin", "warehouse", "production"]);
+    const tenant = assertRole(actor, ["owner", "admin", "warehouse", "production", "operator"]);
     const input = weighSchema.parse(body);
     const measured = parseQty(input.grams);
     if (measured < 0n) throw new AppError("invalid_quantity", "El peso no puede ser negativo.");
@@ -145,7 +145,7 @@ export class SpoolsController {
 
   @Post("spools/empty")
   async empty(@CurrentUser() actor: Actor, @Body() body: unknown) {
-    const tenant = assertRole(actor, ["owner", "admin", "warehouse", "production"]);
+    const tenant = assertRole(actor, ["owner", "admin", "warehouse", "production", "operator"]);
     const input = emptySchema.parse(body);
     const ids = [...new Set(input.spoolIds)];
     const updated = await this.database.asUser(tenant, async (db) => {

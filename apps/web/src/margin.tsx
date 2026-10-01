@@ -1,4 +1,6 @@
-import { useState } from "react";
+import { Money } from "@3dprintmty/domain";
+import { useRole } from "./roles";
+import { useState, type ReactNode } from "react";
 
 /** Margen sobre el precio: (precio − costo) / precio. En filamento el costo está por kg y el precio por gramo. */
 export function marginPercent(cost: string | null | undefined, price: string | null | undefined, costDivisor = 1): number | null {
@@ -21,6 +23,14 @@ function marginColor(percent: number | null): string | undefined {
 export function MarginValue({ cost, price, divisor = 1 }: { cost: string | null | undefined; price: string | null | undefined; divisor?: number }) {
   const percent = marginPercent(cost, price, divisor);
   return <span style={{ color: marginColor(percent), fontWeight: percent === null ? undefined : 600 }}>{marginLabel(percent)}</span>;
+}
+
+/** Utilidad por unidad: precio − costo, en pesos. */
+export function ProfitValue({ cost, price }: { cost: string | null | undefined; price: string | null | undefined }) {
+  if (!cost || !price) return <span>—</span>;
+  const profit = Money.fromMajor(price).sub(Money.fromMajor(cost));
+  const color = profit.minor === 0n ? undefined : profit.minor > 0n ? "var(--color-pine)" : "var(--color-danger)";
+  return <span style={{ color, fontWeight: 600 }}>{profit.format("es-MX")}</span>;
 }
 
 export function CostPriceFields({
@@ -63,4 +73,8 @@ export function CostPriceFields({
       </label>
     </>
   );
+}
+
+export function CostOnly({ children }: { children: ReactNode }) {
+  return useRole() === "operator" ? null : <>{children}</>;
 }
