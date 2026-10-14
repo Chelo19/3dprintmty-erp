@@ -1,7 +1,7 @@
 import { SetMetadata, type CanActivate, type ExecutionContext, Injectable } from "@nestjs/common";
 import { Reflector } from "@nestjs/core";
 import { AppError } from "@3dprintmty/shared";
-import { canAccessModule, type AppModule } from "@3dprintmty/domain";
+import { FEATURES, canAccessModule, type AppModule } from "@3dprintmty/domain";
 import { requireTenant, type Actor } from "./actor";
 import { services } from "../container";
 
@@ -34,6 +34,9 @@ export class AuthGuard implements CanActivate {
     // Usa la ruta registrada: Express acepta variaciones de mayúsculas en la URL.
     const route = request.route?.path ?? request.path;
     const section = route.replace(/^\/api\/v1\//i, "").split("/")[0]?.toLowerCase() ?? "";
+    if (section === "prefacturas" && !FEATURES.prefacturas) {
+      throw new AppError("module_disabled", "El módulo de prefacturas está temporalmente desactivado.", 503);
+    }
     if (request.user.role === "operator") {
       const path = route.replace(/^\/api\/v1\//i, "").replace(/\/$/, "").toLowerCase();
       const read = request.method === "GET" && /^(auth\/me|customers(?:\/[^/]+)?|quotes(?:\/[^/]+(?:\/pdf)?)?|orders(?:\/[^/]+(?:\/pdf)?)?|payments|products(?:\/[^/]+)?|filaments(?:\/[^/]+)?|services(?:\/[^/]+)?|company|locations|payment-methods|prefacturas(?:\/[^/]+)?|inventory(?:\/(balances|ledger))?|spools|production-orders(?:\/[^/]+)?|boms(?:\/[^/]+)?|routings\/[^/]+|work-centers|quality\/(queue|inspections|defect-types|settings))$/.test(path);

@@ -241,10 +241,10 @@ export class OperationsController {
   async inventory(@CurrentUser() actor: Actor) {
     const tenant = requireTenant(actor);
     const data = await this.database.asUser(tenant, async (db) => {
-      const goods: Array<{ id: string; sku: string; name: string; stockUom: string; status: string; productType: string }> = await db
-        .select({ id: products.id, sku: products.sku, name: products.name, productType: products.productType, stockUom: products.stockUom, status: products.status })
+      const goods: Array<{ id: string; sku: string; name: string; stockUom: string; status: string; productType: string; itemClass: string; supplyMode: string }> = await db
+        .select({ id: products.id, sku: products.sku, name: products.name, productType: products.productType, itemClass: products.itemClass, supplyMode: products.supplyMode, stockUom: products.stockUom, status: products.status })
         .from(products)
-        .where(inArray(products.productType, ["finished_good", "resale", "component"]))
+        .where(inArray(products.itemClass, ["finished_good", "component", "raw_material"]))
         .orderBy(asc(products.sku));
       const rolls: Array<{ id: string; sku: string; name: string; status: string }> = await db
         .select({ id: filaments.id, sku: filaments.sku, name: filaments.name, status: filaments.status })
@@ -267,7 +267,7 @@ export class OperationsController {
         current.allocated += qtyFromDb(row.allocated);
         stock.set(id, current);
       }
-      const line = (row: { id: string; sku: string; name: string; stockUom: string; status: string; productType?: string }) => {
+      const line = (row: { id: string; sku: string; name: string; stockUom: string; status: string; productType?: string; itemClass?: string; supplyMode?: string }) => {
         const held = stock.get(row.id) ?? { onHand: 0n, allocated: 0n };
         return {
           id: row.id,
@@ -276,15 +276,17 @@ export class OperationsController {
           stockUom: row.stockUom,
           status: row.status,
           productType: row.productType ?? null,
+          itemClass: row.itemClass ?? null,
+          supplyMode: row.supplyMode ?? null,
           onHand: fromQty(held.onHand),
           allocated: fromQty(held.allocated),
           available: fromQty(held.onHand - held.allocated),
         };
       };
       return {
-        finished: goods.filter((row) => row.productType === "finished_good").map((row) => line(row)),
-        resale: goods.filter((row) => row.productType === "resale").map((row) => line(row)),
-        supplies: goods.filter((row) => row.productType === "component").map((row) => line(row)),
+        finished: goods.filter((row) => row.itemClass === "finished_good" && ["make", "both"].includes(row.supplyMode)).map((row) => line(row)),
+        resale: goods.filter((row) => row.itemClass === "finished_good" && ["buy", "both"].includes(row.supplyMode)).map((row) => line(row)),
+        supplies: goods.filter((row) => ["component", "raw_material"].includes(row.itemClass)).map((row) => line(row)),
         filaments: rolls.map((row) => line({ ...row, stockUom: "g" })),
       };
     });
@@ -300,7 +302,8 @@ export class OperationsController {
     @Query("limit") limitParam?: string,
   ) {
     const tenant = requireTenant(actor);
-    const types = section === "supplies" ? ["component"] : section === "products" ? ["finished_good", "resale"] : ["finished_good", "resale", "component"];
+    const classes = section === "supplies" ? ["component", "raw_material"] : ["products", "finished", "resale"].includes(section ?? "") ? ["finished_good"] : ["finished_good", "component", "raw_material"];
+    const supplyModes = section === "finished" ? ["make", "both"] : section === "resale" ? ["buy", "both"] : null;
     const limit = Math.min(Math.max(Number(limitParam) || 300, 1), 1000);
     const physical = ["receipt", "issue", "adjustment", "scrap", "transfer"] as const;
     return this.database.asUser(tenant, async (db) => {
@@ -353,7 +356,8 @@ export class OperationsController {
         .innerJoin(locations, eq(locations.id, stockLedgers.locationId))
         .where(
           and(
-            inArray(products.productType, types),
+            inArray(products.itemClass, classes),
+            supplyModes ? inArray(products.supplyMode, supplyModes) : undefined,
             inArray(stockLedgers.kind, [...physical]),
             productId ? eq(stockLedgers.productId, productId) : undefined,
           ),

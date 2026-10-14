@@ -1,6 +1,11 @@
+import { Modal } from "./modal";
+import { Notice } from "./notice";
+import { EmptyState } from "./empty-state";
+import { BackLink } from "./back-control";
+import { canManufacture } from "@3dprintmty/domain";
 import { uomShort } from "@3dprintmty/domain";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useRef, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { CostOnly } from "./margin";
 import { useRole } from "./roles";
@@ -54,7 +59,7 @@ export function ProductionPage() {
   });
   const withRecipe = new Set((recipes.data?.data ?? []).filter((row) => row.lines > 0).map((row) => row.productId));
   const makeable = (products.data?.data ?? []).filter((product) =>
-    product.productType === "finished_good" && product.status !== "inactive" && withRecipe.has(product.id));
+    canManufacture(product) && product.status !== "inactive" && withRecipe.has(product.id));
   const pending = demand.data?.data ?? [];
   const refresh = async () => {
     await client.invalidateQueries({ queryKey: ["production-orders"] });
@@ -67,7 +72,7 @@ export function ProductionPage() {
       <p>Fabrica un producto terminado con receta y márcalo terminado. Los insumos no se fabrican: se obtienen comprándolos. Las impresiones de un pedido no pasan por aquí.</p>
       <div className="card" style={{ display: "grid", gap: 10 }}>
         {products.isPending || recipes.isPending ? null : !makeable.length ? (
-          <p style={{ margin: 0 }}>Ningún producto terminado activo tiene receta. <Link to="/app/recetas">Dale una receta</Link> para poder fabricarlo.</p>
+          <EmptyState title="Sin artículos listos para fabricar" to="/app/recetas" actionLabel="Configurar receta">Ningún artículo activo con fabricación habilitada tiene receta. Configura sus materiales para crear una orden de producción.</EmptyState>
         ) : (
         <form
           style={grid}
@@ -128,7 +133,7 @@ export function ProductionPage() {
             </button>
           </form>
         ) : (
-          <p style={{ margin: 0 }}>Ningún pedido confirmado tiene producto por fabricar.</p>
+          <EmptyState title="Sin pedidos por fabricar" to="/app/pedidos/nuevo" actionLabel="Crear pedido">No hay pedidos confirmados con artículos pendientes de fabricación. Crea y confirma un pedido para generar su demanda.</EmptyState>
         )}
         {error ? <p className="error">{error}</p> : null}
       </div>
@@ -197,10 +202,9 @@ export function RecipesPage() {
   const recipes = useRecipes();
   const [params, setParams] = useSearchParams();
   const recipeId = params.get("producto") ?? "";
-  const editorRef = useRef<HTMLDivElement>(null);
   const { values, set, reset, dirty } = useFilters({ q: "", estado: "active", receta: "" });
   const summaries = new Map((recipes.data?.data ?? []).map((row) => [row.productId, row]));
-  const finished = (products.data?.data ?? []).filter((product) => product.productType === "finished_good");
+  const finished = (products.data?.data ?? []).filter(canManufacture);
   const bySearch = finished.filter((product) => {
     const lines = summaries.get(product.id)?.lines ?? 0;
     return matchesText(values.q, product.sku, product.name)
@@ -215,14 +219,13 @@ export function RecipesPage() {
       else next.delete("producto");
       return next;
     }, { replace: true });
-    if (id) requestAnimationFrame(() => editorRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
   };
   return (
     <section style={{ display: "grid", gap: 16 }}>
       <h1>Recetas</h1>
       <p>La receta dice qué material lleva cada pieza de un producto terminado. Sin receta, el producto no se puede fabricar. Los productos e insumos se apartan y se descuentan del inventario; el filamento solo cuenta en el costo y se ajusta en Inventario ▸ Filamentos.</p>
       {products.isPending || recipes.isPending ? <TableSkeleton columns={6} /> : !finished.length ? (
-        <p>Todavía no hay productos terminados. <Link to="/app/productos/nuevo">Da de alta uno</Link> para armar su receta.</p>
+        <EmptyState title="Sin artículos para crear recetas" to="/app/productos/nuevo?abastecimiento=make" actionLabel="Crear producto fabricado">Crea un artículo con fabricación habilitada para definir sus materiales y preparar su receta.</EmptyState>
       ) : (
         <>
         <FilterBar
@@ -275,9 +278,7 @@ export function RecipesPage() {
         )}
         </>
       )}
-      <div ref={editorRef}>
-        {selected ? <RecipeEditor key={selected.id} product={selected} onClose={() => choose("")} /> : null}
-      </div>
+      {selected ? <RecipeEditor key={selected.id} product={selected} onClose={() => choose("")} /> : null}
     </section>
   );
 }
@@ -294,7 +295,7 @@ function RecipeEditor({ product, onClose }: { product: ProductOption; onClose: (
   });
   const components = [
     ...(filaments.data?.data ?? []).map((filament) => ({ ...filament, stockUom: filament.stockUom ?? "G" })),
-    ...(products.data?.data ?? []).filter((item) => item.productType !== "service" && item.productType !== "finished_good" && item.id !== recipeId),
+    ...(products.data?.data ?? []).filter((item) => item.productType !== "service" && item.id !== recipeId),
   ];
   const recipe = useError();
   const recipeError = recipe.error;
@@ -315,25 +316,16 @@ function RecipeEditor({ product, onClose }: { product: ProductOption; onClose: (
       componentId,
     );
   };
-  if (operator) return <article className="card">
-    <h2>Receta de {product.sku} · {product.name}</h2>
-    <button type="button" className="ghost" onClick={onClose}>Cerrar</button>
-    {bom.isPending ? <TableSkeleton columns={3} /> : <table>
+  if (operator) return <Modal title={`Receta de ${product.sku} · ${product.name}`} onClose={onClose}>
+    {bom.isPending ? <TableSkeleton columns={3} /> : bom.isError ? <Notice tone="error" title="No se pudo cargar la receta" action={<button className="ghost" type="button" onClick={() => bom.refetch()}>Reintentar</button>}>{bom.error.message}</Notice> : <table>
       <thead><tr><th>Componente</th><th>Cantidad por pieza</th><th>Merma</th></tr></thead>
       <tbody>{recipeLines.map((line) => <tr key={line.componentProductId}><td>{line.sku} · {line.name}</td><td>{line.quantity}</td><td>{line.scrapPct}%</td></tr>)}</tbody>
     </table>}
-  </article>;
+  </Modal>;
   return (
-      <div className="card" style={{ display: "grid", gap: 10 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-          <h2 style={{ margin: 0, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-            Receta de {product.sku} · {product.name}
-            {product.status === "inactive" ? <StatusBadge status={product.status} /> : null}
-          </h2>
-          <IconAction label="Cerrar receta" tone="neutral" onClick={onClose}>
-            <XIcon />
-          </IconAction>
-        </div>
+    <Modal title={`Receta de ${product.sku} · ${product.name}`} onClose={onClose} closeDisabled={recipePending !== null}>
+      <div style={{ display: "grid", gap: 10 }}>
+        {product.status === "inactive" ? <p style={{ margin: 0 }}><StatusBadge status={product.status} /></p> : null}
         {bom.isPending ? <TableSkeleton columns={4} /> : bom.data ? (
           <>
             {recipeLines.length === 0 ? <p style={{ margin: 0 }}>Este producto todavía no tiene receta. Agrega su primer componente.</p> : (
@@ -354,13 +346,14 @@ function RecipeEditor({ product, onClose }: { product: ProductOption; onClose: (
                             <input
                               aria-label={`Cantidad de ${line.name}`}
                               inputMode="decimal"
+                              disabled={recipePending !== null}
                               style={{ width: 100 }}
                               value={editQty}
                               autoFocus
                               onChange={(event) => setEditQty(event.target.value)}
                               onKeyDown={(event) => {
                                 if (event.key === "Enter") saveQuantity(line.componentProductId);
-                                if (event.key === "Escape") setEditingId(null);
+                                if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setEditingId(null); }
                               }}
                             />
                             {uomShort(line.stockUom)}
@@ -441,10 +434,11 @@ function RecipeEditor({ product, onClose }: { product: ProductOption; onClose: (
               </button>
             </form>
             <p className="costing-hint" style={{ margin: 0 }}>Si agregas un componente que ya está en la receta, se reemplaza su cantidad.</p>
-            {recipeError ? <p className="error">{recipeError}</p> : null}
+            {recipeError ? <Notice tone="error" title="No se pudo guardar la receta">{recipeError}</Notice> : null}
           </>
-        ) : <p className="error">No se pudo cargar la receta.</p>}
+        ) : <Notice tone="error" title="No se pudo cargar la receta" action={<button className="ghost" type="button" onClick={() => bom.refetch()}>Reintentar</button>}>Intenta nuevamente para consultar sus componentes.</Notice>}
       </div>
+    </Modal>
   );
 }
 
@@ -540,7 +534,7 @@ export function ProductionDetailPage() {
   return (
     <section style={{ display: "grid", gap: 16 }}>
       <header>
-        <Link to="/app/produccion">← Producción</Link>
+        <BackLink to="/app/produccion">Producción</BackLink>
         <h1 style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
           {data.folio} · {data.sku} {data.name}
           <ProductionStatusBadge status={data.status} />
@@ -619,6 +613,8 @@ export interface ProductOption {
   sku: string;
   name: string;
   productType: string;
+  supplyMode: string;
+  itemClass: string;
   status?: string;
   stockUom: string;
   purchaseUom: string;

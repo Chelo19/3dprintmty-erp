@@ -4,6 +4,8 @@ import { useEffect, useState, type ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { ApiError, api } from "./api";
 import { useAuth, type SessionUser } from "./auth";
+import { LogoutButton } from "./logout";
+import { AUTH_FEATURES } from "./auth-features";
 import { CopyIcon, FormActions, IconAction, QuoteButton, SendIcon, TrashIcon, useError } from "./operations";
 import { forgetInvite, rememberInvite } from "./roles";
 import { FormSkeleton, TableSkeleton } from "./skeleton";
@@ -312,7 +314,7 @@ export function InvitePage() {
         {summary}
         <p className="error">Entraste como {signedInAs}. La invitación es para {invite.email}.</p>
         <FormActions>
-          <button className="primary" type="button" onClick={() => auth.logout()}>Salir y entrar con {invite.email}</button>
+          <LogoutButton className="primary" redirect={false}>Salir y entrar con {invite.email}</LogoutButton>
         </FormActions>
       </div>,
     );
@@ -382,7 +384,7 @@ export function InvitePage() {
           <button className="link-button" type="button" style={{ justifySelf: "start" }} onClick={() => { setError(null); setMode(mode === "register" ? "login" : "register"); }}>
             {mode === "register" ? "Ya tengo cuenta con ese correo" : "Todavía no tengo cuenta"}
           </button>
-          <button
+          {AUTH_FEATURES.googleLogin ? <button
             className="ghost"
             type="button"
             disabled={busy !== null}
@@ -390,7 +392,7 @@ export function InvitePage() {
             onClick={() => void attempt("google", () => signInWithGoogle())}
           >
             Entrar con Google ({invite.email})
-          </button>
+          </button> : null}
         </div>
       ) : null}
     </form>,

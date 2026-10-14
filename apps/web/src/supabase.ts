@@ -1,5 +1,6 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { api } from "./api";
+import { AUTH_FEATURES } from "./auth-features";
 
 const url = import.meta.env.VITE_SUPABASE_URL;
 const key = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
@@ -55,6 +56,7 @@ export async function registerWithPassword(email: string, password: string) {
 }
 
 export async function signInWithGoogle(): Promise<void> {
+  if (!AUTH_FEATURES.googleLogin) throw new Error("El acceso con Google está deshabilitado temporalmente.");
   if (!supabase) throw new Error("Supabase Auth no está configurado.");
   const { error } = await supabase.auth.signInWithOAuth({
     provider: "google",

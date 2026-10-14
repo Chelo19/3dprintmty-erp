@@ -137,3 +137,6 @@ export {
   type SalesOrderState,
   type SpoolState,
 } from "./states";
+export { ITEM_CLASSES, SUPPLY_MODES, SUPPLY_LABELS, defaultSupplyMode, canManufacture, canPurchase, legacyProductType, type ItemClass, type SupplyMode } from "./products";
+
+export { FEATURES } from "./features";

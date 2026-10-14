@@ -1,18 +1,22 @@
+import { ITEM_CLASSES, SUPPLY_MODES, defaultSupplyMode, legacyProductType } from "@3dprintmty/domain";
 import { Body, Controller, Delete, Get, Headers, Param, Patch, Post, Query } from "@nestjs/common";
 import { canReadMargins, canReadSalePrice, canWriteCatalog, Money, QC_RIGOR, STOCK_UOMS, uomShort, type TenantRole } from "@3dprintmty/domain";
 import { countryPolicy } from "@3dprintmty/fiscal";
 import { AppError } from "@3dprintmty/shared";
-import { and, count, desc, eq, ilike, ne, or, sql } from "drizzle-orm";
+import { and, count, desc, eq, ilike, inArray, ne, or, sql } from "drizzle-orm";
 import { z } from "zod";
+import { getViewConfig } from "drizzle-orm/pg-core";
 import { services } from "../container";
-import { filaments, products, productsVisible, serviceOfferings, stockBalances } from "../db/schema";
+import { filaments, products, productsVisible, serviceOfferings, stockBalances, productionOrders, purchaseOrderLines, purchaseOrders } from "../db/schema";
 import { assertRole, CurrentUser, requireTenant, type Actor, type TenantActor } from "../http/actor";
 import { one, withIdempotency, type Db } from "./support";
 
 const productSchema = z.object({
   sku: z.string().trim().min(1).max(40),
   name: z.string().trim().min(1).max(160),
-  productType: z.enum(["raw_material", "component", "finished_good", "service", "resale"]),
+  productType: z.enum(["raw_material", "component", "finished_good", "service", "resale"]).optional(),
+  itemClass: z.enum(ITEM_CLASSES).optional(),
+  supplyMode: z.enum(SUPPLY_MODES).optional(),
   stockUom: z.enum(STOCK_UOMS).optional(),
   cost: z.string().optional(),
   salePrice: z.string().optional(),
@@ -20,6 +24,8 @@ const productSchema = z.object({
 });
 
 const productPatchSchema = z.object({
+  itemClass: z.enum(ITEM_CLASSES).optional(),
+  supplyMode: z.enum(SUPPLY_MODES).optional(),
   sku: z.string().trim().min(1).max(40).optional(),
   name: z.string().trim().min(1).max(160).optional(),
   stockUom: z.enum(STOCK_UOMS).optional(),
@@ -94,27 +100,42 @@ export class CatalogController {
     @Query("page") pageRaw?: string,
     @Query("limit") limitRaw?: string,
     @Query("q") q?: string,
+    @Query("itemClass") itemClass?: string,
+    @Query("supplyMode") supplyMode?: string,
   ) {
     const tenant = requireTenant(actor);
     const page = Math.max(1, Number(pageRaw ?? 1) || 1);
     const limit = Math.min(100, Math.max(1, Number(limitRaw ?? 20) || 20));
     const offset = (page - 1) * limit;
-    const filter = q?.trim()
-      ? or(ilike(productsVisible.sku, `%${q.trim()}%`), ilike(productsVisible.name, `%${q.trim()}%`))
-      : undefined;
-    const rows = await this.database.asUser(tenant, (db) => {
-      const query = db.select().from(productsVisible).orderBy(desc(productsVisible.createdAt)).limit(limit).offset(offset);
+    if (itemClass) z.enum(ITEM_CLASSES).parse(itemClass);
+    if (supplyMode) z.enum(SUPPLY_MODES).parse(supplyMode);
+    const filter = and(
+      eq(productsVisible.tenantId, tenant.tenantId),
+      q?.trim() ? or(ilike(productsVisible.sku, `%${q.trim()}%`), ilike(productsVisible.name, `%${q.trim()}%`)) : undefined,
+      itemClass ? eq(productsVisible.itemClass, itemClass) : undefined,
+      supplyMode ? inArray(productsVisible.supplyMode, supplyMode === "both" ? ["both"] : [supplyMode, "both"]) : undefined,
+    );
+    const rows: (ProductRow & { total: number })[] = await this.database.asUser(tenant, (db) => {
+      const query = db.select({
+        ...getViewConfig(productsVisible).selectedFields,
+        total: sql<number>`count(*) over ()`.mapWith(Number),
+      }).from(productsVisible).orderBy(desc(productsVisible.createdAt)).limit(limit).offset(offset);
       return filter ? query.where(filter) : query;
     });
-    const [{ value }] = await this.database.asUser(tenant, (db) => {
-      const query = db.select({ value: count() }).from(productsVisible);
-      return filter ? query.where(filter) : query;
-    });
+    let total = rows[0]?.total ?? 0;
+    // Una página fuera del rango no trae filas de las que leer el total.
+    if (!rows.length && page > 1) {
+      const [{ value }] = await this.database.asUser(tenant, (db) => {
+        const query = db.select({ value: count() }).from(productsVisible);
+        return filter ? query.where(filter) : query;
+      });
+      total = value;
+    }
     return {
       data: rows.map((row: ProductRow) => mapProduct(row, tenant.role)),
       page,
       limit,
-      total: Number(value ?? 0),
+      total: Number(total),
     };
   }
 
@@ -134,13 +155,15 @@ export class CatalogController {
     @Headers("idempotency-key") idempotencyKey?: string,
   ) {
     const tenant = this.writer(actor);
-    const input = productSchema.parse(body);
+    const parsed = productSchema.parse(body);
+    if (!parsed.productType && !parsed.itemClass) throw new AppError("product_class_required", "Selecciona la clasificación del artículo.");
+    const itemClass = parsed.itemClass ?? (parsed.productType === "resale" ? "finished_good" : parsed.productType!);
+    const supplyMode = parsed.supplyMode ?? defaultSupplyMode(parsed.productType ?? itemClass);
+    const input = { ...parsed, itemClass, supplyMode, productType: legacyProductType(itemClass, supplyMode) };
     if (input.productType === "service") {
       throw new AppError("use_service_catalog", "Los servicios se capturan en el catálogo de servicios.", 409);
     }
-    if (input.productType === "raw_material") {
-      throw new AppError("use_filament_catalog", "Los filamentos se capturan en el catálogo de filamentos.", 409);
-    }
+
     return withIdempotency(this.database, tenant, idempotencyKey, { route: "products", input }, async () => {
       const values = productValues(tenant.tenantId, tenant.userId, input);
       const [created] = await this.database.asUser(tenant, async (db) => {
@@ -157,6 +180,16 @@ export class CatalogController {
     const input = productPatchSchema.parse(body);
     await this.database.asUser(tenant, async (db) => {
       const product = await one(db, products, products.id, id, "No encontramos ese producto.");
+      if (input.supplyMode && input.supplyMode !== product.supplyMode) {
+        if (input.supplyMode === "buy") {
+          const [active] = await db.select({ id: productionOrders.id }).from(productionOrders).where(and(eq(productionOrders.productId, product.id), inArray(productionOrders.status, ["draft", "released", "scheduled", "in_progress", "qc_hold", "completed", "on_hold"]))).limit(1);
+          if (active) throw new AppError("supply_in_use", "Cierra o cancela las órdenes de producción antes de deshabilitar fabricación.", 409);
+        }
+        if (input.supplyMode === "make") {
+          const [active] = await db.select({ id: purchaseOrderLines.id }).from(purchaseOrderLines).innerJoin(purchaseOrders, eq(purchaseOrderLines.purchaseOrderId, purchaseOrders.id)).where(and(eq(purchaseOrderLines.productId, product.id), inArray(purchaseOrders.status, ["draft", "ordered", "partially_received"]))).limit(1);
+          if (active) throw new AppError("supply_in_use", "Cierra o cancela las compras pendientes antes de deshabilitar compras.", 409);
+        }
+      }
       const sku = input.sku?.toUpperCase();
       if (sku && sku !== product.sku) await assertSkuFree(db, tenant.tenantId, sku, { table: "product", id: product.id });
       const uomChanged = input.stockUom !== undefined && input.stockUom !== product.stockUom;
@@ -166,6 +199,8 @@ export class CatalogController {
         .set({
           ...(sku ? { sku } : {}),
           ...(input.name !== undefined ? { name: input.name } : {}),
+          ...(input.itemClass !== undefined ? { itemClass: input.itemClass } : {}),
+          ...(input.supplyMode !== undefined ? { supplyMode: input.supplyMode } : {}),
           ...(uomChanged ? { stockUom: input.stockUom, purchaseUom: input.stockUom, uomFactor: "1.0000" } : {}),
           ...(input.cost !== undefined ? { costMinor: majorOrNull(input.cost) } : {}),
           ...(input.salePrice !== undefined ? { salePriceMinor: majorOrNull(input.salePrice) } : {}),
@@ -381,6 +416,8 @@ interface ProductRow {
   sku: string;
   name: string;
   productType: string;
+  itemClass: string;
+  supplyMode: string;
   status: string;
   stockUom: string;
   purchaseUom: string;
@@ -426,6 +463,8 @@ function mapProduct(row: ProductRow, role: TenantRole) {
     sku: row.sku,
     name: row.name,
     productType: row.productType,
+    itemClass: row.itemClass,
+    supplyMode: row.supplyMode,
     status: row.status,
     stockUom: row.stockUom,
     purchaseUom: row.purchaseUom,
@@ -529,12 +568,14 @@ async function assertNoStock(db: Db, productId: string, currentUom: string) {
   }
 }
 
-function productValues(tenantId: string, createdBy: string, input: z.infer<typeof productSchema>) {
+function productValues(tenantId: string, createdBy: string, input: Omit<z.infer<typeof productSchema>, "productType" | "itemClass"> & { productType: string; itemClass: string; supplyMode: string }) {
   return {
     tenantId,
     sku: input.sku.toUpperCase(),
     name: input.name,
     productType: input.productType,
+    itemClass: input.itemClass,
+    supplyMode: input.supplyMode,
     stockUom: input.stockUom ?? "EA",
     purchaseUom: input.stockUom ?? "EA",
     uomFactor: "1.0000",

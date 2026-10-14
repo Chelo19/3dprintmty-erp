@@ -1,12 +1,18 @@
+import { Modal } from "./modal";
+import { Notice } from "./notice";
+import { BackButton, BackLink } from "./back-control";
+import { FilterAutocomplete } from "./filters";
+import { EmptyState } from "./empty-state";
+import { PURCHASE_TYPES, expenseKindForType, expenseTypeLabel, matchesPurchaseType } from "./purchase-types";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { api, download, postJson } from "./api";
 import { useIdempotencyAttempt } from "./idempotency";
 import { useFilaments, useProducts } from "./factory";
 import { BanIcon, CheckIcon, DownloadIcon, FormActions, NewLink, PayIcon, PlusIcon, QuoteButton, SaveButton, SendIcon, ViewLink, money, useError } from "./operations";
 import { DetailSkeleton, FormSkeleton, TableSkeleton } from "./skeleton";
-import { useRole } from "./roles";
+import { useRole, useCanWrite } from "./roles";
 import { Paged } from "./pager";
 
 const grid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 } as const;
@@ -18,13 +24,6 @@ const PO_STATUS: Record<string, string> = {
   received: "Recibida",
   closed: "Cerrada",
   cancelled: "Cancelada",
-};
-
-const EXPENSE_KIND: Record<string, string> = {
-  product: "Producto",
-  filament: "Filamento",
-  service: "Servicio",
-  other: "Otro",
 };
 
 const EXPENSE_PAYMENT: Record<string, string> = {
@@ -42,6 +41,7 @@ function ExpensePaymentBadge({ status }: { status: string }) {
 }
 
 function PayLink({ to }: { to: string }) {
+  if (!useCanWrite("/app/compras")) return null;
   return (
     <Link className="icon-btn pay" to={to} aria-label="Abonar" title="Abonar">
       <PayIcon />
@@ -84,7 +84,7 @@ export function PurchasingPage() {
             <tr key={expense.id}>
               <td><Link to={`/app/compras/gastos/${expense.id}`}>{expense.folio}</Link></td>
               <td>{showDay(expense.occurredOn)}</td>
-              <td>{EXPENSE_KIND[expense.kind] ?? expense.kind}</td>
+              <td>{expenseTypeLabel(expense)}</td>
               <td>{expense.description}</td>
               <td>{money(expense.amount)}</td>
               <td>{money(expense.paid)} <ExpensePaymentBadge status={expense.paymentStatus} /></td>
@@ -134,13 +134,19 @@ export function ExpenseNewPage() {
   const { error, pendingKey, run } = useError();
   const [kind, setKind] = useState("filament");
   const [paid, setPaid] = useState(true);
+  const [itemQuery, setItemQuery] = useState("");
   const products = useProducts();
   const filaments = useFilaments();
-  const goods = (products.data?.data ?? []).filter((product) => product.productType !== "service");
+  const isGoods = ["product", "supply"].includes(kind);
+  const goods = (products.data?.data ?? []).filter((item) => matchesPurchaseType(item, kind));
+  const isCatalogItem = isGoods || kind === "filament";
+  const items = kind === "filament" ? (filaments.data?.data ?? []).filter((item) => item.status !== "inactive") : goods;
+  const itemLabel = kind === "filament" ? "Filamento" : kind === "supply" ? "Insumo" : "Producto";
+  const selectedItem = items.find((item) => `${item.sku} · ${item.name}` === itemQuery);
   const today = todayInMexico();
   return (
     <section style={{ display: "grid", gap: 16 }}>
-      <p><Link to="/app/compras">Compras</Link></p>
+      <BackLink to="/app/compras">Compras</BackLink>
       <h1>Registrar gasto</h1>
       <p>La fecha del gasto es el día en que aplica. Si ya lo pagaste, se registra el abono por el importe completo; si no, queda por pagar y lo abonas después desde el gasto.</p>
       {products.isPending || filaments.isPending ? <FormSkeleton fields={6} /> : (
@@ -148,11 +154,12 @@ export function ExpenseNewPage() {
         className="card form-vertical"
         onSubmit={(event) => {
           event.preventDefault();
+          if (isCatalogItem && !selectedItem) return;
           const form = event.currentTarget;
           const data = new FormData(form);
           void run(async () => {
             const created = await postJson<{ id: string }>("/expenses", {
-              kind: data.get("kind"),
+              kind: expenseKindForType(String(data.get("kind"))),
               itemId: String(data.get("itemId") || "") || undefined,
               description: String(data.get("description") || "") || undefined,
               quantity: String(data.get("quantity") || "1"),
@@ -172,28 +179,26 @@ export function ExpenseNewPage() {
       >
         <label>
           Tipo
-          <select name="kind" value={kind} onChange={(event) => setKind(event.target.value)}>
-            <option value="filament">Filamento</option>
-            <option value="product">Producto</option>
-            <option value="service">Servicio</option>
-            <option value="other">Otro</option>
+          <select name="kind" value={kind} disabled={pendingKey !== null} onChange={(event) => { setKind(event.target.value); setItemQuery(""); }}>
+            {Object.entries(PURCHASE_TYPES).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
           </select>
         </label>
-        {kind === "filament" ? (
-          <label>
-            Filamento
-            <select name="itemId" required>
-              {(filaments.data?.data ?? []).map((item) => <option key={item.id} value={item.id}>{item.sku} · {item.name}</option>)}
-            </select>
-          </label>
+        {isCatalogItem ? (
+          <>
+            <FilterAutocomplete key={kind} label={itemLabel} value={itemQuery} onChange={setItemQuery}
+              options={items.map((item) => `${item.sku} · ${item.name}`)} placeholder="Buscar por SKU o nombre"
+              required disabled={pendingKey !== null} />
+            <input type="hidden" name="itemId" value={selectedItem?.id ?? ""} />
+            <p className="costing-hint" style={{ margin: 0 }}>Selecciona un artículo de las sugerencias para registrar el gasto.</p>
+          </>
         ) : null}
-        {kind === "product" ? (
-          <label>
-            Producto
-            <select name="itemId" required>
-              {goods.map((item) => <option key={item.id} value={item.id}>{item.sku} · {item.name}</option>)}
-            </select>
-          </label>
+        {kind === "filament" && !items.length ? (
+          <EmptyState title="Sin filamentos disponibles" to="/app/filamentos/nuevo" actionLabel="Crear filamento">Agrega un filamento activo al catálogo para registrar su compra.</EmptyState>
+        ) : null}
+        {isGoods && !goods.length ? (
+          <EmptyState title="Sin artículos disponibles para comprar" to={kind === "supply" ? "/app/insumos/nuevo" : "/app/productos/nuevo?abastecimiento=buy"} actionLabel={kind === "supply" ? "Crear insumo" : "Crear producto"}>
+            No hay artículos activos de este tipo con compra habilitada. Agrega uno al catálogo.
+          </EmptyState>
         ) : null}
         {kind === "service" || kind === "other" ? (
           <label>
@@ -202,7 +207,7 @@ export function ExpenseNewPage() {
           </label>
         ) : null}
         {kind === "filament" ? <label>Kilogramos<input name="quantity" required placeholder="1" /></label> : null}
-        {kind === "product" ? <label>Cantidad<input name="quantity" required placeholder="1" /></label> : null}
+        {isGoods ? <label>Cantidad<input name="quantity" required placeholder="1" /></label> : null}
         <label>Fecha del gasto<input name="occurredOn" type="date" required defaultValue={today} /></label>
         <label>Importe<input name="amount" required inputMode="decimal" placeholder="250.00" /></label>
         <label className="check-field">
@@ -217,7 +222,7 @@ export function ExpenseNewPage() {
         </p>
         <label>Nota<input name="note" placeholder="Factura o proveedor" /></label>
         <FormActions>
-          <SaveButton label="Guardar gasto" pending={pendingKey !== null} />
+          <SaveButton label="Guardar gasto" pending={pendingKey !== null} disabled={isCatalogItem && !selectedItem} />
           {error ? <p className="error">{error}</p> : null}
         </FormActions>
       </form>
@@ -227,7 +232,13 @@ export function ExpenseNewPage() {
 }
 
 export function ExpensePage() {
+  const canPay = useCanWrite("/app/compras");
   const { id } = useParams();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const abonoOpen = location.hash === "#abono";
+  const showAbono = () => navigate({ pathname: location.pathname, search: location.search, hash: "#abono" }, { replace: true });
+  const closeAbono = () => navigate({ pathname: location.pathname, search: location.search, hash: "" }, { replace: true });
   const client = useQueryClient();
   const { error, pendingKey, run } = useError();
   const expense = useQuery({ queryKey: ["expense", id], queryFn: () => api<ExpenseDetail>(`/expenses/${id}`) });
@@ -238,18 +249,21 @@ export function ExpensePage() {
   const open = data.paymentStatus !== "paid";
   return (
     <section style={{ display: "grid", gap: 16 }}>
-      <p><Link to="/app/compras">Compras</Link></p>
+      <BackLink to="/app/compras">Compras</BackLink>
       <h1>{data.folio}</h1>
       <p>
-        {EXPENSE_KIND[data.kind] ?? data.kind} · {data.description} · aplica el {showDay(data.occurredOn)} · <ExpensePaymentBadge status={data.paymentStatus} />
+        {expenseTypeLabel(data)} · {data.description} · aplica el {showDay(data.occurredOn)} · <ExpensePaymentBadge status={data.paymentStatus} />
       </p>
       <div className="costing-kpis">
         <div><span>Importe</span><strong>{money(data.amount)}</strong></div>
         <div><span>Pagado</span><strong>{money(data.paid)}</strong></div>
         <div><span>Saldo</span><strong className={data.balance && Number(data.balance) > 0 ? "profit-negative" : undefined}>{money(data.balance)}</strong></div>
       </div>
-      <h2 style={{ margin: 0 }}>Abonos</h2>
-      {!(data.payments ?? []).length ? <p style={{ margin: 0 }}>Todavía no hay abonos.</p> : (
+      <div className="inventory-heading">
+        <h2 style={{ margin: 0 }}>Abonos</h2>
+        {open && canPay && (data.payments ?? []).length > 0 ? <button className="primary new-link" type="button" onClick={showAbono}><PlusIcon />Registrar abono</button> : null}
+      </div>
+      {!(data.payments ?? []).length ? <Notice title="Sin abonos registrados" action={open && canPay ? <button className="primary new-link" type="button" onClick={showAbono}><PlusIcon />Registrar abono</button> : undefined}>Todavía no hay pagos registrados para este gasto.</Notice> : (
       <Paged rows={data.payments ?? []}>
       {(payments) => (
       <table>
@@ -267,10 +281,11 @@ export function ExpensePage() {
       )}
       </Paged>
       )}
-      {open ? (
+      {open && canPay && abonoOpen ? (
+        <Modal title="Registrar abono" onClose={closeAbono} closeDisabled={pendingKey !== null}>
+          <p style={{ margin: 0 }}>{data.folio} · {data.description} · Saldo pendiente: <strong>{money(data.balance)}</strong></p>
         <form
-          id="abono"
-          className="card form-vertical"
+          className="form-vertical"
           onSubmit={(event) => {
             event.preventDefault();
             const form = event.currentTarget;
@@ -284,20 +299,23 @@ export function ExpensePage() {
               form.reset();
               await client.invalidateQueries({ queryKey: ["expense", id] });
               await client.invalidateQueries({ queryKey: ["expenses"] });
+              closeAbono();
             });
           }}
         >
-          <h2 style={{ margin: 0 }}>Abonar</h2>
-          <label>Fecha de pago<input name="paidOn" type="date" required defaultValue={today} /></label>
-          <label>Cantidad<input key={data.balance ?? ""} name="amount" required inputMode="decimal" defaultValue={data.balance ?? ""} /></label>
+          <label>Fecha de pago<input name="paidOn" type="date" disabled={pendingKey !== null} required defaultValue={today} /></label>
+          <label>Cantidad<input key={data.balance ?? ""} name="amount" disabled={pendingKey !== null} required inputMode="decimal" defaultValue={data.balance ?? ""} /></label>
           <p className="costing-hint">Por defecto se liquida el saldo. Cambia la cantidad para un abono parcial.</p>
-          <label>Nota<input name="note" /></label>
+          <label>Nota<input name="note" disabled={pendingKey !== null} /></label>
           <FormActions>
             <SaveButton label="Registrar abono" pending={pendingKey !== null} />
-            {error ? <p className="error">{error}</p> : null}
+            <BackButton onClick={closeAbono} disabled={pendingKey !== null} />
           </FormActions>
+          {error ? <Notice tone="error" title="No se pudo registrar el abono">{error}</Notice> : null}
         </form>
-      ) : <p className="muted-note">Este gasto ya está pagado.</p>}
+        </Modal>
+      ) : null}
+      {!open ? <p className="muted-note">Este gasto ya está pagado.</p> : null}
     </section>
   );
 }
@@ -325,7 +343,7 @@ export function PurchaseOrderPage() {
   const receivable = data.status === "ordered" || data.status === "partially_received";
   return (
     <section style={{ display: "grid", gap: 16 }}>
-      <p><Link to="/app/compras">Compras</Link></p>
+      <BackLink to="/app/compras">Compras</BackLink>
       <h1>{data.folio} · {data.vendorName}</h1>
       <p>{PO_STATUS[data.status] ?? data.status}</p>
       <div className="costing-kpis">
@@ -520,7 +538,7 @@ export function PrefacturaPage() {
   const data = document.data;
   return (
     <section style={{ display: "grid", gap: 16 }}>
-      <p className="no-print"><Link to="/app/prefacturas">Prefacturas</Link></p>
+      <div className="no-print"><BackLink to="/app/prefacturas">Prefacturas</BackLink></div>
       <article className="card printable" style={{ display: "grid", gap: 12 }}>
         <header style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", gap: 16 }}>
           <div>
@@ -611,6 +629,8 @@ interface Expense {
   id: string;
   folio: string;
   kind: string;
+  itemClass?: string | null;
+  supplyMode?: string | null;
   description: string;
   quantity: string;
   occurredOn: string;

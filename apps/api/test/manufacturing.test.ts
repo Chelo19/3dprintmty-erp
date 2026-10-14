@@ -1,8 +1,14 @@
 import "reflect-metadata";
 import type { INestApplication } from "@nestjs/common";
 import request from "supertest";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { vi, afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "../src/main";
+
+// Conserva cobertura del módulo para cuando se reactive; el despliegue usa FEATURES.prefacturas=false.
+vi.mock("@3dprintmty/domain", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@3dprintmty/domain")>();
+  return { ...actual, FEATURES: { ...actual.FEATURES, prefacturas: true } };
+});
 
 process.env.PLATFORM_ADMIN_EMAILS = "soporte@printmty.test";
 process.env.VITEST = "1";
@@ -25,6 +31,40 @@ describe("operación — compras, manufactura, calidad y prefacturas", () => {
 
   afterAll(async () => {
     await app?.close();
+  });
+
+  it("consulta la clasificación de productos e insumos en los gastos sin duplicar existencias", async () => {
+    const owner = await onboard(app, "tipos@compras.test", "TCO010101AAA", "Tipos de compras");
+    const expenses: Array<{ id: string; itemClass: string; supplyMode: string }> = [];
+    for (const [sku, itemClass, supplyMode] of [["BUY", "finished_good", "buy"], ["SUP", "component", "buy"]]) {
+      const product = await api.post(owner, "/products", { sku, name: `Artículo ${sku}`, itemClass, supplyMode, cost: "1.00" });
+      expect(product.status).toBe(201);
+      const expense = await api.post(owner, "/expenses", { kind: "product", itemId: product.body.id, quantity: "3", amount: "3.00", occurredOn: "2026-10-13" });
+      expect(expense.status).toBe(201);
+      expenses.push({ id: expense.body.id, itemClass: itemClass!, supplyMode: supplyMode! });
+    }
+    const vendors = await api.get(owner, "/vendors");
+    for (const supplyMode of ["make", "both"]) {
+      const product = await api.post(owner, "/products", { sku: `BLOCK-${supplyMode}`, name: "Producto fabricado", itemClass: "finished_good", supplyMode });
+      expect(product.status).toBe(201);
+      const expense = await api.post(owner, "/expenses", { kind: "product", itemId: product.body.id, quantity: "3", amount: "3.00", occurredOn: "2026-10-13" });
+      expect(expense.status).toBe(409);
+      expect(expense.body.code).toBe("not_purchasable");
+      const order = await api.post(owner, "/purchase-orders", { vendorId: vendors.body.data[0].id, lines: [{ productId: product.body.id, quantity: "3", unitCost: "1.00" }] });
+      expect(order.status).toBe(409);
+      expect(order.body.code).toBe("not_purchasable");
+    }
+    const listed = await api.get(owner, "/expenses");
+    expect(listed.status).toBe(200);
+    for (const expected of expenses) {
+      expect(listed.body.data.find((row: { id: string }) => row.id === expected.id)).toMatchObject(expected);
+      const detail = await api.get(owner, `/expenses/${expected.id}`);
+      expect(detail.status).toBe(200);
+      expect(detail.body).toMatchObject(expected);
+    }
+    const stock = await api.get(owner, "/inventory");
+    expect(stock.body.resale.find((row: { sku: string }) => row.sku === "BUY").onHand).toBe("3");
+    expect(stock.body.supplies.find((row: { sku: string }) => row.sku === "SUP").onHand).toBe("3");
   });
 
   it("compra filamento, fabrica un pedido con calidad y lo prefactura", async () => {
@@ -100,18 +140,11 @@ describe("operación — compras, manufactura, calidad y prefacturas", () => {
     expect(order.body.total).toBe("348.00");
     await api.post(owner, `/orders/${order.body.id}/submit`, {});
     const keychainLine = (await api.get(owner, `/orders/${order.body.id}`)).body.lines[0].id as string;
-    const notPrestado = await api.post(owner, `/orders/${order.body.id}/confirm`, {
-      creditOverrideReason: "Pago contra entrega autorizado",
-    });
-    expect(notPrestado.status).toBe(409);
-    expect(notPrestado.body.code).toBe("order_action_blocked");
-    await api.post(owner, `/orders/${order.body.id}/lines/${keychainLine}/resolution`, { resolution: "in_progress" });
-    const prestado = await api.post(owner, `/orders/${order.body.id}/lines/${keychainLine}/resolution`, { resolution: "delivered" });
-    expect(prestado.status).toBe(201);
-    const confirmed = await api.post(owner, `/orders/${order.body.id}/confirm`, {
-      creditOverrideReason: "Pago contra entrega autorizado",
-    });
+    const confirmed = await api.post(owner, `/orders/${order.body.id}/confirm`, { creditOverrideReason: "Pago contra entrega autorizado" });
     expect(confirmed.status).toBe(201);
+    await api.post(owner, `/orders/${order.body.id}/lines/${keychainLine}/resolution`, { resolution: "in_progress" });
+    const insufficient = await api.post(owner, `/orders/${order.body.id}/lines/${keychainLine}/resolution`, { resolution: "delivered" });
+    expect(insufficient.status).toBe(409);
 
     const vendor = await api.post(owner, "/vendors", { name: "Filamentos del Norte", leadTimeDays: 3 });
     const po = await api.post(owner, "/purchase-orders", {
@@ -197,6 +230,9 @@ describe("operación — compras, manufactura, calidad y prefacturas", () => {
     expect(closed.body.status).toBe("closed");
     const ready = await api.get(owner, "/orders");
     expect(ready.body.data[0].status).toBe("ready_to_ship");
+
+    const prestado = await api.post(owner, `/orders/${order.body.id}/lines/${keychainLine}/resolution`, { resolution: "delivered" });
+    expect(prestado.status).toBe(201);
 
     const prefactura = await api.post(owner, "/prefacturas", { salesOrderId: order.body.id }, { "Idempotency-Key": "pf-ped-1" });
     expect(prefactura.status).toBe(201);
@@ -351,7 +387,7 @@ describe("operación — compras, manufactura, calidad y prefacturas", () => {
     expect(supplyRecipe.body.code).toBe("not_manufacturable");
     const supplyOrder = await api.post(owner, "/production-orders", { productId: magnet.body.id, quantity: "10" });
     expect(supplyOrder.status).toBe(409);
-    expect(supplyOrder.body.message).toBe("Solo se fabrican productos terminados. Los insumos se compran.");
+    expect(supplyOrder.body.message).toBe("Ese artículo está configurado para comprar. Selecciona Fabricar o Fabricar o comprar para producirlo.");
 
     const retired = await api.patch(owner, `/products/${plain.body.id}`, { status: "inactive" });
     expect(retired.status).toBe(200);

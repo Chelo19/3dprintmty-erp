@@ -1,3 +1,4 @@
+import { canManufacture } from "@3dprintmty/domain";
 import {
   canOverrideCredit,
   canReadSalePrice,
@@ -195,12 +196,12 @@ export async function manufacturableIds(db: Db, productIds: string[]): Promise<S
   const result = new Set<string>();
   for (const id of new Set(productIds)) {
     const [product] = await db
-      .select({ productType: products.productType, status: products.status })
+      .select({ productType: products.productType, supplyMode: products.supplyMode, status: products.status })
       .from(products)
       .where(eq(products.id, id))
       .limit(1);
     if (!product || product.status === "inactive") continue;
-    if (product.productType !== "finished_good") continue;
+    if (!canManufacture(product)) continue;
     const [bom] = await db
       .select({ id: boms.id })
       .from(boms)
@@ -413,6 +414,7 @@ export async function orderContext(db: Db, tenant: TenantActor, order: OrderRow)
     role: tenant.role,
     fullyAllocated: isFullyAllocated(supply),
     makeableShortage: [...shortage.keys()].some((id) => makeable.has(id)),
+    hasIssuedStock: supply.some((line) => line.stocked && line.shipped > 0n),
     hasDeliverable: supply.some((line) => line.stocked && line.reserved + line.shipped > 0n),
     openProduction: production.open,
     startedProduction: production.started,
@@ -494,9 +496,7 @@ async function normalizeCommercialLines(
     if (product.productType === "service") {
       throw new AppError("use_service_catalog", "Los servicios se capturan en el catálogo de servicios.", 409);
     }
-    if (product.productType === "raw_material") {
-      throw new AppError("use_filament_catalog", "Los filamentos se capturan en el catálogo de filamentos.", 409);
-    }
+
     if (!allowInactive && product.status !== "active") {
       throw new AppError("product_inactive", "Ese producto no está disponible.", 409);
     }
@@ -636,7 +636,7 @@ export async function repriceOrder(db: Db, order: OrderRow, before: OrderLineRow
   return row as OrderRow;
 }
 
-export function dueMinor(totalMinor: bigint, ledger: PaymentRow[]): bigint {
+export function dueMinor(totalMinor: bigint, ledger: Pick<PaymentRow, "status" | "kind" | "amountMinor">[]): bigint {
   return amountDue(
     Money.fromMinor(BigInt(totalMinor)),
     ledger.map((entry) => ({
@@ -663,10 +663,26 @@ export async function assertCredit(
   const customer = await one(db, customers, customers.id, order.customerId, "No encontramos ese cliente.");
   if (customer.paymentTerms === "pue") return order.creditOverrideReason;
   const open = await db.select().from(salesOrders).where(eq(salesOrders.customerId, customer.id));
+  const ledgerRows: (Pick<PaymentRow, "status" | "kind" | "amountMinor"> & { salesOrderId: string })[] = await db.select({
+    salesOrderId: payments.salesOrderId, status: payments.status,
+    kind: payments.kind, amountMinor: payments.amountMinor,
+  }).from(payments).innerJoin(salesOrders, eq(payments.salesOrderId, salesOrders.id))
+    .where(eq(salesOrders.customerId, customer.id));
+  const ledgers = new Map<string, Pick<PaymentRow, "status" | "kind" | "amountMinor">[]>();
+  for (const entry of ledgerRows) {
+    const ledger = ledgers.get(entry.salesOrderId) ?? [];
+    ledger.push(entry);
+    ledgers.set(entry.salesOrderId, ledger);
+  }
+  const outstanding = (id: string, total: bigint) => {
+    const due = dueMinor(total, ledgers.get(id) ?? []);
+    return due > 0n ? due : 0n;
+  };
   const exposure = open
-    .filter((row: OrderRow) => row.id !== order.id && !["cancelled", "draft"].includes(row.status) && row.paymentStatus !== "paid")
-    .reduce((sum: bigint, row: OrderRow) => sum + BigInt(row.totalMinor), 0n);
-  if (!exceedsCredit(BigInt(customer.creditLimitMinor), exposure, BigInt(order.totalMinor))) {
+    .filter((row: OrderRow) => row.id !== order.id && !["cancelled", "draft"].includes(row.status))
+    .reduce((sum: bigint, row: OrderRow) => sum + outstanding(row.id, BigInt(row.totalMinor)), 0n);
+  const orderDue = outstanding(order.id, BigInt(order.totalMinor));
+  if (!exceedsCredit(BigInt(customer.creditLimitMinor), exposure, orderDue)) {
     return order.creditOverrideReason;
   }
   if (!reason || !canOverrideCredit(tenant.role)) {

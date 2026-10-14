@@ -1,3 +1,4 @@
+import { WritableGet } from "../http/read-transaction.interceptor";
 import { Body, Controller, Get, Headers, Param, Post, Query, StreamableFile } from "@nestjs/common";
 import { canIssuePrefactura, formatQty, isValidRfc, Money, qtyFromDb, type SalesOrderState } from "@3dprintmty/domain";
 import { mxCountryPolicy, PREFACTURA_TITLE, type CommercialDraft } from "@3dprintmty/fiscal";
@@ -140,6 +141,7 @@ export class PrefacturasController {
     });
   }
 
+  @WritableGet()
   @Get("exports/accountant")
   async exportPackage(
     @CurrentUser() actor: Actor,

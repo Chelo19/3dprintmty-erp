@@ -177,6 +177,42 @@ describe("operación — inventario y ventas", () => {
     expect(paid.body.data[0].amountDue).toBe("0.00");
   });
 
+  it("separa inventario e historial por abastecimiento y comparte los artículos mixtos", async () => {
+    const owner = await register(app, "inventario@clasificacion.test");
+    const onboard = await request(app.getHttpServer()).post("/api/v1/onboarding")
+      .set(bearer(owner.token)).send(workshop("TIN010101AAA", "Inventario clasificado", false));
+    expect(onboard.status).toBe(201);
+    const token = onboard.body.token as string;
+    const locations = await request(app.getHttpServer()).get("/api/v1/locations").set(bearer(token));
+    const locationId = locations.body[0].id as string;
+    for (const [sku, itemClass, supplyMode] of [
+      ["MAKE", "finished_good", "make"], ["BUY", "finished_good", "buy"],
+      ["BOTH", "finished_good", "both"], ["SUP", "component", "buy"],
+    ]) {
+      const product = await request(app.getHttpServer()).post("/api/v1/products").set(bearer(token))
+        .send({ sku, name: `Artículo ${sku}`, itemClass, supplyMode, cost: "1.00" });
+      expect(product.status).toBe(201);
+      const movement = await request(app.getHttpServer()).post("/api/v1/inventory/movements").set(bearer(token))
+        .send({ productId: product.body.id, locationId, kind: "receipt", quantity: "7", reason: "Existencia de prueba" });
+      expect(movement.status).toBe(201);
+    }
+    const inventory = await request(app.getHttpServer()).get("/api/v1/inventory").set(bearer(token));
+    expect(inventory.status).toBe(200);
+    expect(inventory.body.finished.map((row: { sku: string }) => row.sku)).toEqual(["BOTH", "MAKE"]);
+    expect(inventory.body.resale.map((row: { sku: string }) => row.sku)).toEqual(["BOTH", "BUY"]);
+    expect(inventory.body.supplies.map((row: { sku: string }) => row.sku)).toEqual(["SUP"]);
+    const mixed = inventory.body.finished.find((row: { sku: string }) => row.sku === "BOTH");
+    expect(mixed).toMatchObject({ itemClass: "finished_good", supplyMode: "both", onHand: "7", available: "7" });
+    expect(inventory.body.resale.find((row: { sku: string }) => row.sku === "BOTH")).toEqual(mixed);
+    for (const [section, expected] of [["finished", ["BOTH", "MAKE"]], ["resale", ["BOTH", "BUY"]], ["supplies", ["SUP"]]] as const) {
+      const ledger = await request(app.getHttpServer()).get(`/api/v1/inventory/ledger?section=${section}`).set(bearer(token));
+      expect(ledger.status).toBe(200);
+      expect(ledger.body.data.map((row: { sku: string }) => row.sku).sort()).toEqual(expected);
+    }
+    const latest = await request(app.getHttpServer()).get("/api/v1/inventory/ledger?section=finished&limit=1").set(bearer(token));
+    expect(latest.body.data.map((row: { sku: string }) => row.sku)).toEqual(["BOTH"]);
+  });
+
   it("mezcla productos y servicios en una cotización y resuelve el servicio antes de embarcar", async () => {
     const owner = await register(app, "nora@taller-nora.test");
     const onboard = await request(app.getHttpServer())
@@ -308,8 +344,7 @@ describe("operación — inventario y ventas", () => {
     const printId = pending.body.prints[0].id as string;
 
     const notPrestado = await request(app.getHttpServer()).post(`/api/v1/orders/${orderId}/confirm`).set(bearer(token)).send({});
-    expect(notPrestado.status).toBe(409);
-    expect(notPrestado.body.code).toBe("order_action_blocked");
+    expect(notPrestado.status).toBe(201);
 
     const onLine = await request(app.getHttpServer())
       .post(`/api/v1/orders/${orderId}/lines/${serviceLine.id}/resolution`)
@@ -328,8 +363,8 @@ describe("operación — inventario y ventas", () => {
       .send({ resolution: "delivered", note: "Llavero entregado" });
     expect(done.body.prints[0].resolution).toBe("delivered");
 
-    const confirmed = await request(app.getHttpServer()).post(`/api/v1/orders/${orderId}/confirm`).set(bearer(token)).send({});
-    expect(confirmed.status).toBe(201);
+    const confirmed = await request(app.getHttpServer()).get(`/api/v1/orders/${orderId}`).set(bearer(token));
+    expect(confirmed.status).toBe(200);
     const opened = await request(app.getHttpServer()).get(`/api/v1/orders/${orderId}`).set(bearer(token));
     expect(opened.body.serviceTerms).toBe("Entrega en cinco días hábiles.");
     expect(opened.body.status).toBe("ready_to_ship");

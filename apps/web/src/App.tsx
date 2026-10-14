@@ -1,3 +1,11 @@
+import { AuthPage } from "./auth-page";
+import { OnboardingPage } from "./onboarding";
+import { DashboardPage } from "./dashboard";
+import { LogoutButton } from "./logout";
+import { Notice } from "./notice";
+import { EmptyState } from "./empty-state";
+import { BackLink } from "./back-control";
+import { FEATURES, canManufacture, defaultSupplyMode, SUPPLY_LABELS, type SupplyMode } from "@3dprintmty/domain";
 import { canAccessModule, canAccessPath, roleHome, MX_STATES, MX_TAX_REGIMES, Money, STOCK_UOMS, UOM_LABELS, canEditFiscalSettings, canReadSalePrice, canWriteLocations, roleLabel, uomShort } from "@3dprintmty/domain";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
@@ -7,7 +15,7 @@ import { ApiError, api } from "./api";
 import { useAuth, type SessionUser } from "./auth";
 import { ProductionDetailPage, ProductionPage, RecipesPage } from "./factory";
 import { CollectionsPage, CustomerDetailPage, CustomerEditPage, CustomerNewPage, CustomersPage, DeleteButton, EditLink, FormActions, money, NewLink, OrderDetailPage, OrderNewPage, OrdersPage, PaymentNewPage, QuoteDetailPage, QuoteEditPage, QuoteNewPage, QuotesPage, RecordActions, SaveButton, ServiceDetailPage, ServiceEditPage, ServiceNewPage, ServicesPage } from "./operations";
-import { InventoryPage } from "./inventory";
+import { InventoryPage, InventoryRedirect } from "./inventory";
 import { FilamentAdjustPage } from "./filament-stock";
 import { CostCalculatorPage, clearCalculatorDraft, type CalculatorDraft } from "./costing";
 import { FilterBar, FilterSelect, NoMatches, StatusBadge, distinct, matchesStatus, matchesText, useFilters } from "./filters";
@@ -17,7 +25,7 @@ import { CardsSkeleton, DetailSkeleton, FormSkeleton, TableSkeleton } from "./sk
 import { Paged } from "./pager";
 import { canWritePath, homeFor, useRole } from "./roles";
 import { InvitePage, TeamPage } from "./team";
-import { authErrorMessage, registerWithPassword, signInWithGoogle, signInWithPassword, supabase } from "./supabase";
+import { supabase } from "./supabase";
 
 export function App() {
   return (
@@ -31,7 +39,9 @@ export function App() {
       <Route path="/aviso-de-privacidad" element={<PrivacyPage />} />
       <Route path="/app" element={<Shell />}>
         <Route index element={<DashboardPage />} />
-        <Route path="productos" element={<ProductsPage />} />
+        <Route path="productos" element={<Navigate to="/app/productos/fabricados" replace />} />
+        <Route path="productos/fabricados" element={<ProductsPage />} />
+        <Route path="productos/reventa" element={<ProductsPage category="buy" />} />
         <Route path="productos/nuevo" element={<ProductNewPage />} />
         <Route path="productos/:id/editar" element={<ProductEditPage />} />
         <Route path="productos/:id" element={<ProductDetailPage />} />
@@ -44,6 +54,10 @@ export function App() {
         <Route path="insumos/:id" element={<ProductDetailPage />} />
         <Route path="insumos/:id/editar" element={<ProductEditPage />} />
         <Route path="inventario" element={<Navigate to="/app/inventario/filamentos" replace />} />
+        <Route path="inventario/productos/fabricados" element={<InventoryPage category="finished" />} />
+        <Route path="inventario/productos/reventa" element={<InventoryPage category="resale" />} />
+        <Route path="inventario/productos" element={<InventoryRedirect category="reventa" />} />
+        <Route path="inventario/fabricados" element={<InventoryRedirect category="fabricados" />} />
         <Route path="inventario/:section" element={<InventoryPage />} />
         <Route path="inventario/filamentos/:id/ajustar" element={<FilamentAdjustPage />} />
         <Route path="rollos/*" element={<Navigate to="/app/inventario/filamentos" replace />} />
@@ -85,10 +99,6 @@ export function App() {
   );
 }
 
-function readField(data: FormData, key: string, fallback: string) {
-  const value = data.get(key);
-  return typeof value === "string" ? value : fallback;
-}
 
 function Gate() {
   const { token, user } = useAuth();
@@ -96,97 +106,6 @@ function Gate() {
   return <Navigate to={homeFor(user)} replace />;
 }
 
-function AuthPage({ mode }: { mode: "login" | "register" }) {
-  const { t } = useTranslation();
-  const auth = useAuth();
-  const navigate = useNavigate();
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
-
-  async function onSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const form = new FormData(event.currentTarget);
-    const email = String(form.get("email") ?? "");
-    const password = String(form.get("password") ?? "");
-    setError(null);
-    setBusy("login");
-    try {
-      if (supabase) {
-        const result =
-          mode === "login"
-            ? await signInWithPassword(email, password)
-            : await registerWithPassword(email, password);
-        if (result.error) {
-          setError(authErrorMessage(result.error));
-          return;
-        }
-        if (!result.data.session) {
-          setError(t("auth.confirmEmail"));
-          return;
-        }
-        const user = await auth.adoptSupabaseSession();
-        if (!user) return;
-        navigate(homeFor(user));
-        return;
-      }
-      const session = await api<{ token: string; user: SessionUser }>(
-        mode === "login" ? "/auth/login" : "/auth/register",
-        { method: "POST", body: JSON.stringify({ email, password }) },
-      );
-      auth.setSession(session.token, session.user);
-      navigate(homeFor(session.user));
-    } catch (caught) {
-      setError(caught instanceof ApiError ? caught.message : t("common.loading"));
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function onGoogle() {
-    setError(null);
-    setBusy("google");
-    try {
-      await signInWithGoogle();
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : t("common.loading"));
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  return (
-    <main className="main" style={{ maxWidth: 440 }}>
-      <p className="brand">{t("app.name")}</p>
-      <p>{t("app.tagline")}</p>
-      <form className="card" onSubmit={onSubmit} style={{ display: "grid", gap: 12 }}>
-        <h1>{mode === "login" ? t("auth.login") : t("auth.register")}</h1>
-        <label>
-          {t("auth.email")}
-          <input name="email" type="email" required autoComplete="email" />
-        </label>
-        <label>
-          {t("auth.password")}
-          <input name="password" type="password" required minLength={8} autoComplete={mode === "login" ? "current-password" : "new-password"} />
-        </label>
-        {error ? <p className="error">{error}</p> : null}
-        <button className="primary" type="submit" disabled={busy !== null} aria-busy={busy === "login"}>
-          {mode === "login" ? t("auth.login") : t("auth.register")}
-        </button>
-        {supabase ? (
-          <>
-            <p style={{ margin: 0, textAlign: "center", color: "var(--color-muted)" }}>{t("auth.or")}</p>
-            <button className="ghost" type="button" disabled={busy !== null} aria-busy={busy === "google"} onClick={() => void onGoogle()}>
-              {t("auth.google")}
-            </button>
-          </>
-        ) : null}
-        <Link to={mode === "login" ? "/registro" : "/entrar"}>
-          {mode === "login" ? t("auth.noAccount") : t("auth.hasAccount")}
-        </Link>
-      </form>
-    </main>
-  );
-}
 
 function AuthCallback() {
   const { t } = useTranslation();
@@ -217,226 +136,6 @@ function AuthCallback() {
   );
 }
 
-function OnboardingPage() {
-  const { t } = useTranslation();
-  const auth = useAuth();
-  const navigate = useNavigate();
-  const [step, setStep] = useState(auth.token ? 1 : 0);
-  const [error, setError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [form, setForm] = useState({
-    email: "",
-    password: "",
-    legalName: "",
-    tradeName: "",
-    rfc: "",
-    taxRegime: "626",
-    fiscalPostalCode: "",
-    state: "Jalisco",
-    locationName: "Matriz",
-    locationPostalCode: "",
-    vatRate: "0.16",
-    efectivo: true,
-    spei: true,
-    tarjeta: false,
-    mercadopago: false,
-    cod: false,
-    credito: false,
-    seedDemo: true,
-    privacyAccepted: false,
-  });
-
-  if (!auth.token && step > 0) return <Navigate to="/registro" replace />;
-
-  async function next(event: FormEvent) {
-    event.preventDefault();
-    setError(null);
-    if (step === 0) {
-      const data = new FormData(event.currentTarget as HTMLFormElement);
-      const email = String(data.get("email") ?? "");
-      const password = String(data.get("password") ?? "");
-      try {
-        setSaving(true);
-        if (supabase) {
-          const created = await registerWithPassword(email, password);
-          if (created.error) {
-            setError(authErrorMessage(created.error));
-            return;
-          }
-          if (!created.data.session) {
-            setError(t("auth.confirmEmail"));
-            return;
-          }
-          await auth.adoptSupabaseSession();
-          setStep(1);
-          return;
-        }
-        const result = await api<{ token: string; user: SessionUser }>("/auth/register", {
-          method: "POST",
-          body: JSON.stringify({ email, password }),
-        });
-        auth.setSession(result.token, result.user);
-        setStep(1);
-      } catch (caught) {
-        setError(caught instanceof ApiError ? caught.message : "No se pudo crear la cuenta.");
-      } finally {
-        setSaving(false);
-      }
-      return;
-    }
-    const data = new FormData(event.currentTarget as HTMLFormElement);
-    const draft = {
-      ...form,
-      legalName: readField(data, "legalName", form.legalName),
-      tradeName: readField(data, "tradeName", form.tradeName),
-      rfc: readField(data, "rfc", form.rfc),
-      taxRegime: readField(data, "taxRegime", form.taxRegime),
-      fiscalPostalCode: readField(data, "fiscalPostalCode", form.fiscalPostalCode),
-      state: readField(data, "state", form.state),
-      locationName: readField(data, "locationName", form.locationName),
-      locationPostalCode: readField(data, "locationPostalCode", form.locationPostalCode),
-      vatRate: readField(data, "vatRate", form.vatRate),
-      seedDemo: step === 5 ? data.has("seedDemo") : form.seedDemo,
-      privacyAccepted: step === 5 ? data.has("privacyAccepted") : form.privacyAccepted,
-    };
-    if (step === 4) {
-      draft.efectivo = data.has("efectivo");
-      draft.spei = data.has("spei");
-      draft.tarjeta = data.has("tarjeta");
-      draft.mercadopago = data.has("mercadopago");
-      draft.cod = data.has("cod");
-      draft.credito = data.has("credito");
-    }
-    if (step < 5) {
-      setForm(draft);
-      setStep(step + 1);
-      return;
-    }
-    setSaving(true);
-    try {
-      const result = await api<{ token: string | null; tenant: { id: string } }>("/onboarding", {
-        method: "POST",
-        body: JSON.stringify({
-          legalName: draft.legalName,
-          tradeName: draft.tradeName || draft.legalName,
-          rfc: draft.rfc,
-          taxRegime: draft.taxRegime,
-          fiscalPostalCode: draft.fiscalPostalCode,
-          state: draft.state,
-          locationName: draft.locationName,
-          locationPostalCode: draft.locationPostalCode || draft.fiscalPostalCode,
-          vatRate: draft.vatRate,
-          paymentMethods: {
-            efectivo: draft.efectivo,
-            spei: draft.spei,
-            tarjeta: draft.tarjeta,
-            mercadopago: draft.mercadopago,
-            conekta: false,
-            stripe: false,
-            cod: draft.cod,
-            credito: draft.credito,
-          },
-          seedDemo: draft.seedDemo,
-          privacyAccepted: draft.privacyAccepted,
-        }),
-      });
-      const nextToken = result.token ?? auth.token;
-      if (!nextToken) throw new Error("No hay sesión.");
-      const me = await api<{ user: SessionUser }>("/auth/me", {
-        headers: { authorization: `Bearer ${nextToken}` },
-      });
-      auth.setSession(nextToken, me.user);
-      navigate("/app");
-    } catch (caught) {
-      setError(caught instanceof ApiError ? caught.message : "No se pudo crear el taller.");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  const steps = [t("onboarding.account"), t("onboarding.company"), t("onboarding.branch"), t("onboarding.tax"), t("onboarding.payments"), t("onboarding.demo")];
-
-  return (
-    <main className="main" style={{ maxWidth: 640 }}>
-      <p className="brand">{t("app.name")}</p>
-      <h1>{t("onboarding.title")}</h1>
-      <p>{steps[step]}</p>
-      <form className="card" onSubmit={next} style={{ display: "grid", gap: 12 }}>
-        {step === 0 ? (
-          <>
-            <label>{t("auth.email")}<input name="email" required type="email" autoComplete="email" /></label>
-            <label>{t("auth.password")}<input name="password" required minLength={8} type="password" autoComplete="new-password" /></label>
-          </>
-        ) : null}
-        {step === 1 ? (
-          <>
-            <label>{t("onboarding.legalName")}<input name="legalName" required defaultValue={form.legalName} /></label>
-            <label>{t("onboarding.tradeName")}<input name="tradeName" defaultValue={form.tradeName} /></label>
-            <label>{t("onboarding.rfc")}<input name="rfc" required defaultValue={form.rfc} /></label>
-            <label>
-              {t("onboarding.regime")}
-              <select name="taxRegime" defaultValue={form.taxRegime}>
-                {MX_TAX_REGIMES.map((regime) => (
-                  <option key={regime.code} value={regime.code}>{regime.code} — {regime.label}</option>
-                ))}
-              </select>
-            </label>
-            <label>{t("onboarding.postalCode")}<input name="fiscalPostalCode" required pattern="\d{5}" defaultValue={form.fiscalPostalCode} /></label>
-          </>
-        ) : null}
-        {step === 2 ? (
-          <>
-            <label>{t("onboarding.locationName")}<input name="locationName" required defaultValue={form.locationName} /></label>
-            <label>
-              {t("onboarding.state")}
-              <select name="state" defaultValue={form.state}>
-                {MX_STATES.map((state) => <option key={state}>{state}</option>)}
-              </select>
-            </label>
-            <label>{t("onboarding.postalCode")}<input name="locationPostalCode" required pattern="\d{5}" defaultValue={form.locationPostalCode} /></label>
-          </>
-        ) : null}
-        {step === 3 ? (
-          <label>
-            {t("onboarding.vat")}
-            <select name="vatRate" defaultValue={form.vatRate}>
-              <option value="0.16">IVA 16%</option>
-              <option value="0.08">IVA 8% frontera</option>
-              <option value="0">Tasa 0</option>
-            </select>
-          </label>
-        ) : null}
-        {step === 4 ? (
-          <fieldset style={{ display: "grid", gap: 8 }}>
-            {(["efectivo", "spei", "tarjeta", "mercadopago", "cod", "credito"] as const).map((method) => (
-              <label key={method} style={{ gridTemplateColumns: "auto 1fr", alignItems: "center" }}>
-                <input name={method} type="checkbox" defaultChecked={form[method]} />
-                {method.toUpperCase()}
-              </label>
-            ))}
-          </fieldset>
-        ) : null}
-        {step === 5 ? (
-          <>
-            <label style={{ gridTemplateColumns: "auto 1fr", alignItems: "center" }}>
-              <input name="seedDemo" type="checkbox" defaultChecked={form.seedDemo} />
-              {t("onboarding.seed")}
-            </label>
-            <label style={{ gridTemplateColumns: "auto 1fr", alignItems: "start" }}>
-              <input name="privacyAccepted" type="checkbox" required defaultChecked={form.privacyAccepted} />
-              <span>{t("onboarding.privacy")} <Link to="/aviso-de-privacidad">Aviso</Link></span>
-            </label>
-          </>
-        ) : null}
-        {error ? <p className="error">{error}</p> : null}
-        <div style={{ display: "flex", gap: 8 }}>
-          {step > 0 ? <button className="ghost" type="button" onClick={() => setStep(step - 1)}>{t("common.back")}</button> : null}
-          <button className="primary" type="submit" disabled={saving} aria-busy={saving}>{step === 5 ? t("onboarding.submit") : t("common.continue")}</button>
-        </div>
-      </form>
-    </main>
-  );
-}
 
 function Shell() {
   const { t } = useTranslation();
@@ -466,7 +165,7 @@ function Shell() {
           </NavGroup>
           {seesMoney ? (
             <NavGroup label="Finanzas" open={at("/app/prefacturas", "/app/cobranza")}>
-              <Nav to="/app/prefacturas">{t("nav.preinvoices")}</Nav>
+              {FEATURES.prefacturas ? <Nav to="/app/prefacturas">{t("nav.preinvoices")}</Nav> : null}
               <Nav to="/app/cobranza">{t("nav.collections")}</Nav>
             </NavGroup>
           ) : null}
@@ -475,14 +174,16 @@ function Shell() {
             <Nav to="/app/recetas">Recetas</Nav>
           </NavGroup>
           <NavGroup label="Catálogo" open={at("/app/productos", "/app/insumos", "/app/filamentos", "/app/servicios", "/app/costeo")}>
-            <Nav to="/app/productos">Productos</Nav>
+            <Nav to="/app/productos/fabricados">Productos fabricados</Nav>
+            <Nav to="/app/productos/reventa">Productos</Nav>
             <Nav to="/app/insumos">Insumos</Nav>
             <Nav to="/app/filamentos">Filamentos</Nav>
             <Nav to="/app/servicios">Servicios</Nav>
             <Nav to="/app/costeo">Calculadora de costo</Nav>
           </NavGroup>
           <NavGroup label="Inventario" open={at("/app/inventario")}>
-            <Nav to="/app/inventario/productos">Productos</Nav>
+            <Nav to="/app/inventario/productos/fabricados">Productos fabricados</Nav>
+            <Nav to="/app/inventario/productos/reventa">Productos</Nav>
             <Nav to="/app/inventario/insumos">Insumos</Nav>
             <Nav to="/app/inventario/filamentos">Filamentos</Nav>
           </NavGroup>
@@ -494,9 +195,7 @@ function Shell() {
             {auth.user.platformAdmin && !auth.user.impersonator ? <Nav to="/app/plataforma">{t("nav.platform")}</Nav> : null}
           </NavGroup>
         </nav>
-        <button className="ghost" type="button" onClick={() => { auth.logout(); }} style={{ color: "inherit", marginTop: "auto" }}>
-          {t("common.logout")}
-        </button>
+        <div className="sidebar-session"><LogoutButton /></div>
       </aside>
       <div>
         {auth.user.impersonator ? <SupportBanner /> : null}
@@ -555,7 +254,7 @@ function SupportBanner() {
             const { data } = await supabase.auth.getSession();
             const access = data.session?.access_token;
             if (!access) {
-              auth.logout();
+              await auth.logout();
               navigate("/entrar");
               return;
             }
@@ -578,210 +277,25 @@ function SupportBanner() {
   );
 }
 
-type Dashboard = {
-  company: { legalName: string; rfc: string } | null;
-  seeMoney: boolean;
-  kpis: {
-    collectedThisMonth: string | null;
-    collectedLastMonth: string | null;
-    expensesThisMonth: string | null;
-    expensesLastMonth: string | null;
-    receivables: string | null;
-    payables: string | null;
-    openQuotes: number;
-    openQuotesValue: string | null;
-    openOrders: number;
-    openOrdersValue: string | null;
-  };
-  months: Array<{ key: string; collected: string | null; expenses: string | null }>;
-  pipeline: Array<{ status: "pending" | "confirmed" | "in_production" | "ready_to_ship" | "on_hold"; count: number }>;
-  operations: {
-    ordersLate: number;
-    ordersReadyToShip: number;
-    productionOpen: number;
-    productionLate: number;
-    qcHold: number;
-    purchasesIncoming: number;
-    lowStock: number;
-  };
-};
-
-function DashboardPage() {
+function ProductsPage({ category = "make" }: { category?: "make" | "buy" }) {
   const { t } = useTranslation();
   const query = useQuery({
-    queryKey: ["dashboard"],
-    queryFn: () => api<Dashboard>("/dashboard"),
-  });
-  if (query.isPending) {
-    return (
-      <section style={{ display: "grid", gap: 16 }}>
-        <header>
-          <h1>{t("dashboard.title")}</h1>
-          <span className="skeleton" style={{ width: 280, height: 16 }} />
-        </header>
-        <CardsSkeleton count={4} />
-        <CardsSkeleton count={4} />
-      </section>
-    );
-  }
-  if (!query.data) return <p className="error">No se pudo cargar el inicio.</p>;
-  const { company, seeMoney, kpis, months, pipeline, operations } = query.data;
-  const attention = [
-    attentionRow(t("dashboard.lateOrders"), operations.ordersLate, "/app/pedidos", "bad"),
-    attentionRow(t("dashboard.productionLate"), operations.productionLate, "/app/produccion", "bad"),
-    attentionRow(t("dashboard.qcHold"), operations.qcHold, "/app/produccion", "bad"),
-    attentionRow(t("dashboard.lowStock"), operations.lowStock, "/app/inventario/filamentos", "bad"),
-    attentionRow(t("dashboard.readyToShip"), operations.ordersReadyToShip, "/app/pedidos", "good"),
-    attentionRow(t("dashboard.productionOpen"), operations.productionOpen, "/app/produccion", "info"),
-    attentionRow(t("dashboard.purchasesIncoming"), operations.purchasesIncoming, "/app/compras", "wait"),
-  ];
-  const pipelineLabel: Record<Dashboard["pipeline"][number]["status"], string> = {
-    pending: t("dashboard.pending"),
-    confirmed: t("dashboard.confirmed"),
-    in_production: t("dashboard.inProduction"),
-    ready_to_ship: t("dashboard.readyToShip"),
-    on_hold: t("dashboard.onHold"),
-  };
-  const pipelineMax = Math.max(1, ...pipeline.map((row) => row.count));
-  return (
-    <section style={{ display: "grid", gap: 16 }}>
-      <header>
-        <h1>{t("dashboard.title")}</h1>
-        <p>{company ? `${company.legalName} · RFC ${company.rfc}` : null}</p>
-      </header>
-      {seeMoney ? (
-        <div className="kpi-grid">
-          <Kpi to="/app/cobranza" tone="in" label={t("dashboard.collected")} value={money(kpis.collectedThisMonth)} hint={`${t("dashboard.lastMonth")} ${money(kpis.collectedLastMonth)}`} />
-          <Kpi to="/app/pedidos" tone={Number(kpis.receivables) > 0 ? "due" : "ok"} label={t("dashboard.receivables")} value={money(kpis.receivables)} hint={t("dashboard.receivablesHint")} />
-          <Kpi to="/app/compras" tone="cost" label={t("dashboard.expenses")} value={money(kpis.expensesThisMonth)} hint={`${t("dashboard.lastMonth")} ${money(kpis.expensesLastMonth)}`} />
-          <Kpi to="/app/compras" tone={Number(kpis.payables) > 0 ? "owe" : "ok"} label={t("dashboard.payables")} value={money(kpis.payables)} hint={t("dashboard.payablesHint")} />
-        </div>
-      ) : null}
-      {seeMoney ? (
-        <article className="card dashboard-chart">
-          <header>
-            <strong>{t("dashboard.chart")}</strong>
-            <span>{t("dashboard.chartHint")}</span>
-          </header>
-          <MonthBars months={months} collectedLabel={t("dashboard.collectedSeries")} expensesLabel={t("dashboard.expensesSeries")} />
-        </article>
-      ) : null}
-      <div className="dashboard-split">
-        <article className="card">
-          <strong>{t("dashboard.attention")}</strong>
-          <div className="attention-list">
-            {attention.map((row) => (
-              <Link key={row.label} to={row.to} className={`attention-row ${row.tone}`}>
-                <span>{row.label}</span>
-                <strong>{row.value}</strong>
-              </Link>
-            ))}
-          </div>
-        </article>
-        <article className="card">
-          <strong>{t("dashboard.pipeline")}</strong>
-          <p className="kpi-hint">{kpis.openOrders} · {seeMoney ? money(kpis.openOrdersValue) : t("dashboard.openOrders")}</p>
-          <div className="pipeline">
-            {pipeline.map((row) => (
-              <div key={row.status} className={`pipeline-row ${row.status}`}>
-                <span>{pipelineLabel[row.status]}</span>
-                <span className="pipeline-track">
-                  <span style={{ width: `${(row.count / pipelineMax) * 100}%` }} />
-                  <span className="chart-tip" role="tooltip">{pipelineLabel[row.status]}: {row.count}</span>
-                </span>
-                <strong>{row.count}</strong>
-              </div>
-            ))}
-          </div>
-          <Link to="/app/cotizaciones" className="attention-row" style={{ marginTop: 8 }}>
-            <span>{t("dashboard.openQuotes")}</span>
-            <strong>{kpis.openQuotes}{seeMoney ? ` · ${money(kpis.openQuotesValue)}` : ""}</strong>
-          </Link>
-        </article>
-      </div>
-    </section>
-  );
-}
-
-type KpiTone = "in" | "due" | "cost" | "owe" | "ok";
-type AttentionTone = "bad" | "good" | "info" | "wait" | "calm";
-
-function attentionRow(label: string, value: number, to: string, whenActive: Exclude<AttentionTone, "calm">) {
-  return { label, value, to, tone: value > 0 ? whenActive : "calm" as AttentionTone };
-}
-
-function Kpi({ to, label, value, hint, tone }: { to: string; label: string; value: string; hint: string; tone: KpiTone }) {
-  return (
-    <Link to={to} className={`card kpi ${tone}`}>
-      <span>{label}</span>
-      <strong>{value}</strong>
-      <em>{hint}</em>
-    </Link>
-  );
-}
-
-const MONTH_LABELS = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
-
-function MonthBars({
-  months,
-  collectedLabel,
-  expensesLabel,
-}: {
-  months: Dashboard["months"];
-  collectedLabel: string;
-  expensesLabel: string;
-}) {
-  const max = Math.max(1, ...months.flatMap((month) => [Number(month.collected ?? 0), Number(month.expenses ?? 0)]));
-  return (
-    <>
-      <div className="chart-legend">
-        <span><i className="swatch collected" />{collectedLabel}</span>
-        <span><i className="swatch spent" />{expensesLabel}</span>
-      </div>
-      <div className="month-chart">
-        {months.map((month) => {
-          const collected = Number(month.collected ?? 0);
-          const spent = Number(month.expenses ?? 0);
-          const name = MONTH_LABELS[Number(month.key.slice(5, 7)) - 1] ?? month.key;
-          return (
-            <div key={month.key} className="month-col">
-              <div className="month-bars">
-                <span className="month-bar collected" style={{ height: `${(collected / max) * 100}%` }} />
-                <span className="month-bar spent" style={{ height: `${(spent / max) * 100}%` }} />
-                <span className="chart-tip" role="tooltip">
-                  <strong>{name} {month.key.slice(0, 4)}</strong>
-                  <span><i className="swatch collected" />{collectedLabel} {money(month.collected)}</span>
-                  <span><i className="swatch spent" />{expensesLabel} {money(month.expenses)}</span>
-                </span>
-              </div>
-              <span className="month-label">{name}</span>
-            </div>
-          );
-        })}
-      </div>
-    </>
-  );
-}
-
-function ProductsPage() {
-  const { t } = useTranslation();
-  const query = useQuery({
-    queryKey: ["products"],
-    queryFn: () => api<{ data: Product[]; total: number }>("/products?limit=100"),
+    queryKey: ["products", category],
+    queryFn: () => api<{ data: Product[]; total: number }>(`/products?limit=100&itemClass=finished_good&supplyMode=${category}`),
   });
   const { values, set, reset, dirty } = useFilters({ q: "", estado: "active", tipo: "" });
   return (
     <section style={{ display: "grid", gap: 16 }}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
-        <h1 style={{ margin: 0 }}>{t("products.title")}</h1>
-        <NewLink to="/app/productos/nuevo">{t("products.create")}</NewLink>
+        <h1 style={{ margin: 0 }}>{category === "make" ? "Productos fabricados" : "Productos"}</h1>
+        <NewLink to={`/app/productos/nuevo?abastecimiento=${category}`}>{t("products.create")}</NewLink>
       </div>
-      <p>{t("products.hint")}</p>
-      {query.isPending ? <TableSkeleton columns={9} /> : (() => {
-        const goods = (query.data?.data ?? []).filter((product) => product.productType === "finished_good" || product.productType === "resale");
-        if (!goods.length) return <p>{t("products.empty")}</p>;
+      <p>{category === "make" ? "Artículos que se abastecen mediante fabricación." : "Artículos que se compran para vender."} Los artículos con ambas opciones aparecen en los dos catálogos con el mismo inventario.</p>
+      {query.isPending ? <TableSkeleton columns={9} /> : query.isError ? <Notice tone="error" title="No se pudo cargar el catálogo" action={<button className="ghost" type="button" onClick={() => void query.refetch()}>Reintentar</button>}>Intenta nuevamente para consultar los productos.</Notice> : (() => {
+        const goods = (query.data?.data ?? []).filter((product) => product.itemClass === "finished_good");
+        if (!goods.length) return <EmptyState title={category === "make" ? "Sin productos fabricados" : "Sin productos"} to={`/app/productos/nuevo?abastecimiento=${category}`} actionLabel={category === "make" ? "Crear producto fabricado" : "Crear producto"}>{category === "make" ? "Todavía no hay artículos configurados para fabricar. Crea el primero para preparar su receta." : "Todavía no hay artículos configurados para comprar y vender. Agrega tu primer producto."}</EmptyState>;
         const bySearch = goods.filter((product) =>
-          matchesText(values.q, product.sku, product.name) && (!values.tipo || product.productType === values.tipo));
+          matchesText(values.q, product.sku, product.name) && (!values.tipo || product.supplyMode === values.tipo));
         const rows = bySearch.filter((product) => matchesStatus(product.status, values.estado));
         return (
         <>
@@ -796,10 +310,10 @@ function ProductsPage() {
           onClear={reset}
         >
           <FilterSelect
-            label="Tipo"
+            label="Abastecimiento"
             value={values.tipo}
             onChange={(value) => set("tipo", value)}
-            options={[{ value: "finished_good", label: "Producto terminado" }, { value: "resale", label: "Producto revendido" }]}
+            options={[{ value: "make", label: "Fabricar" }, { value: "buy", label: "Comprar" }, { value: "both", label: "Fabricar o comprar" }]}
           />
         </FilterBar>
         {!rows.length ? <NoMatches onClear={reset} /> : (
@@ -825,7 +339,7 @@ function ProductsPage() {
               <tr key={product.id}>
                 <td>{product.sku}</td>
                 <td>{product.name}</td>
-                <td>{PRODUCT_TYPE[product.productType] ?? product.productType}</td>
+                <td>{SUPPLY_LABELS[product.supplyMode]}</td>
                 <td>{uomShort(product.stockUom)}</td>
                 <CostOnly><td>{product.cost ? Money.fromMajor(product.cost).format("es-MX") : "—"}</td></CostOnly>
                 <td>{product.pricesHidden ? t("products.hidden") : product.salePrice ? Money.fromMajor(product.salePrice).format("es-MX") : "—"}</td>
@@ -853,7 +367,7 @@ function SuppliesPage() {
     queryFn: () => api<{ data: Product[]; total: number }>("/products?limit=100"),
   });
   const { values, set, reset, dirty } = useFilters({ q: "", estado: "active", uom: "" });
-  const supplies = (query.data?.data ?? []).filter((product) => product.productType === "component");
+  const supplies = (query.data?.data ?? []).filter((product) => ["component", "raw_material"].includes(product.itemClass));
   const bySearch = supplies.filter((product) =>
     matchesText(values.q, product.sku, product.name) && (!values.uom || product.stockUom === values.uom));
   const rows = bySearch.filter((product) => matchesStatus(product.status, values.estado));
@@ -863,8 +377,8 @@ function SuppliesPage() {
         <h1 style={{ margin: 0 }}>Insumos</h1>
         <NewLink to="/app/insumos/nuevo">Nuevo insumo</NewLink>
       </div>
-      <p>Herrajes y materiales que se compran. El filamento tiene su propio catálogo.</p>
-      {query.isPending ? <TableSkeleton columns={8} /> : !supplies.length ? <p>Todavía no hay insumos.</p> : (
+      <p>Componentes y materias primas. Cada artículo indica si se compra, fabrica o admite ambas opciones. El filamento tiene su propio catálogo.</p>
+      {query.isPending ? <TableSkeleton columns={8} /> : query.isError ? <Notice tone="error" title="No se pudo cargar el catálogo" action={<button className="ghost" type="button" onClick={() => void query.refetch()}>Reintentar</button>}>Intenta nuevamente para consultar los insumos.</Notice> : !supplies.length ? <EmptyState title="Sin insumos" to="/app/insumos/nuevo" actionLabel="Crear insumo">Agrega los componentes y materias primas que utiliza tu taller.</EmptyState> : (
         <>
         <FilterBar
           search={values.q}
@@ -944,7 +458,7 @@ function FilamentsPage() {
         <NewLink to="/app/filamentos/nuevo">Nuevo filamento</NewLink>
       </div>
       <p>Se guardan en gramos y se compran por kilogramo. El precio de venta es por gramo usado: 10 g a $0.48 son $4.80 antes de IVA.</p>
-      {query.isPending ? <TableSkeleton columns={10} /> : !filaments.length ? <p>Todavía no hay filamentos.</p> : (
+      {query.isPending ? <TableSkeleton columns={10} /> : query.isError ? <Notice tone="error" title="No se pudo cargar el catálogo" action={<button className="ghost" type="button" onClick={() => void query.refetch()}>Reintentar</button>}>Intenta nuevamente para consultar los filamentos.</Notice> : !filaments.length ? <EmptyState title="Sin filamentos" to="/app/filamentos/nuevo" actionLabel="Crear filamento">Agrega tu primer filamento para registrar compras, existencias y consumos.</EmptyState> : (
         <>
         <FilterBar
           search={values.q}
@@ -1018,6 +532,8 @@ interface Product {
   sku: string;
   name: string;
   productType: string;
+  itemClass: string;
+  supplyMode: SupplyMode;
   status?: string;
   stockUom: string;
   purchaseUom: string;
@@ -1040,13 +556,14 @@ interface Filament {
 }
 
 const PRODUCT_TYPE: Record<string, string> = {
+  raw_material: "Materia prima",
   component: "Insumo",
   finished_good: "Producto terminado",
   resale: "Producto revendido",
 };
 
-function catalogHome(productType: string) {
-  return productType === "component" ? "/app/insumos" : "/app/productos";
+function catalogHome(productType: string, supplyMode?: string) {
+  return ["component", "raw_material"].includes(productType) ? "/app/insumos" : supplyMode === "buy" ? "/app/productos/reventa" : "/app/productos";
 }
 
 function ProductDetailPage() {
@@ -1057,19 +574,20 @@ function ProductDetailPage() {
   const data = product.data;
   return (
     <section style={{ display: "grid", gap: 16 }}>
-      <p><Link to={catalogHome(data.productType)}>{data.productType === "component" ? "Insumos" : "Productos"}</Link></p>
+      <BackLink to={catalogHome(data.productType, data.supplyMode)}>{data.productType === "component" ? "Insumos" : "Productos"}</BackLink>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
         <h1 style={{ margin: 0 }}>{data.name}</h1>
-        <EditLink to={`${catalogHome(data.productType)}/${data.id}/editar`} />
+        <EditLink to={`${catalogHome(data.productType, data.supplyMode)}/${data.id}/editar`} />
       </div>
       <article className="card">
-        <p>SKU {data.sku} · {PRODUCT_TYPE[data.productType] ?? data.productType} · {data.status === "inactive" ? "Inactivo" : "Activo"}</p>
+        <p>SKU {data.sku} · {PRODUCT_TYPE[data.itemClass] ?? data.itemClass} · {data.status === "inactive" ? "Inactivo" : "Activo"}</p>
+        <p>Abastecimiento: {SUPPLY_LABELS[data.supplyMode]}</p>
         <p>Unidad de medida {UOM_LABELS[data.stockUom as keyof typeof UOM_LABELS] ?? data.stockUom}</p>
         <CostOnly><p>Costo {data.cost ? Money.fromMajor(data.cost).format("es-MX") : "—"}</p></CostOnly>
         <p>Precio {data.pricesHidden ? "Oculto para tu rol" : data.salePrice ? Money.fromMajor(data.salePrice).format("es-MX") : "—"}</p>
         <CostOnly><p style={{ margin: 0 }}>Margen de utilidad {data.pricesHidden ? "Oculto para tu rol" : <MarginValue cost={data.cost} price={data.salePrice} />}</p></CostOnly>
       </article>
-      <CostOnly>{data.productType === "finished_good" ? <p style={{ margin: 0 }}><Link to={`/app/costeo?producto=${data.id}`}>Calcular costo</Link></p> : null}</CostOnly>
+      <CostOnly>{canManufacture(data) ? <p style={{ margin: 0 }}><Link to={`/app/costeo?producto=${data.id}`}>Calcular costo</Link></p> : null}</CostOnly>
     </section>
   );
 }
@@ -1088,7 +606,7 @@ function ProductEditPage() {
   const data = product.data;
   return (
     <section style={{ display: "grid", gap: 16 }}>
-      <p><Link to={`${catalogHome(data.productType)}/${id}`}>{data.productType === "component" ? "Insumo" : "Producto"}</Link></p>
+      <BackLink to={`${catalogHome(data.productType, data.supplyMode)}/${id}`}>{data.productType === "component" ? "Insumo" : "Producto"}</BackLink>
       <h1>{data.productType === "component" ? "Editar insumo" : "Editar producto"}</h1>
       <form
         className="card form-vertical"
@@ -1103,15 +621,19 @@ function ProductEditPage() {
             cost: String(form.get("cost") || "") || null,
             salePrice: String(form.get("salePrice") || "") || null,
             status: form.get("status"),
+            itemClass: form.get("itemClass"),
+            supplyMode: form.get("supplyMode"),
           }).then(async () => {
             await client.invalidateQueries({ queryKey: ["products"] });
             await client.invalidateQueries({ queryKey: ["product", id] });
-            navigate(`${catalogHome(data.productType)}/${id}`);
+            navigate(`${catalogHome(String(form.get("itemClass")), String(form.get("supplyMode")))}/${id}`);
           }).catch((caught) => setError(caught instanceof ApiError ? caught.message : "No se pudo guardar."));
         }}
       >
         <label>SKU<input name="sku" required maxLength={40} defaultValue={data.sku} style={{ textTransform: "uppercase" }} /></label>
         <label>Nombre<input name="name" required defaultValue={data.name} /></label>
+        <label>Clasificación<select name="itemClass" defaultValue={data.itemClass}><option value="finished_good">Producto terminado</option><option value="component">Insumo / componente</option><option value="raw_material">Materia prima</option></select></label>
+        <label>Abastecimiento<select name="supplyMode" defaultValue={data.supplyMode}><option value="make">Fabricar</option><option value="buy">Comprar</option><option value="both">Fabricar o comprar</option></select></label>
         <UomSelect defaultValue={data.stockUom} hint="Si ya hay existencia, déjala en cero antes de cambiar la unidad: las cantidades no se convierten. Revisa también las recetas que lo usen." />
         <CostPriceFields costLabel="Costo" priceLabel="Precio de venta" initialCost={data.cost ?? ""} initialPrice={data.salePrice ?? ""} />
         <label>
@@ -1131,7 +653,7 @@ function ProductEditPage() {
               setError(null);
               void api(`/products/${id}`, { method: "DELETE" }).then(async () => {
                 await client.invalidateQueries({ queryKey: ["products"] });
-                navigate(catalogHome(data.productType));
+                navigate(catalogHome(data.productType, data.supplyMode));
               }).catch((caught) => setError(caught instanceof ApiError ? caught.message : "No se pudo eliminar."));
             }}
           />
@@ -1150,7 +672,7 @@ function FilamentDetailPage() {
   const data = filament.data;
   return (
     <section style={{ display: "grid", gap: 16 }}>
-      <p><Link to="/app/filamentos">Filamentos</Link></p>
+      <BackLink to="/app/filamentos">Filamentos</BackLink>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
         <h1 style={{ margin: 0 }}>{data.name}</h1>
         <EditLink to={`/app/filamentos/${data.id}/editar`} />
@@ -1177,7 +699,7 @@ function FilamentEditPage() {
   const data = filament.data;
   return (
     <section style={{ display: "grid", gap: 16 }}>
-      <p><Link to={`/app/filamentos/${id}`}>Filamento</Link></p>
+      <BackLink to={`/app/filamentos/${id}`}>Filamento</BackLink>
       <h1>Editar filamento</h1>
       <form
         className="card form-vertical"
@@ -1260,12 +782,13 @@ function ProductNewPage({ kind }: { kind?: "component" }) {
   const draft = supply ? undefined : (location.state as { calculator?: CalculatorDraft } | null)?.calculator;
   const [error, setError] = useState<string | null>(null);
   const [createdId, setCreatedId] = useState<string | null>(null);
-  const [productType, setProductType] = useState(kind ?? "finished_good");
+  const [itemClass, setItemClass] = useState<string>(kind ?? "finished_good");
+  const [supplyMode, setSupplyMode] = useState<SupplyMode>(new URLSearchParams(location.search).get("abastecimiento") === "buy" ? "buy" : defaultSupplyMode(kind ?? "finished_good"));
   const [saveRecipe, setSaveRecipe] = useState(true);
   const create = useMutation({
     mutationFn: (body: unknown) => api<{ id: string }>("/products", { method: "POST", body: JSON.stringify(body) }),
   });
-  const withRecipe = Boolean(draft?.recipe.length) && saveRecipe && productType === "finished_good";
+  const withRecipe = Boolean(draft?.recipe.length) && saveRecipe && supplyMode !== "buy";
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1277,7 +800,8 @@ function ProductNewPage({ kind }: { kind?: "component" }) {
       created = await create.mutateAsync({
         sku: String(data.get("sku")),
         name: String(data.get("name")),
-        productType,
+        itemClass,
+        supplyMode,
         stockUom: String(data.get("stockUom") || "EA"),
         cost: String(data.get("cost")),
         salePrice: String(data.get("salePrice") || "") || undefined,
@@ -1310,32 +834,29 @@ function ProductNewPage({ kind }: { kind?: "component" }) {
       navigate(`/app/productos/${created.id}`);
       return;
     }
-    navigate(supply ? "/app/insumos" : "/app/productos");
+    navigate(catalogHome(itemClass, supplyMode));
   }
 
   return (
     <section style={{ display: "grid", gap: 16 }}>
-      <p>
-        <Link to={supply ? "/app/insumos" : "/app/productos"}>{supply ? "Insumos" : t("products.title")}</Link>
-        {draft ? <> · <Link to="/app/costeo">Volver a la calculadora</Link></> : null}
-      </p>
+      <div className="back-actions">
+        <BackLink to={supply ? "/app/insumos" : "/app/productos"}>{supply ? "Insumos" : t("products.title")}</BackLink>
+        {draft ? <BackLink to="/app/costeo">la calculadora</BackLink> : null}
+      </div>
       <h1>{supply ? "Nuevo insumo" : "Nuevo producto"}</h1>
       <form className="card form-vertical" onSubmit={onSubmit}>
         {draft ? <CostOnly><p style={{ margin: 0 }}>Costo y precio vienen de la calculadora. Ajusta el precio si quieres otro margen.</p></CostOnly> : null}
         <label>{t("products.sku")}<input name="sku" required /></label>
         <label>{t("products.name")}<input name="name" required defaultValue={draft?.name} /></label>
-        {supply ? null : (
-          <label>
-            {t("products.type")}
-            <select value={productType} onChange={(event) => setProductType(event.target.value)}>
-              <option value="finished_good">Producto terminado</option>
-              <option value="resale">Producto revendido</option>
-            </select>
-          </label>
-        )}
+        <label>Clasificación<select value={itemClass} onChange={(event) => setItemClass(event.target.value)}>
+          <option value="finished_good">Producto terminado</option><option value="component">Insumo / componente</option><option value="raw_material">Materia prima</option>
+        </select></label>
+        <label>Abastecimiento<select value={supplyMode} onChange={(event) => setSupplyMode(event.target.value as SupplyMode)}>
+          <option value="make">Fabricar</option><option value="buy">Comprar</option><option value="both">Fabricar o comprar</option>
+        </select></label>
         <UomSelect defaultValue="EA" />
         <CostPriceFields costLabel="Costo" priceLabel={t("products.sale")} costPlaceholder="35.00" pricePlaceholder="480.00" costRequired initialCost={draft?.cost} initialPrice={draft?.salePrice} />
-        {draft && draft.recipe.length > 0 && productType === "finished_good" ? (
+        {draft && draft.recipe.length > 0 && supplyMode !== "buy" ? (
           <fieldset className="payment-terms">
             <legend>Receta</legend>
             <label className="payment-terms-wide" style={{ gridTemplateColumns: "auto 1fr", alignItems: "center" }}>
@@ -1390,7 +911,7 @@ function FilamentNewPage() {
 
   return (
     <section style={{ display: "grid", gap: 16 }}>
-      <p><Link to="/app/filamentos">Filamentos</Link></p>
+      <BackLink to="/app/filamentos">Filamentos</BackLink>
       <h1>Nuevo filamento</h1>
       <p>Se guarda en gramos y se compra por kilogramo. El precio de venta es por gramo usado.</p>
       <form className="card form-vertical" onSubmit={onSubmit}>
@@ -1637,7 +1158,7 @@ function PrivacyPage() {
     <main className="main" style={{ maxWidth: 680 }}>
       <h1>{t("privacy.title")}</h1>
       <p>{t("privacy.body")}</p>
-      <Link to="/alta">Volver</Link>
+      <BackLink to="/alta">Registro del taller</BackLink>
     </main>
   );
 }

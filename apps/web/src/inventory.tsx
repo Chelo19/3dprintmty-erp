@@ -1,7 +1,10 @@
-import { uomShort } from "@3dprintmty/domain";
+import { EmptyState } from "./empty-state";
+import { Notice } from "./notice";
+import { Modal } from "./modal";
+import { SUPPLY_LABELS, type SupplyMode, uomShort } from "@3dprintmty/domain";
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
-import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Link, Navigate, useLocation, useNavigate, useParams } from "react-router-dom";
 import { api } from "./api";
 import { formatKg, rollsHint } from "./filament-stock";
 import { FilterBar, FilterSelect, NoMatches, StatusBadge, matchesStatus, matchesText, useFilters } from "./filters";
@@ -16,6 +19,8 @@ interface StockItem {
   stockUom: string;
   status: string;
   productType: string | null;
+  itemClass: string | null;
+  supplyMode: SupplyMode | null;
   onHand: string;
   allocated: string;
   available: string;
@@ -53,20 +58,20 @@ const SECTION = {
   },
   supplies: {
     title: "Inventario de insumos",
-    intro: "Insumos del catálogo. Entran por un gasto en Compras y salen al fabricar.",
+    intro: "Insumos y materias primas del catálogo. Entran por Compras y salen al fabricar.",
     empty: "No hay insumos en el catálogo.",
   },
-  products: {
+  finished: {
+    title: "Inventario de productos fabricados",
+    intro: "Productos que se abastecen mediante fabricación. Entran al fabricar y salen al entregar un pedido. Los artículos que también se compran aparecen en ambos listados con el mismo inventario.",
+    empty: "No hay productos fabricados en el catálogo.",
+  },
+  resale: {
     title: "Inventario de productos",
-    intro: "Productos terminados y revendidos. El terminado entra al fabricarlo; el revendido, al comprarlo. Salen al embarcar un pedido.",
-    empty: "No hay productos terminados ni revendidos en el catálogo.",
+    intro: "Productos que se compran para vender. Entran por Compras y salen al entregar un pedido. Los artículos que también se fabrican aparecen en ambos listados con el mismo inventario.",
+    empty: "No hay productos de compra para venta en el catálogo.",
   },
 } as const;
-
-const KIND: Record<string, string> = {
-  finished_good: "Terminado",
-  resale: "Revendido",
-};
 
 const MOVEMENT: Record<string, string> = {
   receipt: "Entrada",
@@ -79,41 +84,49 @@ const MOVEMENT: Record<string, string> = {
 const SLUG: Record<string, keyof typeof SECTION> = {
   filamentos: "filaments",
   insumos: "supplies",
-  productos: "products",
+  fabricados: "finished",
+  productos: "resale",
 };
 
-export function InventoryPage() {
+export function InventoryRedirect({ category }: { category: "fabricados" | "reventa" }) {
+  const { search, hash } = useLocation();
+  return <Navigate to={{ pathname: `/app/inventario/productos/${category}`, search, hash }} replace />;
+}
+
+export function InventoryPage({ category }: { category?: "finished" | "resale" }) {
   const params = useParams();
-  const section = SLUG[params.section ?? ""] ?? "filaments";
+  const section = category ?? SLUG[params.section ?? ""] ?? "filaments";
   const inventory = useQuery({ queryKey: ["inventory-catalog"], queryFn: () => api<Inventory>("/inventory") });
   const copy = SECTION[section];
   const all = rowsFor(section, inventory.data);
   const isFilament = section === "filaments";
+  const isProduct = section === "finished" || section === "resale";
   const [itemFilter, setItemFilter] = useState("");
-  const movementsRef = useRef<HTMLDivElement>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const location = useLocation();
   const navigate = useNavigate();
   const [notice, setNotice] = useState<string | null>((location.state as { notice?: string } | null)?.notice ?? null);
   useEffect(() => {
     if (location.state) navigate(`${location.pathname}${location.search}`, { replace: true, state: null });
   }, [location.state, location.pathname, location.search, navigate]);
-  useEffect(() => setItemFilter(""), [section]);
+  useEffect(() => { setItemFilter(""); setHistoryOpen(false); }, [section]);
   useEffect(() => {
     if (!isFilament) setNotice(null);
   }, [isFilament]);
   const { values, set, reset, dirty } = useFilters({ q: "", estado: "active", existencia: "", tipo: "" });
-  const statusRows = all.filter((row) => matchesStatus(row.status, values.estado));
   const bySearch = all.filter((row) =>
     matchesText(values.q, row.sku, row.name)
     && matchesStock(row, values.existencia)
-    && (section !== "products" || !values.tipo || row.kind === values.tipo));
+    && (!isProduct || !values.tipo || row.supplyMode === values.tipo));
   const rows = bySearch.filter((row) => matchesStatus(row.status, values.estado));
   return (
     <section style={{ display: "grid", gap: 16 }}>
-      <h1>{copy.title}</h1>
+      <div className="inventory-heading"><h1>{copy.title}</h1>
+        <button className="ghost" type="button" disabled={!all.length} onClick={() => { setItemFilter(""); setHistoryOpen(true); }}>Ver entradas y salidas</button>
+      </div>
       <p>{copy.intro}</p>
-      {notice ? <p className="muted-note">{notice}</p> : null}
-      {inventory.isPending ? <TableSkeleton columns={section === "products" ? 7 : isFilament ? 4 : 6} /> : !inventory.data ? <p className="error">No se pudo cargar el inventario.</p> : !all.length ? <p>{copy.empty}</p> : (
+      {notice ? <Notice title="Inventario actualizado">{notice}</Notice> : null}
+      {inventory.isPending ? <TableSkeleton columns={isProduct ? 7 : isFilament ? 4 : 6} /> : !inventory.data ? <Notice title="No se pudo cargar el inventario" tone="error" action={<button className="ghost" type="button" onClick={() => void inventory.refetch()}>Reintentar</button>}>Intenta nuevamente para consultar las existencias.</Notice> : !all.length ? <EmptyState title="Catálogo vacío" to={section === "filaments" ? "/app/filamentos/nuevo" : section === "supplies" ? "/app/insumos/nuevo" : section === "resale" ? "/app/productos/nuevo?abastecimiento=buy" : "/app/productos/nuevo"} actionLabel={section === "filaments" ? "Crear filamento" : section === "supplies" ? "Crear insumo" : "Crear producto"}>{copy.empty}</EmptyState> : (
         <>
         <FilterBar
           search={values.q}
@@ -135,12 +148,12 @@ export function InventoryPage() {
               ...(isFilament ? [] : [{ value: "apartado", label: "Con apartado" }]),
             ]}
           />
-          {section === "products" ? (
+          {isProduct ? (
             <FilterSelect
-              label="Tipo"
+              label="Abastecimiento"
               value={values.tipo}
               onChange={(value) => set("tipo", value)}
-              options={[{ value: "finished_good", label: "Terminado" }, { value: "resale", label: "Revendido" }]}
+              options={Object.entries(SUPPLY_LABELS).filter(([mode]) => mode === "both" || mode === (section === "finished" ? "make" : "buy")).map(([value, label]) => ({ value, label }))}
             />
           ) : null}
         </FilterBar>
@@ -152,7 +165,7 @@ export function InventoryPage() {
             <tr>
               <th>SKU</th>
               <th>Nombre</th>
-              {section === "products" ? <th>Tipo</th> : null}
+              {isProduct ? <th>Abastecimiento</th> : null}
               <th>Existencia</th>
               {isFilament ? null : <th>Apartado</th>}
               {isFilament ? null : <th>Disponible</th>}
@@ -167,7 +180,7 @@ export function InventoryPage() {
                   <Link to={row.to}>{row.name}</Link>
                   {row.status === "inactive" ? <> <StatusBadge status={row.status} /></> : null}
                 </td>
-                {section === "products" ? <td>{KIND[row.kind] ?? row.kind}</td> : null}
+                {isProduct ? <td>{row.supplyMode ? SUPPLY_LABELS[row.supplyMode] : "—"}</td> : null}
                 {isFilament ? (
                   <td className={Number(row.onHand) <= 0 ? "stock-zero" : undefined}>
                     <strong>{formatKg(Number(row.onHand))}</strong>
@@ -188,9 +201,9 @@ export function InventoryPage() {
                         </IconAction>
                       </>
                     ) : null}
-                    <IconAction label="Ver entradas y salidas" tone="view" onClick={() => {
+                    <IconAction label="Ver entradas y salidas" tone="view" operatorAllowed onClick={() => {
                       setItemFilter(row.id);
-                      movementsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+                      setHistoryOpen(true);
                     }}>
                       <HistoryIcon />
                     </IconAction>
@@ -205,9 +218,11 @@ export function InventoryPage() {
         )}
         </>
       )}
-      <div ref={movementsRef} style={{ display: "grid", gap: 12 }}>
-        <Movements section={section} items={statusRows} itemFilter={itemFilter} onItemFilter={setItemFilter} />
-      </div>
+      {historyOpen ? (
+        <Modal title="Historial de entradas y salidas" onClose={() => setHistoryOpen(false)}>
+          <Movements section={section} items={all} itemFilter={itemFilter} onItemFilter={setItemFilter} />
+        </Modal>
+      ) : null}
     </section>
   );
 }
@@ -234,7 +249,6 @@ function Movements({
     (!direction || row.direction === direction) && (itemFilter || visible.has(row.productId)));
   return (
     <>
-      <h2 style={{ margin: 0 }}>Entradas y salidas</h2>
       <p style={{ margin: 0 }}>
         {isFilament
           ? "Cada entrada por compra y cada consumo o conteo, con su fecha y motivo."
@@ -257,7 +271,14 @@ function Movements({
           </select>
         </label>
       </div>
-      {movements.isPending ? <TableSkeleton columns={isFilament ? 6 : 8} /> : !rows.length ? <p>Todavía no hay movimientos{itemFilter ? " de este artículo" : ""}.</p> : (
+      {movements.isPending ? <TableSkeleton columns={isFilament ? 6 : 8} /> : movements.isError ? (
+        <Notice title="No se pudo cargar el historial" tone="error" action={<button className="ghost" type="button" onClick={() => void movements.refetch()}>Reintentar</button>}>Intenta nuevamente para consultar las entradas y salidas.</Notice>
+      ) : !rows.length ? (
+        <Notice title={direction ? "Sin movimientos que coincidan" : "Todavía no hay movimientos"}
+          action={direction ? <button className="ghost" type="button" onClick={() => setDirection("")}>Ver entradas y salidas</button> : undefined}>
+          {direction ? "No encontramos movimientos con el filtro seleccionado. Prueba mostrando entradas y salidas." : itemFilter ? "Este artículo todavía no tiene entradas ni salidas registradas." : "Todavía no hay entradas ni salidas registradas en este catálogo."}
+        </Notice>
+      ) : (
         <div className="scroll-x">
         <Paged rows={rows}>
         {(pageRows) => (
@@ -368,7 +389,7 @@ function rowsFor(section: keyof typeof SECTION, data: Inventory | undefined) {
   if (section === "supplies") {
     return (data.supplies ?? []).map((row) => ({ ...row, kind: "component", to: `/app/insumos/${row.id}` }));
   }
-  return [...data.finished, ...data.resale]
-    .map((row) => ({ ...row, kind: row.productType ?? "finished_good", to: `/app/productos/${row.id}` }))
+  return (section === "finished" ? data.finished : data.resale)
+    .map((row) => ({ ...row, kind: row.itemClass ?? row.productType ?? "finished_good", to: `/app/productos/${row.id}` }))
     .sort((a, b) => a.sku.localeCompare(b.sku));
 }

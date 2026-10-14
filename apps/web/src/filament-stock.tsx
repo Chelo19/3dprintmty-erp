@@ -1,3 +1,4 @@
+import { BackLink } from "./back-control";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type FormEvent } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
@@ -55,7 +56,7 @@ export function FilamentAdjustPage() {
   if (!filament) {
     return (
       <section style={{ display: "grid", gap: 16 }}>
-        <p><Link to="/app/inventario/filamentos">Inventario de filamentos</Link></p>
+        <BackLink to="/app/inventario/filamentos">Inventario de filamentos</BackLink>
         <p className="error">No encontramos ese filamento.</p>
       </section>
     );
@@ -106,7 +107,7 @@ export function FilamentAdjustPage() {
 
   return (
     <section style={{ display: "grid", gap: 16 }}>
-      <p><Link to="/app/inventario/filamentos">Inventario de filamentos</Link></p>
+      <BackLink to="/app/inventario/filamentos">Inventario de filamentos</BackLink>
       <h1>{mode === "count" ? "Conteo físico" : "Restar consumo"} · {filament.name}</h1>
       <p>
         {mode === "count"

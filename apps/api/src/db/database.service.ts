@@ -3,6 +3,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { Injectable, type OnModuleDestroy, type OnModuleInit } from "@nestjs/common";
 import { sql } from "drizzle-orm";
+import type { Pool } from "pg";
 import type { Actor } from "../http/actor";
 import { applyMigrations, verifyMigrations } from "./migrations";
 
@@ -22,6 +23,8 @@ interface TransactionContext { tx: any; actor: Actor | null }
 export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   orm!: any;
   driver: "pglite" | "postgres" = "pglite";
+  private pool: Pool | null = null;
+  private escapeLiteral!: (value: string) => string;
   private closer: (() => Promise<void>) | null = null;
   private readonly context = new AsyncLocalStorage<TransactionContext>();
 
@@ -38,6 +41,8 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         ssl: connectionString.includes("supabase.co") || connectionString.includes("supabase.com")
           ? { rejectUnauthorized: false } : undefined,
       });
+      this.pool = pool;
+      this.escapeLiteral = pg.default.escapeLiteral;
       // pg-pool retira los clientes antes de que termine su cierre de socket.
       // Esperar también el evento end evita conexiones pendientes al apagar.
       const connections = new Set<Promise<void>>();
@@ -99,20 +104,57 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     }
     return this.atomic(async () => {
       const tx = this.context.getStore()!.tx;
-      // READ COMMITTED + mutex transaccional: las siguientes lecturas ven el commit
-      // anterior. Todos los procesos de un taller siguen el mismo orden de bloqueo.
-      // Distintos talleres no comparten el mutex. PGlite ya serializa transacciones.
       if (this.driver === "postgres") {
-        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`erp:tenant:${actor.tenantId}`}, 0))`);
+        // Un viaje para el bloqueo y la configuración. Los valores usan el
+        // escape de literales de pg, nunca interpolación de entradas sin escapar.
+        await tx.execute(sql.raw(this.userSetup(actor, true)));
+      } else {
+        await tx.execute(sql`select set_config('request.jwt.claims', ${this.claims(actor)}, true)`);
+        await tx.execute(sql.raw("set local role erp_api"));
       }
-      const claims = JSON.stringify({ sub: actor.userId, tenant_id: actor.tenantId, role: actor.role,
-        ...(actor.impersonator ? { impersonator: actor.impersonator } : {}) });
-      await tx.execute(sql`select set_config('request.jwt.claims', ${claims}, true)`);
-      await tx.execute(sql.raw("set local role erp_api"));
       const result = await this.context.run({ tx, actor }, () => fn(tx));
       // Solo se restaura tras éxito; si falla, atomic revierte efectos y SET LOCAL.
       await tx.execute(sql.raw("set local role none"));
       return result;
     });
   }
+
+  /** GETs de negocio: una transacción de solo lectura, sin mutex de escritura. */
+  async asReadUser<T>(actor: Actor, fn: (db: any) => T | Promise<T>): Promise<T> {
+    if (!actor.tenantId || !actor.role) throw new Error("La sesión no tiene taller.");
+    if (this.context.getStore()) return this.asUser(actor, fn);
+    if (this.pool) {
+      const client = await this.pool.connect();
+      let broken = false;
+      try {
+        await client.query(`begin isolation level repeatable read read only; ${this.userSetup(actor, false)}`);
+        const { drizzle } = await import("drizzle-orm/node-postgres");
+        const tx = drizzle(client);
+        const result = await this.context.run({ tx, actor }, () => fn(tx));
+        // COMMIT restaura todos los SET LOCAL, también con pooler transaccional.
+        await client.query("commit");
+        return result;
+      } catch (error) {
+        try { await client.query("rollback"); } catch { broken = true; }
+        throw error;
+      } finally { client.release(broken); }
+    }
+    return this.orm.transaction(async (tx: any) => {
+      await tx.execute(sql`select set_config('request.jwt.claims', ${this.claims(actor)}, true)`);
+      await tx.execute(sql.raw("set local role erp_api"));
+      return this.context.run({ tx, actor }, () => fn(tx));
+    }, { isolationLevel: "repeatable read", accessMode: "read only" });
+  }
+
+  private claims(actor: Actor): string {
+    return JSON.stringify({ sub: actor.userId, tenant_id: actor.tenantId, role: actor.role,
+      ...(actor.impersonator ? { impersonator: actor.impersonator } : {}) });
+  }
+
+  private userSetup(actor: Actor, lock: boolean): string {
+    const mutex = lock
+      ? `select pg_advisory_xact_lock(hashtextextended(${this.escapeLiteral(`erp:tenant:${actor.tenantId}`)}, 0)); ` : "";
+    return `${mutex}select set_config('request.jwt.claims', ${this.escapeLiteral(this.claims(actor))}, true); set local role erp_api;`;
+  }
+
 }

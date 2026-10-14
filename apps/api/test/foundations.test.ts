@@ -2,7 +2,7 @@ import "reflect-metadata";
 import type { INestApplication } from "@nestjs/common";
 import request from "supertest";
 import { and, eq, sql } from "drizzle-orm";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { vi, afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "../src/main";
 import { services } from "../src/container";
 import { applyMigrations, verifyMigrations } from "../src/db/migrations";
@@ -11,6 +11,12 @@ import { requireTenant, type TenantActor } from "../src/http/actor";
 import { AppError } from "@3dprintmty/shared";
 import { allocateFolio, audit, postStock, withIdempotency } from "../src/modules/support";
 import { auditEvents, customers, idempotencyRequests, locations, numberSequences, payments, products, salesOrders, stockBalances, stockLedgers } from "../src/db/schema";
+
+// Conserva cobertura del módulo para cuando se reactive.
+vi.mock("@3dprintmty/domain", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@3dprintmty/domain")>();
+  return { ...actual, FEATURES: { ...actual.FEATURES, prefacturas: true } };
+});
 
 const postgresUrl = process.env.TEST_DATABASE_URL;
 for (const driver of ["pglite", "postgres"] as const) {
@@ -228,6 +234,114 @@ for (const driver of ["pglite", "postgres"] as const) {
       await expect(services().database.asUser(actor, () => services().database.asAdmin(() => true))).rejects.toThrow("elevar privilegios");
       await expect(services().database.asUser(actor, () => services().database.asUser(foreign, () => true))).rejects.toThrow("cambiar actor");
       expect((await get("/products")).status).toBe(200);
+    });
+
+    it("la lectura conserva RLS, rechaza escrituras y restaura el rol tras errores", async () => {
+      const item = await product();
+      const database = services().database;
+      const hidden = await database.asReadUser(foreign, (db) => db.select().from(products).where(eq(products.id, item.id)));
+      expect(hidden).toHaveLength(0);
+      await expect(database.asReadUser(actor, (db) => db.update(products).set({ name: "Forbidden" }).where(eq(products.id, item.id)))).rejects.toThrow();
+      await expect(database.asReadUser(actor, () => database.asAdmin(() => true))).rejects.toThrow("elevar privilegios");
+      await expect(database.asReadUser(actor, () => database.asUser(foreign, () => true))).rejects.toThrow("cambiar actor");
+      const own = await database.asReadUser(actor, (db) => db.select().from(products).where(eq(products.id, item.id)));
+      expect(own[0].name).toBe(item.name);
+      const identity = await database.asAdmin((db) => db.execute(sql.raw("select current_user = session_user as restored")));
+      expect(identity.rows[0].restored).toBe(true);
+    });
+
+    it("el listado conserva total, filtros y páginas vacías con conteo integrado", async () => {
+      const item = await product();
+      const path = `/products?q=${encodeURIComponent(item.sku)}`;
+      const first = await get(path);
+      expect(first.status).toBe(200);
+      expect(first.body.total).toBe(1);
+      expect(first.body.data.map((entry: { id: string }) => entry.id)).toEqual([item.id]);
+      const outside = await get(`${path}&page=2&limit=1`);
+      expect(outside.status).toBe(200);
+      expect(outside.body.total).toBe(1);
+      expect(outside.body.data).toEqual([]);
+      const empty = await get(`/products?q=${crypto.randomUUID()}`);
+      expect(empty.body).toMatchObject({ data: [], total: 0 });
+    });
+
+    it.skipIf(driver !== "postgres")("un GET puede consultar mientras el taller tiene una escritura abierta", async () => {
+      const database = services().database;
+      let entered!: () => void;
+      let release!: () => void;
+      const ready = new Promise<void>((resolve) => { entered = resolve; });
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const writer = database.asUser(actor, async () => { entered(); await gate; });
+      await ready;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const response = await Promise.race([
+          get("/products"),
+          new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("GET esperó el mutex de escritura")), 2000); }),
+        ]);
+        expect(response.status).toBe(200);
+      } finally {
+        clearTimeout(timer);
+        release();
+        await writer;
+      }
+    });
+
+    it("clasifica artículos sin duplicarlos y respeta fabricar, comprar o ambos", async () => {
+      const created = [];
+      for (const mode of ["make", "buy", "both"]) {
+        const response = await post("/products", { sku: crypto.randomUUID(), name: `Article ${mode}`, itemClass: "finished_good", supplyMode: mode });
+        expect(response.status).toBe(201);
+        expect(response.body).toMatchObject({ itemClass: "finished_good", supplyMode: mode, productType: mode === "buy" ? "resale" : "finished_good" });
+        created.push(response.body);
+      }
+      const [make, buy, both] = created;
+      const manufactured = await get("/products?itemClass=finished_good&supplyMode=make&limit=100");
+      expect(manufactured.body.data.map((item: { id: string }) => item.id)).toEqual(expect.arrayContaining([make.id, both.id]));
+      expect(manufactured.body.data.map((item: { id: string }) => item.id)).not.toContain(buy.id);
+      const purchased = await get("/products?itemClass=finished_good&supplyMode=buy&limit=100");
+      expect(purchased.body.data.map((item: { id: string }) => item.id)).toEqual(expect.arrayContaining([buy.id, both.id]));
+      const vendor = await post("/vendors", { name: "Source vendor" });
+      const purchase = (productId: string) => post("/purchase-orders", { vendorId: vendor.body.id, locationId, lines: [{ productId, quantity: "1", unitCost: "1.00" }] });
+      expect((await purchase(make.id)).body.code).toBe("not_purchasable");
+      expect((await purchase(buy.id)).status).toBe(201);
+      expect((await purchase(both.id)).body.code).toBe("not_purchasable");
+      const component = await product();
+      const recipe = (productId: string) => post("/boms", { productId, lines: [{ componentProductId: component.id, quantity: "1" }] });
+      expect((await recipe(buy.id)).body.code).toBe("not_manufacturable");
+      expect((await recipe(make.id)).status).toBe(201);
+      expect((await recipe(both.id)).status).toBe(201);
+      const change = await request(app.getHttpServer()).patch(`/api/v1/products/${buy.id}`).set("Authorization", `Bearer ${token}`).send({ supplyMode: "make" });
+      expect(change.status).toBe(409);
+      expect(change.body.code).toBe("supply_in_use");
+    });
+
+    it("Prestado requiere unidades, registra salida y no las descuenta otra vez al embarcar", async () => {
+      const item = await product();
+      const customerOrder = await order();
+      const created = await post("/orders", { customerId: customerOrder.customerId, lines: [{ productId: item.id, quantity: "5", unitPrice: "1.00", description: item.name }] });
+      expect(created.status).toBe(201);
+      const current = (await get(`/orders/${created.body.id}`)).body;
+      const path = `/orders/${current.id}/lines/${current.lines[0].id}/resolution`;
+      expect((await post(`/orders/${current.id}/submit`, {})).status).toBe(201);
+      expect((await post(`/orders/${current.id}/confirm`, {})).status).toBe(201);
+      expect((await post(path, { resolution: "in_progress" })).status).toBe(201);
+      await post("/inventory/movements", { productId: item.id, locationId, kind: "receipt", quantity: "3", reason: "Stock parcial" });
+      expect((await post(`/orders/${current.id}/allocate`, {})).status).toBe(201);
+      const denied = await post(path, { resolution: "delivered" });
+      expect(denied.status).toBe(409);
+      expect(denied.body.code).toBe("insufficient_stock");
+      expect((await get(`/orders/${current.id}`)).body.lines[0].resolution).toBe("in_progress");
+      await post("/inventory/movements", { productId: item.id, locationId, kind: "receipt", quantity: "2", reason: "Completar stock" });
+      expect((await post(path, { resolution: "delivered" })).status).toBe(201);
+      expect((await post(path, { resolution: "rework" })).status).toBe(409);
+      expect((await post(path, { resolution: "accepted" })).status).toBe(201);
+      expect((await post(`/orders/${current.id}/ship`, { carrier: "Local" }, crypto.randomUUID())).status).toBe(201);
+      const ledger = await services().database.asUser(actor, (db) => db.select().from(stockLedgers).where(eq(stockLedgers.productId, item.id)));
+      expect(ledger.filter((entry: typeof stockLedgers.$inferSelect) => entry.kind === "issue")).toHaveLength(1);
+      const [balance] = await services().database.asUser(actor, (db) => db.select().from(stockBalances).where(eq(stockBalances.productId, item.id)));
+      expect(Number(balance.onHand)).toBe(0);
+      expect(Number(balance.allocated)).toBe(0);
     });
 
     it("el arranque rechaza migraciones faltantes y checksums modificados sin ejecutar DDL", async () => {

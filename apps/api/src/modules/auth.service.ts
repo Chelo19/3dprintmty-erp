@@ -107,6 +107,28 @@ export class AuthService {
       userId = user.id;
       email = user.email;
     }
+    // Camino habitual: cuenta y membresía actual en un solo viaje, sin cachear
+    // permisos ni repetir escrituras de aprovisionamiento en cada petición.
+    const [existing] = await this.database.asAdmin((db) => db.select({
+      email: userAccounts.email,
+      tenantId: tenantMemberships.tenantId,
+      role: tenantMemberships.role,
+      adminId: platformAdmins.userId,
+    }).from(userAccounts)
+      .leftJoin(tenantMemberships, eq(tenantMemberships.userId, userAccounts.id))
+      .leftJoin(platformAdmins, eq(platformAdmins.userId, userAccounts.id))
+      .where(eq(userAccounts.id, userId)).limit(1));
+    if (existing?.email === email) {
+      const allowedAdmin = platformAdminEmails().includes(email);
+      if (allowedAdmin && !existing.adminId) await this.ensurePlatformAdmin(userId, email);
+      return {
+        userId, email,
+        tenantId: existing.tenantId ?? null,
+        role: isTenantRole(existing.role) ? existing.role : null,
+        platformAdmin: allowedAdmin,
+        impersonator: null,
+      };
+    }
     await this.ensureAccount(userId, email);
     return this.sessionFor(userId, email);
   }

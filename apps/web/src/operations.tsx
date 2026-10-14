@@ -1,4 +1,9 @@
-import { Money, MX_STATES } from "@3dprintmty/domain";
+import { Modal } from "./modal";
+import { CollectionStatusBadge, COLLECTION_METHODS, COLLECTION_STATES, collectionMethodLabel, collectionDateLabel } from "./collection-ui";
+import { EmptyState } from "./empty-state";
+import { Notice } from "./notice";
+import { BackLink, BackButton } from "./back-control";
+import { canOverrideCredit, Money, MX_STATES } from "@3dprintmty/domain";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
@@ -8,7 +13,7 @@ import { useIdempotencyAttempt } from "./idempotency";
 import { CustomerSkeleton, DetailSkeleton, FormSkeleton, TableSkeleton } from "./skeleton";
 import { Paged } from "./pager";
 import { CostOnly, CostPriceFields, MarginValue } from "./margin";
-import { FilterBar, FilterSelect, NoMatches, StatusBadge, distinct, matchesStatus, matchesText, useFilters } from "./filters";
+import { FilterAutocomplete, FilterBar, FilterSelect, NoMatches, StatusBadge, distinct, matchesStatus, matchesText, useFilters } from "./filters";
 import { useCanWrite, useRole } from "./roles";
 
 export function money(value: string | null | undefined) {
@@ -69,9 +74,9 @@ export function FormActions({ children }: { children: ReactNode }) {
   return <div className="form-actions">{children}</div>;
 }
 
-export function SaveButton({ pending = false, label = "Guardar cambios", onClick }: { pending?: boolean; label?: string; onClick?: () => void }) {
+export function SaveButton({ pending = false, disabled = false, label = "Guardar cambios", onClick }: { pending?: boolean; disabled?: boolean; label?: string; onClick?: () => void }) {
   return (
-    <button className="primary" type={onClick ? "button" : "submit"} disabled={pending} aria-busy={pending} onClick={onClick}>
+    <button className="primary" type={onClick ? "button" : "submit"} disabled={pending || disabled} aria-busy={pending} onClick={onClick}>
       <SaveIcon />
       {label}
     </button>
@@ -172,7 +177,7 @@ export function CustomersPage() {
         <h1 style={{ margin: 0 }}>Clientes</h1>
         <NewLink to="/app/clientes/nuevo">Nuevo cliente</NewLink>
       </div>
-      {query.isPending ? <TableSkeleton columns={6} /> : !all.length ? <p>Todavía no hay clientes.</p> : (
+      {query.isPending ? <TableSkeleton columns={6} /> : query.isError ? <Notice tone="error" title="No se pudieron cargar los clientes" action={<button className="ghost" type="button" onClick={() => void query.refetch()}>Reintentar</button>}>Intenta nuevamente para consultar el catálogo.</Notice> : !all.length ? <EmptyState title="Sin clientes" to="/app/clientes/nuevo" actionLabel="Crear cliente">Agrega tu primer cliente para generar cotizaciones y pedidos.</EmptyState> : (
       <>
       <FilterBar
         search={values.q}
@@ -230,7 +235,7 @@ export function CustomerNewPage() {
   const { error, pendingKey, run } = useError();
   return (
     <section style={{ display: "grid", gap: 16 }}>
-      <p><Link to="/app/clientes">Clientes</Link></p>
+      <BackLink to="/app/clientes">Clientes</BackLink>
       <h1>Nuevo cliente</h1>
       <form
         className="card form-vertical"
@@ -300,7 +305,7 @@ export function ServicesPage() {
         <NewLink to="/app/servicios/nuevo">Nuevo servicio</NewLink>
       </div>
       <p>Diseño, impresión, acabado o entrega. El precio, la unidad y los términos se copian a la cotización.</p>
-      {services.isPending ? <TableSkeleton columns={9} /> : !all.length ? <p>Todavía no hay servicios.</p> : (
+      {services.isPending ? <TableSkeleton columns={9} /> : services.isError ? <Notice tone="error" title="No se pudieron cargar los servicios" action={<button className="ghost" type="button" onClick={() => void services.refetch()}>Reintentar</button>}>Intenta nuevamente para consultar el catálogo.</Notice> : !all.length ? <EmptyState title="Sin servicios" to="/app/servicios/nuevo" actionLabel="Crear servicio">Agrega los servicios que ofrece tu taller, con sus precios y condiciones.</EmptyState> : (
       <>
       <FilterBar
         search={values.q}
@@ -356,7 +361,7 @@ export function ServiceNewPage() {
   const { error, pendingKey, run } = useError();
   return (
     <section style={{ display: "grid", gap: 16 }}>
-      <p><Link to="/app/servicios">Servicios</Link></p>
+      <BackLink to="/app/servicios">Servicios</BackLink>
       <h1>Nuevo servicio</h1>
       <form
         className="card form-vertical"
@@ -415,7 +420,7 @@ export function CustomerDetailPage() {
   const data = customer.data;
   return (
     <section style={{ display: "grid", gap: 16 }}>
-      <p><Link to="/app/clientes">Clientes</Link></p>
+      <BackLink to="/app/clientes">Clientes</BackLink>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
         <h1 style={{ margin: 0 }}>{data.legalName}</h1>
         <EditLink to={`/app/clientes/${data.id}/editar`} />
@@ -436,7 +441,7 @@ export function CustomerDetailPage() {
         </article>
       </div>
       <div className="activity-columns">
-        <ActivityColumn title="Pagos" empty="Sin pagos.">
+        <ActivityColumn title="Pagos" empty="Sin pagos." to={data.orders.length ? "/app/cobranza/nuevo" : "/app/pedidos/nuevo"} actionLabel={data.orders.length ? "Registrar cobro" : "Crear pedido"}>
           {data.payments.map((payment) => (
             <ActivityRow
               key={payment.id}
@@ -446,7 +451,7 @@ export function CustomerDetailPage() {
             />
           ))}
         </ActivityColumn>
-        <ActivityColumn title="Pedidos" empty="Sin pedidos.">
+        <ActivityColumn title="Pedidos" empty="Sin pedidos." to="/app/pedidos/nuevo" actionLabel="Crear pedido">
           {data.orders.map((order) => (
             <ActivityRow
               key={order.id}
@@ -456,7 +461,7 @@ export function CustomerDetailPage() {
             />
           ))}
         </ActivityColumn>
-        <ActivityColumn title="Cotizaciones" empty="Sin cotizaciones.">
+        <ActivityColumn title="Cotizaciones" empty="Sin cotizaciones." to="/app/cotizaciones/nueva" actionLabel="Crear cotización">
           {data.quotes.map((quote) => (
             <ActivityRow
               key={quote.id}
@@ -485,7 +490,7 @@ export function CustomerEditPage() {
   const data = customer.data;
   return (
     <section style={{ display: "grid", gap: 16 }}>
-      <p><Link to={`/app/clientes/${id}`}>Cliente</Link></p>
+      <BackLink to={`/app/clientes/${id}`}>Cliente</BackLink>
       <h1>Editar cliente</h1>
       <form
         className="card form-vertical"
@@ -559,7 +564,7 @@ export function ServiceDetailPage() {
   const data = service.data;
   return (
     <section style={{ display: "grid", gap: 16 }}>
-      <p><Link to="/app/servicios">Servicios</Link></p>
+      <BackLink to="/app/servicios">Servicios</BackLink>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
         <h1 style={{ margin: 0 }}>{data.name}</h1>
         <EditLink to={`/app/servicios/${data.id}/editar`} />
@@ -589,7 +594,7 @@ export function ServiceEditPage() {
   const data = service.data;
   return (
     <section style={{ display: "grid", gap: 16 }}>
-      <p><Link to={`/app/servicios/${id}`}>Servicio</Link></p>
+      <BackLink to={`/app/servicios/${id}`}>Servicio</BackLink>
       <h1>Editar servicio</h1>
       <form
         className="card form-vertical"
@@ -661,7 +666,14 @@ export function QuotesPage() {
   const navigate = useNavigate();
   const { error, run } = useError();
   const [pendingId, setPendingId] = useState<string | null>(null);
+  const { values, set, reset, dirty } = useFilters({ q: "", estado: "", cliente: "" });
   const quotes = useQuery({ queryKey: ["quotes"], queryFn: () => api<{ data: Quote[] }>("/quotes") });
+  const all = quotes.data?.data ?? [];
+  const filtered = all.filter((row) =>
+    matchesText(values.q, row.folio, row.customerName) &&
+    (!values.estado || row.status === values.estado) &&
+    matchesText(values.cliente, row.customerName)
+  );
   async function act(id: string, action: () => Promise<void>) {
     if (pendingId) return;
     setPendingId(id);
@@ -678,8 +690,18 @@ export function QuotesPage() {
         <NewLink to="/app/cotizaciones/nueva">Nueva cotización</NewLink>
       </div>
       <p>Una cotización es de impresiones o de productos. Cada impresión lleva sus servicios y sus filamentos, en gramos. Vigencia de 30 días. Aceptada, se convierte en pedido.</p>
-      {quotes.isPending ? <TableSkeleton columns={5} /> : (
-      <Paged rows={quotes.data?.data ?? []}>
+      <FilterBar search={values.q} onSearch={(value) => set("q", value)} placeholder="Folio o cliente" dirty={dirty} onClear={reset}>
+        <FilterAutocomplete label="Cliente" value={values.cliente} onChange={(value) => set("cliente", value)} options={distinct(all.map((row) => row.customerName))} placeholder="Buscar cliente" />
+        <FilterSelect label="Estado" value={values.estado} onChange={(value) => set("estado", value)} options={Object.entries(QUOTE_STATUS).map(([value, label]) => ({ value, label }))} />
+      </FilterBar>
+      {quotes.isPending ? <TableSkeleton columns={5} /> : quotes.isError ? (
+        <Notice tone="error" title="No se pudieron cargar las cotizaciones" action={<button className="ghost" type="button" onClick={() => quotes.refetch()}>Reintentar</button>}>
+          {quotes.error.message}
+        </Notice>
+      ) : all.length === 0 ? (
+        <EmptyState title="Sin cotizaciones registradas" to="/app/cotizaciones/nueva" actionLabel="Nueva cotización">Crea una cotización para preparar una propuesta para tu cliente.</EmptyState>
+      ) : filtered.length === 0 ? <NoMatches onClear={reset} /> : (
+      <Paged key={JSON.stringify(values)} rows={filtered}>
       {(pageQuotes) => (
       <table>
         <thead><tr><th>Folio</th><th>Cliente</th><th>Estado</th><th>Total</th><th></th></tr></thead>
@@ -805,9 +827,18 @@ function OrderActionIcon({ to }: { to: string }) {
 
 export function OrdersPage() {
   const client = useQueryClient();
+  const { transition, creditAuthorization } = useOrderTransition(client);
   const { error, run } = useError();
   const [pendingId, setPendingId] = useState<string | null>(null);
+  const { values, set, reset, dirty } = useFilters({ q: "", estado: "", cliente: "", pago: "" });
   const orders = useQuery({ queryKey: ["orders"], queryFn: () => api<{ data: Order[] }>("/orders") });
+  const all = orders.data?.data ?? [];
+  const filtered = all.filter((row) =>
+    matchesText(values.q, row.folio, row.customerName) &&
+    (!values.estado || row.status === values.estado) &&
+    matchesText(values.cliente, row.customerName) &&
+    (!values.pago || row.paymentStatus === values.pago)
+  );
   async function act(id: string, action: () => Promise<void>) {
     if (pendingId) return;
     setPendingId(id);
@@ -824,8 +855,19 @@ export function OrdersPage() {
         <NewLink to="/app/pedidos/nuevo">Nuevo pedido</NewLink>
       </div>
       <p>El pedido nace de una cotización o se captura directo. Una impresión se cierra aquí, sin descontar filamento: el consumo real se resta en Inventario ▸ Filamentos. Producción solo fabrica productos con receta. El cobro y la entrega avanzan por separado.</p>
-      {orders.isPending ? <TableSkeleton columns={6} /> : (
-      <Paged rows={orders.data?.data ?? []}>
+      <FilterBar search={values.q} onSearch={(value) => set("q", value)} placeholder="Folio o cliente" dirty={dirty} onClear={reset}>
+        <FilterAutocomplete label="Cliente" value={values.cliente} onChange={(value) => set("cliente", value)} options={distinct(all.map((row) => row.customerName))} placeholder="Buscar cliente" />
+        <FilterSelect label="Estado" value={values.estado} onChange={(value) => set("estado", value)} options={Object.entries(ORDER_STATUS).map(([value, label]) => ({ value, label }))} />
+        <FilterSelect label="Estado del pago" value={values.pago} onChange={(value) => set("pago", value)} options={[{ value: "pending", label: "Pendiente" }, { value: "partial", label: "Parcial" }, { value: "paid", label: "Pagado" }]} />
+      </FilterBar>
+      {orders.isPending ? <TableSkeleton columns={6} /> : orders.isError ? (
+        <Notice tone="error" title="No se pudieron cargar los pedidos" action={<button className="ghost" type="button" onClick={() => orders.refetch()}>Reintentar</button>}>
+          {orders.error.message}
+        </Notice>
+      ) : all.length === 0 ? (
+        <EmptyState title="Sin pedidos registrados" to="/app/pedidos/nuevo" actionLabel="Nuevo pedido">Crea un pedido para comenzar el seguimiento de una venta.</EmptyState>
+      ) : filtered.length === 0 ? <NoMatches onClear={reset} /> : (
+      <Paged key={JSON.stringify(values)} rows={filtered}>
       {(pageOrders) => (
       <table>
         <thead><tr><th>Folio</th><th>Cliente</th><th>Avance</th><th>Estado</th><th>Saldo</th><th></th></tr></thead>
@@ -848,7 +890,7 @@ export function OrdersPage() {
                       tone={orderActionTone(step.to)}
                       pending={pendingId === order.id}
                       disabled={pendingId !== null}
-                      onClick={() => act(order.id, () => transitionOrder(client, order.id, step.to))}
+                      onClick={() => act(order.id, () => transition(order.id, step.to))}
                     >
                       <OrderActionIcon to={step.to} />
                     </IconAction>
@@ -863,6 +905,7 @@ export function OrdersPage() {
       )}
       </Paged>
       )}
+      {creditAuthorization}
       {error ? <p className="error">{error}</p> : null}
     </section>
   );
@@ -880,11 +923,11 @@ export function OrderNewPage() {
   const filamentCatalog = useQuery({ queryKey: ["filaments"], queryFn: () => api<{ data: CatalogItem[] }>("/filaments") });
   const services = useQuery({ queryKey: ["services"], queryFn: () => api<{ data: ServiceOffering[] }>("/services") });
   const filaments = filamentCatalog.data?.data ?? [];
-  const goods = (products.data?.data ?? []).filter((product) => product.productType === "component" || product.productType === "finished_good" || product.productType === "resale");
+  const goods = (products.data?.data ?? []).filter((product) => product.productType !== "service");
   const offerings = (services.data?.data ?? []).filter((service) => service.status === "active");
   return (
     <section style={{ display: "grid", gap: 16 }}>
-      <p><Link to="/app/pedidos">Pedidos</Link></p>
+      <BackLink to="/app/pedidos">Pedidos</BackLink>
       <h1>Nuevo pedido</h1>
       {customers.isPending || products.isPending || filamentCatalog.isPending || services.isPending ? <FormSkeleton fields={6} /> : (
       <DocumentForm
@@ -913,6 +956,7 @@ export function OrderNewPage() {
 export function OrderDetailPage() {
   const { id } = useParams();
   const client = useQueryClient();
+  const { transition, creditAuthorization } = useOrderTransition(client, id);
   const { error, run } = useError();
   const [pendingKey, setPendingKey] = useState<string | null>(null);
   const order = useQuery({
@@ -932,7 +976,7 @@ export function OrderDetailPage() {
   }
   return (
     <section style={{ display: "grid", gap: 16 }}>
-      <p><Link to="/app/pedidos">Pedidos</Link></p>
+      <BackLink to="/app/pedidos">Pedidos</BackLink>
       {order.isPending ? <DetailSkeleton /> : !data ? <p className="error">No se pudo cargar el pedido.</p> : (
         <>
           <OrderPanel
@@ -944,7 +988,8 @@ export function OrderDetailPage() {
               await client.invalidateQueries({ queryKey: ["order", id] });
             }}
           />
-          <OrderNextStep order={data} pendingKey={pendingKey} onAct={(to) => act("status", () => transitionOrder(client, data.id, to))} onPdf={() => act("pdf", () => download(`/orders/${data.id}/pdf`, `${data.folio}.pdf`))} onCancel={() => act("cancel", () => cancelOrder(client, data.id))} />
+          <OrderNextStep order={data} pendingKey={pendingKey} onAct={(to) => act("status", () => transition(data.id, to))} onPdf={() => act("pdf", () => download(`/orders/${data.id}/pdf`, `${data.folio}.pdf`))} onCancel={() => act("cancel", () => cancelOrder(client, data.id))} />
+          {creditAuthorization}
         </>
       )}
     </section>
@@ -1009,7 +1054,7 @@ function OrderLinesTable({
                   <div className={Number(line.onHand) <= 0 ? "stock-zero" : undefined}>Existencia {line.onHand} g</div>
                 ) : null}
                 {line.terms ? <div>{line.terms}</div> : null}
-                {showResolution && (line.lineKind === "service" || line.productType === "finished_good") ? (
+                {showResolution && (line.lineKind === "service" || line.lineKind === "product") ? (
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 6 }}>
                     {(RESOLUTION_NEXT[line.resolution] ?? []).map((step) => {
                       const key = `${line.id}:${step.to}`;
@@ -1034,7 +1079,7 @@ function OrderLinesTable({
               <td>{money(line.net)}</td>
               <td>{money(line.vat)}</td>
               <td>{money(line.total)}</td>
-              {showResolution ? <td>{line.lineKind === "service" || line.productType === "finished_good" ? <ResolutionBadge resolution={line.resolution} /> : "—"}</td> : null}
+              {showResolution ? <td>{line.lineKind === "service" || line.lineKind === "product" ? <ResolutionBadge resolution={line.resolution} /> : "—"}</td> : null}
             </tr>
           ))}
         </tbody>
@@ -1197,50 +1242,70 @@ export function CollectionsPage() {
   const [voidId, setVoidId] = useState<string | null>(null);
   const [reason, setReason] = useState("");
   const payments = useQuery({ queryKey: ["payments"], queryFn: () => api<{ data: Payment[] }>("/payments") });
+  const { values, set, reset, dirty } = useFilters({ q: "", estado: "", metodo: "", tipo: "" });
+  const all = payments.data?.data ?? [];
+  const rows = all.filter((payment) => matchesText(values.q, payment.folio, payment.reference, collectionMethodLabel(payment.method))
+    && (!values.estado || payment.status === values.estado)
+    && (!values.metodo || payment.method === values.metodo)
+    && (!values.tipo || (payment.kind ?? "payment") === values.tipo));
+  const selectedPayment = all.find((payment) => payment.id === voidId);
   return (
     <section style={{ display: "grid", gap: 16 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
-        <h1 style={{ margin: 0 }}>Cobranza</h1>
+      <div className="collection-heading">
+        <h1>Cobranza</h1>
         <NewLink to="/app/cobranza/nuevo">Registrar cobro</NewLink>
       </div>
-      <p>Efectivo, SPEI, tarjeta o contra entrega. El saldo sale del libro de pagos, no de una casilla.</p>
-      {payments.isPending ? <TableSkeleton columns={5} /> : (
-      <Paged rows={payments.data?.data ?? []}>
-      {(pagePayments) => (
-      <table>
-        <thead><tr><th>Pedido</th><th>Método</th><th>Estado</th><th>Importe</th><th>Referencia</th>{canManage ? <th>Acciones</th> : null}</tr></thead>
-        <tbody>
-          {pagePayments.map((payment) => (
-            <tr key={payment.id}>
-              <td>{payment.folio}</td>
-              <td>{payment.method}</td>
-              <td>{payment.status}</td>
-              <td>{money(payment.amount)}</td>
+      <p>Consulta los cobros y reembolsos de tus pedidos. Los cobros contra entrega permanecen pendientes hasta confirmar su recepción.</p>
+      {payments.isPending ? <TableSkeleton columns={canManage ? 8 : 7} /> : payments.isError ? (
+        <Notice title="No se pudo cargar la cobranza" tone="error" action={<button className="ghost" type="button" onClick={() => void payments.refetch()}>Reintentar</button>}>Intenta nuevamente para consultar los movimientos.</Notice>
+      ) : !all.length ? (
+        <EmptyState title="Sin cobros registrados" to="/app/cobranza/nuevo" actionLabel="Registrar cobro">Registra el primer cobro de un pedido para comenzar su seguimiento.</EmptyState>
+      ) : <>
+        <FilterBar search={values.q} onSearch={(value) => set("q", value)} placeholder="Pedido o referencia" dirty={dirty} onClear={reset}>
+          <FilterSelect label="Estado" value={values.estado} onChange={(value) => set("estado", value)} options={Object.entries(COLLECTION_STATES).map(([value, label]) => ({ value, label }))} />
+          <FilterSelect label="Método" value={values.metodo} onChange={(value) => set("metodo", value)} options={Object.entries(COLLECTION_METHODS).map(([value, label]) => ({ value, label }))} />
+          <FilterSelect label="Tipo" value={values.tipo} onChange={(value) => set("tipo", value)} options={[{ value: "payment", label: "Cobro" }, { value: "refund", label: "Reembolso" }]} />
+        </FilterBar>
+        {!rows.length ? <NoMatches onClear={reset} /> : <div className="scroll-x"><Paged rows={rows}>
+          {(pagePayments) => <table>
+            <thead><tr><th>Fecha</th><th>Pedido</th><th>Tipo</th><th>Método</th><th>Estado</th><th>Importe</th><th>Referencia</th>{canManage ? <th>Acciones</th> : null}</tr></thead>
+            <tbody>{pagePayments.map((payment) => <tr key={payment.id}>
+              <td className="collection-date">{collectionDateLabel(payment.createdAt)}</td>
+              <td>{payment.orderId ? <Link to={`/app/pedidos/${payment.orderId}`}>{payment.folio}</Link> : payment.folio}</td>
+              <td>{payment.kind === "refund" ? "Reembolso" : "Cobro"}</td>
+              <td>{collectionMethodLabel(payment.method)}</td>
+              <td><CollectionStatusBadge status={payment.status} /></td>
+              <td className="collection-amount">{money(payment.amount)}</td>
               <td>{payment.reference ?? "—"}</td>
-              {canManage ? <td>{payment.status === "pending" ? <button type="button" className="btn" onClick={() => { setVoidId(payment.id); setReason(""); }}>Anular pendiente</button> : null}</td> : null}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      )}
-      </Paged>
-      )}
-      {error ? <p className="error">{error}</p> : null}
-      {voidId ? <form className="card form-vertical" onSubmit={(event) => {
-        event.preventDefault();
-        void run(async () => {
-          await api(`/payments/${voidId}/void`, { method: "POST", body: JSON.stringify({ reason }) });
-          setVoidId(null);
-          await client.invalidateQueries({ queryKey: ["payments"] });
-          await client.invalidateQueries({ queryKey: ["orders"] });
-        }, "void");
-      }}>
-        <h2>Anular cobro pendiente</h2>
-        <p>La anulación conserva el historial. Para dinero recibido registra un reembolso.</p>
-        <label>Motivo<input value={reason} onChange={(event) => setReason(event.target.value)} minLength={3} maxLength={200} required /></label>
-        <SaveButton label="Anular pendiente" pending={pendingKey === "void"} />
-        <button type="button" className="btn" onClick={() => setVoidId(null)} disabled={pendingKey !== null}>Volver</button>
-      </form> : null}
+              {canManage ? <td><div className="record-actions">
+                {payment.orderId ? <ViewLink to={`/app/pedidos/${payment.orderId}`} /> : null}
+                {payment.status === "pending" ? <IconAction label="Anular pendiente" tone="delete" disabled={pendingKey !== null} onClick={() => { setVoidId(payment.id); setReason(""); }}><TrashIcon /></IconAction> : null}
+              </div></td> : null}
+            </tr>)}</tbody>
+          </table>}
+        </Paged></div>}
+      </>}
+      {error && !voidId ? <Notice title="No se pudo completar la acción" tone="error">{error}</Notice> : null}
+      {canManage && voidId ? <Modal title="Anular cobro pendiente" closeDisabled={pendingKey !== null} onClose={() => setVoidId(null)}>
+        <form className="form-vertical" onSubmit={(event) => {
+          event.preventDefault();
+          void run(async () => {
+            await api(`/payments/${voidId}/void`, { method: "POST", body: JSON.stringify({ reason }) });
+            setVoidId(null);
+            await client.invalidateQueries({ queryKey: ["payments"] });
+            await client.invalidateQueries({ queryKey: ["orders"] });
+          }, "void");
+        }}>
+          <p>{selectedPayment ? `${selectedPayment.folio} · ${money(selectedPayment.amount)} · ${collectionMethodLabel(selectedPayment.method)}` : "Cobro pendiente seleccionado"}</p>
+          <Notice title="La anulación conserva el historial">Solo se anula este cobro pendiente. Para dinero ya recibido, registra un reembolso.</Notice>
+          <label>Motivo<textarea value={reason} onChange={(event) => setReason(event.target.value)} minLength={3} maxLength={200} required disabled={pendingKey !== null} rows={3} placeholder="Explica por qué se anula este cobro" /></label>
+          {error ? <Notice title="No se pudo anular el cobro" tone="error">{error}</Notice> : null}
+          <FormActions>
+            <button className="danger" type="submit" disabled={pendingKey !== null} aria-busy={pendingKey === "void"}><TrashIcon />{pendingKey === "void" ? "Anulando…" : "Anular pendiente"}</button>
+            <BackButton onClick={() => setVoidId(null)} disabled={pendingKey !== null} />
+          </FormActions>
+        </form>
+      </Modal> : null}
     </section>
   );
 }
@@ -1251,13 +1316,17 @@ export function PaymentNewPage() {
   const navigate = useNavigate();
   const [params] = useSearchParams();
   const preset = params.get("pedido") ?? "";
+  const [orderId, setOrderId] = useState(preset);
   const { error, pendingKey, run } = useError();
   const orders = useQuery({ queryKey: ["orders"], queryFn: () => api<{ data: Order[] }>("/orders") });
+  const eligible = (orders.data?.data ?? []).filter((order) => order.status !== "draft" && order.status !== "cancelled");
+  const selected = eligible.find((order) => order.id === orderId) ?? eligible[0];
   return (
     <section style={{ display: "grid", gap: 16 }}>
-      <p><Link to="/app/cobranza">Cobranza</Link></p>
+      <BackLink to="/app/cobranza">Cobranza</BackLink>
       <h1>Registrar cobro</h1>
-      {orders.isPending ? <FormSkeleton fields={5} /> : (
+      <p>Selecciona el pedido y registra el importe recibido con su método y referencia.</p>
+      {orders.isPending ? <FormSkeleton fields={5} /> : orders.isError ? <Notice title="No se pudieron cargar los pedidos" tone="error" action={<button className="ghost" type="button" onClick={() => void orders.refetch()}>Reintentar</button>}>Intenta nuevamente antes de registrar el cobro.</Notice> : !eligible.length ? <EmptyState title="Sin pedidos disponibles para cobrar" to="/app/pedidos/nuevo" actionLabel="Crear pedido">Crea y confirma un pedido para registrar su cobro.</EmptyState> : (
       <form
         className="card form-vertical"
         onSubmit={(event) => {
@@ -1274,14 +1343,20 @@ export function PaymentNewPage() {
             await client.invalidateQueries({ queryKey: ["orders"] });
             await client.invalidateQueries({ queryKey: ["order", data.get("orderId")] });
             await client.invalidateQueries({ queryKey: ["dashboard"] });
-            navigate(preset ? `/app/pedidos/${preset}` : "/app/cobranza");
+            navigate(preset ? `/app/pedidos/${String(data.get("orderId"))}` : "/app/cobranza");
           });
         }}
       >
+        {selected ? <div className="collection-order-summary">
+          <div><span>Pedido seleccionado</span><strong>{selected.folio}</strong><small>{selected.customerName}</small></div>
+          <div><span>Saldo pendiente</span><strong>{money(selected.amountDue)}</strong></div>
+          <ViewLink to={`/app/pedidos/${selected.id}`} />
+        </div> : null}
+        <fieldset className="collection-form-fields" disabled={pendingKey !== null}>
         <label>
           Pedido
-          <select name="orderId" required defaultValue={preset}>
-            {(orders.data?.data ?? []).filter((order) => order.status !== "draft" && order.status !== "cancelled").map((order) => (
+          <select name="orderId" required value={selected?.id ?? ""} onChange={(event) => setOrderId(event.target.value)}>
+            {eligible.map((order) => (
               <option key={order.id} value={order.id}>{order.folio} · saldo {money(order.amountDue)}</option>
             ))}
           </select>
@@ -1295,12 +1370,14 @@ export function PaymentNewPage() {
             <option value="cod">Contra entrega</option>
           </select>
         </label>
-        <label>Importe<input name="amount" required placeholder="100.00" defaultValue={preset ? (orders.data?.data ?? []).find((order) => order.id === preset)?.amountDue ?? undefined : undefined} /></label>
+        <label>Importe recibido<input key={selected?.id} name="amount" required inputMode="decimal" placeholder="100.00" defaultValue={selected?.id === preset ? selected.amountDue ?? undefined : undefined} /></label>
         <label>Referencia<input name="reference" placeholder="Folio bancario" /></label>
-        <label>Nota<input name="note" /></label>
+        <label className="collection-field-wide">Nota<textarea name="note" rows={2} placeholder="Información adicional del cobro" /></label>
+        </fieldset>
+        <Notice title="Cobro contra entrega">Si seleccionas contra entrega, el cobro queda pendiente hasta confirmar su recepción.</Notice>
+        {error ? <Notice title="No se pudo registrar el cobro" tone="error">{error}</Notice> : null}
         <FormActions>
           <SaveButton pending={pendingKey !== null} label="Guardar cobro" />
-          {error ? <p className="error">{error}</p> : null}
         </FormActions>
       </form>
       )}
@@ -1320,11 +1397,11 @@ export function QuoteNewPage() {
   const filamentCatalog = useQuery({ queryKey: ["filaments"], queryFn: () => api<{ data: CatalogItem[] }>("/filaments") });
   const services = useQuery({ queryKey: ["services"], queryFn: () => api<{ data: ServiceOffering[] }>("/services") });
   const filaments = filamentCatalog.data?.data ?? [];
-  const goods = (products.data?.data ?? []).filter((product) => product.productType === "component" || product.productType === "finished_good" || product.productType === "resale");
+  const goods = (products.data?.data ?? []).filter((product) => product.productType !== "service");
   const offerings = (services.data?.data ?? []).filter((service) => service.status === "active");
   return (
     <section style={{ display: "grid", gap: 16 }}>
-      <p><Link to="/app/cotizaciones">Cotizaciones</Link></p>
+      <BackLink to="/app/cotizaciones">Cotizaciones</BackLink>
       <h1>Nueva cotización</h1>
       {customers.isPending || products.isPending || filamentCatalog.isPending || services.isPending ? <FormSkeleton fields={6} /> : (
       <QuoteBuilder
@@ -1365,13 +1442,13 @@ export function QuoteEditPage() {
   const filamentCatalog = useQuery({ queryKey: ["filaments"], queryFn: () => api<{ data: CatalogItem[] }>("/filaments") });
   const services = useQuery({ queryKey: ["services"], queryFn: () => api<{ data: ServiceOffering[] }>("/services") });
   const filaments = filamentCatalog.data?.data ?? [];
-  const goods = (products.data?.data ?? []).filter((product) => product.productType === "component" || product.productType === "finished_good" || product.productType === "resale");
+  const goods = (products.data?.data ?? []).filter((product) => product.productType !== "service");
   const offerings = (services.data?.data ?? []).filter((service) => service.status === "active");
   const data = quote.data;
   const loading = quote.isPending || customers.isPending || products.isPending || filamentCatalog.isPending || services.isPending;
   return (
     <section style={{ display: "grid", gap: 16 }}>
-      <p><Link to={data ? `/app/cotizaciones/${data.id}` : "/app/cotizaciones"}>Cotización</Link></p>
+      <BackLink to={data ? `/app/cotizaciones/${data.id}` : "/app/cotizaciones"}>Cotización</BackLink>
       <h1>Editar {data?.folio ?? "cotización"}</h1>
       {loading ? <FormSkeleton fields={6} /> : !data ? <p className="error">No se pudo cargar la cotización.</p> : data.status !== "draft" ? (
         <p className="error">Solo se edita una cotización en borrador.</p>
@@ -1413,7 +1490,7 @@ export function QuoteDetailPage() {
   const data = quote.data;
   return (
     <section style={{ display: "grid", gap: 16 }}>
-      <p><Link to="/app/cotizaciones">Cotizaciones</Link></p>
+      <BackLink to="/app/cotizaciones">Cotizaciones</BackLink>
       {quote.isPending ? <DetailSkeleton /> : !data ? <p className="error">No se pudo cargar la cotización.</p> : (
         <>
           <article className="card" style={{ display: "grid", gap: 12 }}>
@@ -2478,9 +2555,9 @@ async function cancelOrder(client: ReturnType<typeof useQueryClient>, id: string
   await client.invalidateQueries({ queryKey: ["dashboard"] });
 }
 
-async function transitionOrder(client: ReturnType<typeof useQueryClient>, id: string, to: string) {
+async function transitionOrder(client: ReturnType<typeof useQueryClient>, id: string, to: string, creditOverrideReason?: string) {
   if (to === "pending") await api(`/orders/${id}/submit`, { method: "POST" });
-  else if (to === "confirmed") await api(`/orders/${id}/confirm`, { method: "POST", body: "{}" });
+  else if (to === "confirmed") await api(`/orders/${id}/confirm`, { method: "POST", body: JSON.stringify({ creditOverrideReason }) });
   else if (to === "shipped") {
     await api(`/orders/${id}/ship`, {
       method: "POST",
@@ -2492,6 +2569,50 @@ async function transitionOrder(client: ReturnType<typeof useQueryClient>, id: st
   await client.invalidateQueries({ queryKey: ["orders"] });
   await client.invalidateQueries({ queryKey: ["order", id] });
   await client.invalidateQueries({ queryKey: ["dashboard"] });
+}
+
+function useOrderTransition(client: ReturnType<typeof useQueryClient>, currentOrderId?: string) {
+  const role = useRole();
+  const [blockedId, setBlockedId] = useState<string | null>(null);
+  const [reason, setReason] = useState("");
+  const [error, setError] = useState("");
+  const [pending, setPending] = useState(false);
+  useEffect(() => { setBlockedId(null); setReason(""); setError(""); }, [currentOrderId]);
+  async function transition(id: string, to: string) {
+    try { await transitionOrder(client, id, to); }
+    catch (failure) {
+      if (to !== "confirmed" || !(failure instanceof ApiError) || failure.code !== "credit_limit" || !role || !canOverrideCredit(role)) throw failure;
+      setBlockedId(id);
+      setReason("");
+      setError("");
+    }
+  }
+  const creditAuthorization = blockedId ? (
+    <section className="card" aria-label="Autorización de crédito">
+      <h2>El pedido supera el crédito disponible</h2>
+      <p>Puedes autorizar una excepción. El motivo y tu usuario quedarán registrados en la auditoría.</p>
+      <form onSubmit={async (event) => {
+        event.preventDefault();
+        if (pending) return;
+        if (reason.trim().length < 3) { setError("Escribe un motivo de al menos 3 caracteres."); return; }
+        setPending(true);
+        setError("");
+        try {
+          await transitionOrder(client, blockedId, "confirmed", reason.trim());
+          setBlockedId(null);
+        } catch (failure) { setError(failure instanceof Error ? failure.message : "No se pudo autorizar el pedido."); }
+        finally { setPending(false); }
+      }}>
+        <label>Motivo de autorización<textarea value={reason} onChange={(event) => setReason(event.target.value)} minLength={3} maxLength={180} required disabled={pending} /></label>
+        <FormActions>
+          <SaveButton pending={pending} label="Autorizar y confirmar" />
+          <button className="ghost" type="button" disabled={pending} onClick={() => setBlockedId(null)}>Cancelar</button>
+          {error ? <p className="error" role="alert">{error}</p> : null}
+        </FormActions>
+      </form>
+    </section>
+  ) : null;
+  return { transition, creditAuthorization };
 }
 
 const NEXT_ACTION: Record<string, "submit" | "confirm" | "ship" | "deliver" | "complete"> = {
@@ -2602,12 +2723,12 @@ interface CustomerDetail extends Customer {
   payments: Array<{ id: string; orderId: string; folio: string; method: string; status: string; amount: string | null; reference: string | null }>;
 }
 
-function ActivityColumn({ title, empty, children }: { title: string; empty: string; children: ReactNode }) {
+function ActivityColumn({ title, empty, children, to, actionLabel }: { title: string; empty: string; children: ReactNode; to: string; actionLabel: string }) {
   const items = Array.isArray(children) ? children : children ? [children] : [];
   return (
     <article className="card" style={{ display: "grid", gap: 4, alignContent: "start" }}>
       <h2 style={{ margin: "0 0 8px" }}>{title}</h2>
-      {items.length ? children : <p style={{ margin: 0, color: "var(--color-muted)" }}>{empty}</p>}
+      {items.length ? children : <EmptyState title="Sin registros" to={to} actionLabel={actionLabel}>{empty}</EmptyState>}
     </article>
   );
 }
@@ -2830,6 +2951,9 @@ interface OrderDetail extends Order, PaymentConditionsData {
 
 interface Payment {
   id: string;
+  createdAt?: string;
+  orderId?: string;
+  kind?: "payment" | "refund";
   folio: string;
   method: string;
   status: string;

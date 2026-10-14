@@ -47,6 +47,7 @@ import {
   assertCredit,
   assertPendingPaymentsFit,
   dueMinor,
+  effectiveQty,
   globalDiscountMinor,
   loadOrder,
   loadOrderLines,
@@ -605,7 +606,7 @@ export class OrdersController {
       }
       if (line.lineKind === "product" && line.productId) {
         const [product] = await db.select({ productType: products.productType }).from(products).where(eq(products.id, line.productId)).limit(1);
-        if (product?.productType !== "finished_good") {
+        if (!product || product.productType === "service") {
           throw new AppError("not_a_service", "Solo las impresiones, los servicios y los productos terminados se marcan como prestados.", 409);
         }
       } else if (line.lineKind !== "service") {
@@ -613,6 +614,31 @@ export class OrdersController {
       }
       const next = transitionServiceResolution(line.resolution as ServiceResolution, input.resolution);
       if (!next.ok) throw next.error;
+      if (line.lineKind === "product" && line.productId) {
+        const issued = qtyFromDb(line.shippedQty);
+        if (issued > 0n && !["delivered", "accepted"].includes(next.value)) {
+          throw new AppError("stock_return_required", "Ya se entregaron unidades. Registra su devolución antes de cambiar la resolución.", 409);
+        }
+        if (["delivered", "accepted"].includes(next.value)) {
+          if (!["confirmed", "in_production", "ready_to_ship", "shipped", "delivered"].includes(order.status)) throw new AppError("order_action_blocked", "Confirma el pedido antes de entregar unidades.", 409);
+          const remaining = effectiveQty(line) - issued;
+          if (remaining > 0n) {
+            const reserved = qtyFromDb(line.reservedQty);
+            const release = reserved < remaining ? reserved : remaining;
+            const locationId = await orderLocation(db, order);
+            const [balance] = await db.select().from(stockBalances).where(and(eq(stockBalances.productId, line.productId), eq(stockBalances.locationId, locationId))).limit(1);
+            const available = qtyFromDb(balance?.onHand ?? "0") - qtyFromDb(balance?.allocated ?? "0") + release;
+            if (available < remaining) throw new AppError("insufficient_stock", "No hay suficientes unidades disponibles para entregar esta partida.", 409);
+            await postStock(db, tenant, {
+              productId: line.productId, locationId,
+              kind: "issue", delta: -remaining, releaseAllocated: release, allowNegative: false,
+              reason: `Entrega de ${line.description} en ${order.folio}`,
+              reference: { type: "sales_order", id: order.id },
+            });
+            await db.update(salesOrderLines).set({ shippedQty: formatQty(issued + remaining), reservedQty: formatQty(reserved - release) }).where(eq(salesOrderLines.id, line.id));
+          }
+        }
+      }
       await db
         .update(salesOrderLines)
         .set({ resolution: next.value, resolutionNote: input.note ?? line.resolutionNote })
@@ -622,6 +648,7 @@ export class OrdersController {
         to: next.value,
         note: input.note ?? line.description,
       });
+      if (line.lineKind === "product") await syncOrderState(db, tenant, order.id);
       return orderDetail(db, tenant, order.id);
     });
   }

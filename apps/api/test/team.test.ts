@@ -1,10 +1,16 @@
 import "reflect-metadata";
 import type { INestApplication } from "@nestjs/common";
 import request from "supertest";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { vi, afterAll, beforeAll, describe, expect, it } from "vitest";
 import { sql } from "drizzle-orm";
 import { services } from "../src/container";
 import { createApp } from "../src/main";
+
+// Conserva cobertura del módulo para cuando se reactive; el despliegue usa FEATURES.prefacturas=false.
+vi.mock("@3dprintmty/domain", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@3dprintmty/domain")>();
+  return { ...actual, FEATURES: { ...actual.FEATURES, prefacturas: true } };
+});
 
 process.env.VITEST = "1";
 delete process.env.DATABASE_URL;
@@ -104,7 +110,7 @@ describe("equipo — invitaciones, roles y bajas", () => {
     expect(linked.status).toBe(201);
     expect((await owner.post(`/orders/${linked.body.id}/submit`, {})).status).toBe(201);
     const linkedLine = (await owner.get(`/orders/${linked.body.id}`)).body.lines[0].id;
-    for (const resolution of ["in_progress", "delivered"]) expect((await owner.post(`/orders/${linked.body.id}/lines/${linkedLine}/resolution`, { resolution })).status).toBe(201);
+    expect((await owner.post(`/orders/${linked.body.id}/lines/${linkedLine}/resolution`, { resolution: "in_progress" })).status).toBe(201);
     expect((await owner.post(`/orders/${linked.body.id}/confirm`, {})).status).toBe(201);
     const production = await operator.post(`/production-orders/from-sales-order/${linked.body.id}`, {});
     expect(production.status, JSON.stringify(production.body)).toBe(201);

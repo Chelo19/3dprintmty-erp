@@ -1,3 +1,4 @@
+import { canPurchase } from "@3dprintmty/domain";
 import { Body, Controller, Get, Headers, Param, Patch, Post, Query } from "@nestjs/common";
 import {
   assertRfc,
@@ -191,9 +192,12 @@ export class PurchasingController {
     const tenant = requireTenant(actor);
     const seeMoney = canReadSalePrice(tenant.role);
     const data = await this.database.asUser(tenant, async (db) => {
-      const rows = await db.select().from(expenses).orderBy(desc(expenses.occurredOn), desc(expenses.createdAt));
-      const payments = await paymentsByExpense(db, rows.map((row: ExpenseRow) => row.id));
-      return rows.map((row: ExpenseRow) => presentExpense(row, payments.get(row.id) ?? [], seeMoney));
+      const rows = await db.select({ expense: expenses, itemClass: products.itemClass, supplyMode: products.supplyMode })
+        .from(expenses).leftJoin(products, eq(products.id, expenses.productId))
+        .orderBy(desc(expenses.occurredOn), desc(expenses.createdAt));
+      const payments = await paymentsByExpense(db, rows.map((row: { expense: ExpenseRow }) => row.expense.id));
+      return rows.map((row: { expense: ExpenseRow; itemClass: string | null; supplyMode: string | null }) =>
+        presentExpense(row.expense, payments.get(row.expense.id) ?? [], seeMoney, row));
     });
     return { data };
   }
@@ -205,7 +209,10 @@ export class PurchasingController {
     return this.database.asUser(tenant, async (db) => {
       const expense = await one(db, expenses, expenses.id, id, "No encontramos ese gasto.");
       const payments = await paymentsByExpense(db, [expense.id]);
-      return { ...presentExpense(expense, payments.get(expense.id) ?? [], seeMoney), payments: presentPayments(payments.get(expense.id) ?? [], seeMoney) };
+      const [classification] = expense.productId
+        ? await db.select({ itemClass: products.itemClass, supplyMode: products.supplyMode }).from(products).where(eq(products.id, expense.productId)).limit(1)
+        : [];
+      return { ...presentExpense(expense, payments.get(expense.id) ?? [], seeMoney, classification), payments: presentPayments(payments.get(expense.id) ?? [], seeMoney) };
     });
   }
 
@@ -666,7 +673,7 @@ async function loadPurchaseOrder(db: Db, id: string) {
   const history = await db.select().from(receipts).where(eq(receipts.purchaseOrderId, order.id)).orderBy(desc(receipts.createdAt));
   const mapped = [];
   for (const line of lines as LineRow[]) {
-    const item = await purchasedItem(db, (line.filamentId ?? line.productId) as string);
+    const item = await purchasedItem(db, (line.filamentId ?? line.productId) as string, false);
     mapped.push({
       id: line.id,
       productId: item.id,
@@ -804,13 +811,15 @@ function presentPayments(rows: ExpensePaymentRow[], seeMoney: boolean) {
   }));
 }
 
-function presentExpense(row: ExpenseRow, payments: ExpensePaymentRow[], seeMoney: boolean) {
+function presentExpense(row: ExpenseRow, payments: ExpensePaymentRow[], seeMoney: boolean, classification?: { itemClass: string | null; supplyMode: string | null }) {
   const amountMinor = BigInt(row.amountMinor);
   const paidMinor = payments.reduce((sum, payment) => sum + BigInt(payment.amountMinor), 0n);
   return {
     id: row.id,
     folio: row.folio,
     kind: row.kind,
+    itemClass: classification?.itemClass ?? null,
+    supplyMode: classification?.supplyMode ?? null,
     description: row.description,
     quantity: formatQty(qtyFromDb(row.quantity)),
     occurredOn: row.occurredOn,
@@ -885,7 +894,7 @@ async function insertExpense(
   return { ...presentExpense(row, payments, true), payments: presentPayments(payments, true) };
 }
 
-async function purchasedItem(db: Db, id: string) {
+async function purchasedItem(db: Db, id: string, requirePurchasable = true) {
   const [filament] = await db.select().from(filaments).where(eq(filaments.id, id)).limit(1);
   if (filament) {
     return {
@@ -901,6 +910,7 @@ async function purchasedItem(db: Db, id: string) {
     };
   }
   const product = await one(db, products, products.id, id, "No encontramos ese producto.");
+  if (requirePurchasable && !canPurchase(product)) throw new AppError("not_purchasable", "No se pueden comprar productos con fabricación habilitada. Compra un producto de reventa o un insumo con compra habilitada.", 409);
   return {
     id: product.id as string,
     kind: "product" as const,

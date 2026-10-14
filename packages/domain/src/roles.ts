@@ -1,3 +1,5 @@
+import { FEATURES } from "./features";
+
 export const TENANT_ROLES = [
   "owner",
   "admin",
@@ -89,8 +91,8 @@ export const ROLE_LABELS: Record<TenantRole, string> = {
 export const ROLE_DESCRIPTIONS: Record<TenantRole, string> = {
   owner: "Todo el taller, incluidos los datos fiscales y la configuración de calidad.",
   admin: "Todo el día a día: ventas, catálogo, inventario, compras, producción y equipo. No cambia los datos fiscales.",
-  sales: "Clientes, cotizaciones, pedidos, cobranza, prefacturas, servicios y consulta del catálogo.",
-  operator: "Atiende el taller: registra clientes, cobros, cotizaciones y pedidos, sin editar registros. Opera inventario y fabricación y emite prefacturas sin cancelarlas. Consulta catálogos y recetas sin costos ni márgenes.",
+  sales: `Clientes, cotizaciones, pedidos, cobranza, ${FEATURES.prefacturas ? "prefacturas, " : ""}servicios y consulta del catálogo.`,
+  operator: `Atiende el taller: registra clientes, cobros, cotizaciones y pedidos, sin editar registros. Opera inventario y fabricación${FEATURES.prefacturas ? " y emite prefacturas sin cancelarlas" : ""}. Consulta catálogos y recetas sin costos ni márgenes.`,
   production: "Producción, recetas, consulta del catálogo e inventario y consumo de filamento. No ve precios de venta.",
   warehouse: "Catálogo de productos, insumos y filamentos, inventario, compras, sucursales y embarques.",
   viewer: "Consulta los módulos operativos sin modificar nada. Puede descargar el paquete del contador. Sin acceso al equipo ni a la configuración.",
@@ -148,6 +150,7 @@ export function moduleForPath(path: string): AppModule | null {
 }
 
 export function canAccessPath(role: TenantRole | null, path: string): boolean {
+  if (!FEATURES.prefacturas && path.split("/")[2] === "prefacturas") return false;
   if (role === "operator" && ["costeo"].includes(path.split("/")[2] ?? "")) return false;
   const module = moduleForPath(path);
   return module !== null && canAccessModule(role, module);

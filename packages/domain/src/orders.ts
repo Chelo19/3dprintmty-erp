@@ -137,6 +137,8 @@ export interface OrderContext {
   servicesOpen: boolean;
   /** Cada impresión y cada producto terminado ya está prestado o aceptado. */
   articlesPrestados: boolean;
+  /** Salidas físicas ya registradas; requieren devolución antes de editar/cancelar. */
+  hasIssuedStock?: boolean;
 }
 
 const SALES: readonly TenantRole[] = ["owner", "admin", "sales"];
@@ -178,9 +180,9 @@ export function orderActions(context: OrderContext): OrderActionState[] {
   add("submit", SALES, [[state === "draft", stateReason]]);
   add("confirm", SALES, [
     [state === "pending", state === "draft" ? "Primero pásalo a pendiente." : stateReason],
-    [context.articlesPrestados, "Marca como prestadas las impresiones y los productos terminados antes de confirmar."],
   ]);
   add("edit", SALES, [
+    [!context.hasIssuedStock, "Ya se entregaron artículos. Registra su devolución antes de editar."],
     [inState(["draft", "pending", "confirmed", "ready_to_ship", "on_hold"]), stateReason],
     [!context.openProduction, "Ya hay una orden de producción para este pedido."],
     [!context.activePrefactura, "Cancela la prefactura antes de cambiar el pedido."],
@@ -224,6 +226,7 @@ export function orderActions(context: OrderContext): OrderActionState[] {
     [!context.activePrefactura, "Cancela la prefactura antes de cambiar el pedido."],
   ]);
   add("cancel", SALES, [
+    [!context.hasIssuedStock, "Ya se entregaron artículos. Registra su devolución antes de cancelar."],
     [LIVE.includes(state), stateReason],
     [!context.openProduction, openProductionReason(context)],
     [!context.activePrefactura, "Cancela la prefactura antes de cancelar el pedido."],

@@ -1,3 +1,4 @@
+import { canManufacture } from "@3dprintmty/domain";
 import { Body, Controller, Get, Param, Patch, Post } from "@nestjs/common";
 import {
   createsBomCycle,
@@ -296,8 +297,8 @@ export class ManufacturingController {
 
 async function writeBom(db: Db, tenant: TenantActor, productId: string, lines: BomLine[], notes: string | null) {
   const product = await one(db, products, products.id, productId, "No encontramos ese producto.");
-  if (product.productType !== "finished_good") {
-    throw new AppError("not_manufacturable", "Solo los productos terminados llevan receta. Los insumos se compran.", 409);
+  if (!canManufacture(product)) {
+    throw new AppError("not_manufacturable", "Las recetas son para artículos configurados para fabricar.", 409);
   }
   const ids = lines.map((line) => line.componentId);
   if (new Set(ids).size !== ids.length) {
