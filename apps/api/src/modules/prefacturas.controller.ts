@@ -1,3 +1,4 @@
+import { loadCompanyProfile } from "./company-profile";
 import { WritableGet } from "../http/read-transaction.interceptor";
 import { Body, Controller, Get, Headers, Param, Post, Query, StreamableFile } from "@nestjs/common";
 import { canIssuePrefactura, formatQty, isValidRfc, Money, qtyFromDb, type SalesOrderState } from "@3dprintmty/domain";
@@ -11,7 +12,6 @@ import {
   auditEvents,
   commercialDocumentLines,
   commercialDocuments,
-  companyProfiles,
   customerAddresses,
   customers,
   payments,
@@ -155,7 +155,7 @@ export class PrefacturasController {
     const start = new Date(`${input.from}T00:00:00-06:00`);
     const end = new Date(new Date(`${input.to}T00:00:00-06:00`).getTime() + 24 * 60 * 60 * 1000);
     const data = await this.database.asUser(tenant, async (db) => {
-      const [company] = await db.select().from(companyProfiles).limit(1);
+      const company = await loadCompanyProfile(db);
       const documents = await db
         .select()
         .from(commercialDocuments)
@@ -282,7 +282,7 @@ async function buildPrefactura(db: Db, salesOrderId: string) {
   if (active) {
     throw new AppError("prefactura_exists", "Ese pedido ya tiene una prefactura vigente. Cancélala para emitir otra.", 409);
   }
-  const [company] = await db.select().from(companyProfiles).limit(1);
+  const company = await loadCompanyProfile(db);
   if (!company) throw new AppError("company_required", "Completa los datos de la empresa.", 409);
   const customer = await one(db, customers, customers.id, order.customerId, "No encontramos al cliente.");
   const [fiscal] = await db

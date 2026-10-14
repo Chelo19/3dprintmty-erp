@@ -4,7 +4,7 @@ import { AppError } from "@3dprintmty/shared";
 import { eq, sql } from "drizzle-orm";
 import { SignJWT, createRemoteJWKSet, decodeProtectedHeader, jwtVerify, type JWTPayload } from "jose";
 import { DatabaseService } from "../db/database.service";
-import { platformAdmins, platformAuditLog, tenantMemberships, userAccounts } from "../db/schema";
+import { idempotencyRequests, platformAdmins, platformAuditLog, tenantMemberships, userAccounts } from "../db/schema";
 import type { Actor } from "../http/actor";
 
 interface TokenInput {
@@ -173,7 +173,8 @@ export class AuthService {
         });
         await tx.update(platformAdmins).set({ userId }).where(eq(platformAdmins.userId, byEmail.id));
         await tx.update(tenantMemberships).set({ userId }).where(eq(tenantMemberships.userId, byEmail.id));
-        await tx.execute(sql`update idempotency_keys set user_id = ${userId}::uuid where user_id = ${byEmail.id}::uuid`);
+        await tx.execute(sql`update erp_archive.idempotency_keys set user_id = ${userId}::uuid where user_id = ${byEmail.id}::uuid`);
+        await tx.update(idempotencyRequests).set({ userId }).where(eq(idempotencyRequests.userId, byEmail.id));
         await tx.delete(userAccounts).where(eq(userAccounts.id, byEmail.id));
         await tx.update(userAccounts).set({ email }).where(eq(userAccounts.id, userId));
       });

@@ -8,3 +8,5 @@ dist/
 coverage/
 .vite/
 supabase/.temp/
+
+.backups/

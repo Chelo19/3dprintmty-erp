@@ -11,13 +11,13 @@ import { AppError } from "@3dprintmty/shared";
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { services } from "../container";
+import { loadCompanyProfile } from "./company-profile";
 import {
   auditEvents,
   companyProfiles,
   locations,
   paymentMethodSettings,
   taxRates,
-  tenants,
 } from "../db/schema";
 import { assertRole, CurrentUser, requireTenant, type Actor } from "../http/actor";
 
@@ -50,8 +50,8 @@ export class SettingsController {
   @Get("company")
   async company(@CurrentUser() actor: Actor) {
     const tenant = requireTenant(actor);
-    const [profile] = await this.database.asUser(tenant, (db) =>
-      db.select().from(companyProfiles).limit(1),
+    const profile = await this.database.asUser(tenant, (db) =>
+      loadCompanyProfile(db),
     );
     if (!profile) throw new AppError("not_found", "No encontramos la empresa.", 404);
     return {
@@ -79,15 +79,15 @@ export class SettingsController {
       rfc,
       taxRegime: assertTaxRegime(input.taxRegime),
       fiscalPostalCode: assertPostalCode(input.fiscalPostalCode),
-      defaultVatRate: Number(input.vatRate).toFixed(4),
     };
     await this.database.asUser(tenant, async (db) => {
+      const profile = await loadCompanyProfile(db);
+      if (!profile) throw new AppError("not_found", "No encontramos la empresa.", 404);
       await db.update(companyProfiles).set(next).where(eq(companyProfiles.tenantId, tenant.tenantId));
-      await db.update(tenants).set({ rfc }).where(eq(tenants.id, tenant.tenantId));
       await db
         .update(taxRates)
-        .set({ rate: next.defaultVatRate })
-        .where(and(eq(taxRates.tenantId, tenant.tenantId), eq(taxRates.isDefault, true)));
+        .set({ rate: Number(input.vatRate).toFixed(4) })
+        .where(and(eq(taxRates.tenantId, tenant.tenantId), eq(taxRates.id, profile.defaultTaxRateId)));
       await db.insert(auditEvents).values({
         tenantId: tenant.tenantId,
         actorUserId: tenant.userId,

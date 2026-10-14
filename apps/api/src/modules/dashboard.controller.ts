@@ -1,3 +1,4 @@
+import { loadCompanyProfile } from "./company-profile";
 import { Controller, Get } from "@nestjs/common";
 import {
   canReadSalePrice,
@@ -12,7 +13,6 @@ import { amountDue } from "@3dprintmty/payments";
 import { services } from "../container";
 import {
   commercialDocuments,
-  companyProfiles,
   expensePayments,
   expenses,
   payments,
@@ -67,7 +67,7 @@ export class DashboardController {
     const monthKeys = recentMonths(today, 6);
     const thisMonth = monthKeys[monthKeys.length - 1] ?? today.slice(0, 7);
 
-    const [company] = await this.database.asUser(tenant, (db) => db.select().from(companyProfiles).limit(1));
+    const company = await this.database.asUser(tenant, (db) => loadCompanyProfile(db));
     const orders = await this.database.asUser(tenant, (db) =>
       db
         .select({

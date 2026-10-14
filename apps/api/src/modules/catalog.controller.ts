@@ -1,3 +1,4 @@
+import { syncDependentProductCosts, withRecipeCosts } from "./product-cost-sync";
 import { ITEM_CLASSES, SUPPLY_MODES, defaultSupplyMode, legacyProductType } from "@3dprintmty/domain";
 import { Body, Controller, Delete, Get, Headers, Param, Patch, Post, Query } from "@nestjs/common";
 import { canReadMargins, canReadSalePrice, canWriteCatalog, Money, QC_RIGOR, STOCK_UOMS, uomShort, type TenantRole } from "@3dprintmty/domain";
@@ -115,12 +116,12 @@ export class CatalogController {
       itemClass ? eq(productsVisible.itemClass, itemClass) : undefined,
       supplyMode ? inArray(productsVisible.supplyMode, supplyMode === "both" ? ["both"] : [supplyMode, "both"]) : undefined,
     );
-    const rows: (ProductRow & { total: number })[] = await this.database.asUser(tenant, (db) => {
+    const rows: (ProductRow & { total: number })[] = await this.database.asUser(tenant, async (db) => {
       const query = db.select({
         ...getViewConfig(productsVisible).selectedFields,
         total: sql<number>`count(*) over ()`.mapWith(Number),
       }).from(productsVisible).orderBy(desc(productsVisible.createdAt)).limit(limit).offset(offset);
-      return filter ? query.where(filter) : query;
+      return withRecipeCosts(db, await (filter ? query.where(filter) : query));
     });
     let total = rows[0]?.total ?? 0;
     // Una página fuera del rango no trae filas de las que leer el total.
@@ -142,9 +143,10 @@ export class CatalogController {
   @Get("products/:id")
   async get(@CurrentUser() actor: Actor, @Param("id") id: string) {
     const tenant = requireTenant(actor);
-    const row = await this.database.asUser(tenant, (db) =>
-      one(db, productsVisible, productsVisible.id, id, "No encontramos ese producto."),
-    );
+    const row = await this.database.asUser(tenant, async (db) => {
+      const row = await one(db, productsVisible, productsVisible.id, id, "No encontramos ese producto.");
+      return (await withRecipeCosts(db, [row]))[0];
+    });
     return mapProduct(row, tenant.role);
   }
 
@@ -209,6 +211,7 @@ export class CatalogController {
           updatedAt: new Date(),
         })
         .where(eq(products.id, product.id));
+      if (input.cost !== undefined || uomChanged || input.supplyMode || input.itemClass) await syncDependentProductCosts(db, product.id, true);
     });
     return this.load(tenant, id);
   }
@@ -295,6 +298,7 @@ export class CatalogController {
         })
         .where(eq(filaments.id, filament.id))
         .returning();
+      if (input.cost !== undefined) await syncDependentProductCosts(db, filament.id);
       return row;
     });
     return mapFilament(updated, tenant.role);
@@ -372,6 +376,7 @@ export class CatalogController {
         })
         .where(eq(serviceOfferings.id, service.id))
         .returning();
+      if (input.cost !== undefined) await syncDependentProductCosts(db, service.id);
       return row;
     });
     return mapService(updated, tenant.role);
@@ -403,12 +408,7 @@ export class CatalogController {
     return tenant;
   }
 
-  private async load(tenant: TenantActor, id: string) {
-    const row = await this.database.asUser(tenant, (db) =>
-      one(db, productsVisible, productsVisible.id, id, "No encontramos ese producto."),
-    );
-    return mapProduct(row, tenant.role);
-  }
+  private async load(tenant: TenantActor, id: string) { return this.get(tenant, id); }
 }
 
 interface ProductRow {
@@ -573,7 +573,6 @@ function productValues(tenantId: string, createdBy: string, input: Omit<z.infer<
     tenantId,
     sku: input.sku.toUpperCase(),
     name: input.name,
-    productType: input.productType,
     itemClass: input.itemClass,
     supplyMode: input.supplyMode,
     stockUom: input.stockUom ?? "EA",

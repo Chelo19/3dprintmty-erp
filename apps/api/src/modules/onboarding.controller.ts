@@ -93,11 +93,18 @@ export class OnboardingController {
     const locationPostalCode = assertPostalCode(input.locationPostalCode);
     const slug = slugify(input.tradeName || input.legalName);
 
-    const created = await this.database.asAdmin(async (db) => {
+    const created = await this.database.atomic(() => this.database.asAdmin(async (db) => {
       const [tenant] = await db
         .insert(tenants)
-        .values({ slug, status: "active", countryCode: "MX", plan: "beta", rfc })
+        .values({ slug, status: "active", countryCode: "MX", plan: "beta" })
         .returning();
+      const [taxRate] = await db.insert(taxRates).values({
+        tenantId: tenant.id,
+        name: "IVA",
+        rate: Number(input.vatRate).toFixed(4),
+        countryCode: "MX",
+        createdBy: actor.userId,
+      }).returning({ id: taxRates.id });
       await db.insert(companyProfiles).values({
         tenantId: tenant.id,
         legalName: input.legalName,
@@ -108,7 +115,7 @@ export class OnboardingController {
         currency: "MXN",
         timezone: "America/Mexico_City",
         locale: "es-MX",
-        defaultVatRate: Number(input.vatRate).toFixed(4),
+        defaultTaxRateId: taxRate.id,
         preinvoiceSeries: "A",
         privacyAcceptedAt: new Date(),
         createdBy: actor.userId,
@@ -121,14 +128,6 @@ export class OnboardingController {
         state,
         countryCode: "MX",
         isDefault: true,
-        createdBy: actor.userId,
-      });
-      await db.insert(taxRates).values({
-        tenantId: tenant.id,
-        name: "IVA",
-        rate: Number(input.vatRate).toFixed(4),
-        isDefault: true,
-        countryCode: "MX",
         createdBy: actor.userId,
       });
       await db.insert(paymentMethodSettings).values(
@@ -192,13 +191,13 @@ export class OnboardingController {
         metadata: { rfc, vatRate: input.vatRate, privacyAccepted: true },
       });
       return tenant;
-    });
+    }));
 
     await this.auth.auditPlatform(actor.userId, "tenant.created", created.id, { rfc });
     const session = await this.auth.sessionFor(actor.userId, actor.email);
     return {
       token: isSupabaseAuth() ? null : await this.auth.sign(session),
-      tenant: { id: created.id, slug: created.slug, rfc: created.rfc },
+      tenant: { id: created.id, slug: created.slug, rfc },
     };
   }
 }

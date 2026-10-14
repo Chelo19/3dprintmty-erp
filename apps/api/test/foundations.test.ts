@@ -10,7 +10,7 @@ import { repoRoot } from "../src/db/database.service";
 import { requireTenant, type TenantActor } from "../src/http/actor";
 import { AppError } from "@3dprintmty/shared";
 import { allocateFolio, audit, postStock, withIdempotency } from "../src/modules/support";
-import { auditEvents, customers, idempotencyRequests, locations, numberSequences, payments, products, salesOrders, stockBalances, stockLedgers } from "../src/db/schema";
+import { auditEvents, companyProfiles, customerAddresses, customers, idempotencyRequests, locations, numberSequences, payments, products, salesOrders, stockBalances, stockLedgers, taxRates, tenants } from "../src/db/schema";
 
 // Conserva cobertura del módulo para cuando se reactive.
 vi.mock("@3dprintmty/domain", async (importOriginal) => {
@@ -83,7 +83,7 @@ for (const driver of ["pglite", "postgres"] as const) {
       return { token: onboarded.body.token as string, actor: requireTenant(await services().auth.verify(onboarded.body.token)) };
     }
     async function product(who = actor) {
-      const [row] = await services().database.asUser(who, (db) => db.insert(products).values({ tenantId: who.tenantId, sku: crypto.randomUUID(), name: "Foundation product", productType: "resale", costMinor: 100n, salePriceMinor: 10000n, createdBy: who.userId }).returning());
+      const [row] = await services().database.asUser(who, (db) => db.insert(products).values({ tenantId: who.tenantId, sku: crypto.randomUUID(), name: "Foundation product", itemClass: "finished_good", supplyMode: "buy", costMinor: 100n, salePriceMinor: 10000n, createdBy: who.userId }).returning());
       return row as typeof products.$inferSelect;
     }
     async function order() {
@@ -98,6 +98,25 @@ for (const driver of ["pglite", "postgres"] as const) {
       const call = request(app.getHttpServer()).post(`/api/v1${path}`).set("Authorization", `Bearer ${token}`);
       return (key ? call.set("Idempotency-Key", key) : call).send(body as object);
     };
+
+    it("crea y edita clientes sin calle, colonia ni CP y valida el CP cuando se captura", async () => {
+      const payload = { kind: "b2c", legalName: "Cliente sin domicilio", fiscal: { state: "Nuevo León" } };
+      const created = await request(app.getHttpServer()).post("/api/v1/customers")
+        .set("Authorization", `Bearer ${token}`).send(payload);
+      expect(created.status).toBe(201);
+      const edited = await request(app.getHttpServer()).patch(`/api/v1/customers/${created.body.id}`)
+        .set("Authorization", `Bearer ${token}`).send({ fiscal: { line1: "", neighborhood: "", postalCode: "", state: "Nuevo León" } });
+      expect(edited.status).toBe(200);
+      expect(edited.body.fiscal).toMatchObject({ line1: "", neighborhood: "", postalCode: "", state: "Nuevo León" });
+      const invalid = await request(app.getHttpServer()).post("/api/v1/customers")
+        .set("Authorization", `Bearer ${token}`).send({ ...payload, fiscal: { ...payload.fiscal, postalCode: "123" } });
+      expect(invalid.status).toBe(400);
+      for (const denied of [{ ...actor, role: "operator" as const }, foreign]) {
+        const changed = await services().database.asUser(denied, (db) => db.update(customerAddresses)
+          .set({ line1: "No permitido" }).where(eq(customerAddresses.customerId, created.body.id)).returning());
+        expect(changed).toHaveLength(0);
+      }
+    });
 
     it("authenticated no puede consultar tablas, vistas, costos ni ejecutar como erp_api", async () => {
       await product();
@@ -342,6 +361,51 @@ for (const driver of ["pglite", "postgres"] as const) {
       const [balance] = await services().database.asUser(actor, (db) => db.select().from(stockBalances).where(eq(stockBalances.productId, item.id)));
       expect(Number(balance.onHand)).toBe(0);
       expect(Number(balance.allocated)).toBe(0);
+    });
+
+    it("crea materias primas y conserva productType derivado al cambiar abastecimiento", async () => {
+      const created = await post("/products", { sku: crypto.randomUUID(), name: "Materia prima", itemClass: "raw_material", supplyMode: "buy", stockUom: "G", cost: "0.25" });
+      expect(created.status).toBe(201);
+      expect(created.body).toMatchObject({ itemClass: "raw_material", supplyMode: "buy", productType: "raw_material" });
+      const changed = await request(app.getHttpServer()).patch(`/api/v1/products/${created.body.id}`).set("Authorization", `Bearer ${token}`).send({ supplyMode: "both" });
+      expect(changed.status).toBe(200);
+      expect(changed.body).toMatchObject({ itemClass: "raw_material", supplyMode: "both", productType: "raw_material" });
+    });
+
+    it("un RFC repetido revierte el alta sin dejar talleres ni tasas huérfanos", async () => {
+      const before = await services().database.asAdmin(async (db) => ({ tenants: (await db.select().from(tenants)).length, rates: (await db.select().from(taxRates)).length }));
+      const registered = await request(app.getHttpServer()).post("/api/v1/auth/register").send({ email: `${crypto.randomUUID()}@duplicate.test`, password: "test-foundation-123" });
+      expect(registered.status).toBe(201);
+      const duplicate = await request(app.getHttpServer()).post("/api/v1/onboarding").set("Authorization", `Bearer ${registered.body.token}`).send({
+        legalName: "Duplicate company", rfc: " fsa010101aaa ", taxRegime: "626", fiscalPostalCode: "64000", state: "Nuevo León", locationName: "Matriz", locationPostalCode: "64000", vatRate: "0.16",
+        paymentMethods: { efectivo: true, spei: true, tarjeta: false, mercadopago: false, conekta: false, stripe: false, cod: false, credito: false }, seedDemo: false, privacyAccepted: true,
+      });
+      expect(duplicate.status).toBe(409);
+      expect(duplicate.body.message).toContain("RFC");
+      const after = await services().database.asAdmin(async (db) => ({ tenants: (await db.select().from(tenants)).length, rates: (await db.select().from(taxRates)).length }));
+      expect(after).toEqual(before);
+      expect((await services().auth.verify(registered.body.token)).tenantId).toBeNull();
+    });
+
+    it("el IVA canónico conserva el contrato y rechaza tasas de otro taller", async () => {
+      const original = (await get("/company")).body;
+      try {
+        const updated = await request(app.getHttpServer()).patch("/api/v1/company").set("Authorization", `Bearer ${token}`).send({ legalName: original.legalName, tradeName: original.tradeName, rfc: original.rfc, taxRegime: original.taxRegime, fiscalPostalCode: original.fiscalPostalCode, vatRate: "0.08" });
+        expect(updated.status).toBe(200);
+        expect(updated.body).toMatchObject({ rfc: original.rfc, vatRate: "0.0800" });
+        const [profile] = await services().database.asUser(actor, (db) => db.select().from(companyProfiles));
+        const [rate] = await services().database.asUser(actor, (db) => db.select().from(taxRates).where(eq(taxRates.id, profile.defaultTaxRateId)));
+        expect(rate.rate).toBe("0.0800");
+        const [foreignRate] = await services().database.asUser(foreign, (db) => db.select().from(taxRates));
+        await expect(services().database.asAdmin((db) => db.update(companyProfiles).set({ defaultTaxRateId: foreignRate.id }).where(eq(companyProfiles.tenantId, actor.tenantId)))).rejects.toMatchObject({ cause: { code: "23503" } });
+        const customerOrder = await order();
+        const item = await product();
+        const quote = await post("/quotes", { mode: "products", customerId: customerOrder.customerId, lines: [{ productId: item.id, description: item.name, quantity: "1", unitPrice: "100.00" }] });
+        expect(quote.status).toBe(201);
+        expect(quote.body).toMatchObject({ vat: "8.00", total: "108.00" });
+      } finally {
+        await request(app.getHttpServer()).patch("/api/v1/company").set("Authorization", `Bearer ${token}`).send({ legalName: original.legalName, tradeName: original.tradeName, rfc: original.rfc, taxRegime: original.taxRegime, fiscalPostalCode: original.fiscalPostalCode, vatRate: "0.16" });
+      }
     });
 
     it("el arranque rechaza migraciones faltantes y checksums modificados sin ejecutar DDL", async () => {

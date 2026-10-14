@@ -1,4 +1,5 @@
-import { canManufacture } from "@3dprintmty/domain";
+import { syncDependentProductCosts } from "./product-cost-sync";
+import { canManufacture, canReadMargins } from "@3dprintmty/domain";
 import { Body, Controller, Get, Param, Patch, Post } from "@nestjs/common";
 import {
   createsBomCycle,
@@ -15,7 +16,7 @@ import Decimal from "decimal.js";
 import { and, desc, eq } from "drizzle-orm";
 import { z } from "zod";
 import { services } from "../container";
-import { bomLines, boms, products, routingOperations, routings, workCenters } from "../db/schema";
+import { bomLines, bomServiceLines, serviceOfferings, boms, products, routingOperations, routings, workCenters } from "../db/schema";
 import { assertRole, CurrentUser, requireTenant, type Actor, type TenantActor } from "../http/actor";
 import {
   activeRouting,
@@ -24,6 +25,7 @@ import {
   loadBomIndex,
   loadProducts,
   unitCostMinor,
+  recipeCosts,
   type BomIndex,
   type ProductInfo,
 } from "./manufacturing.shared";
@@ -55,6 +57,9 @@ const bomSchema = z.object({
     .min(1)
     .max(100),
 });
+
+const recipeServiceSchema = z.object({ serviceId: z.string().uuid(), quantity: z.string() });
+const recipeSchema = bomSchema.extend({ services: z.array(recipeServiceSchema).max(100).optional() });
 
 const copySchema = z.object({
   targetProductId: z.string().uuid(),
@@ -134,6 +139,10 @@ export class ManufacturingController {
         })
         .where(eq(workCenters.id, center.id))
         .returning();
+      if (input.hourlyRate !== undefined) {
+        const recipes = await loadBomIndex(db);
+        for (const id of recipes.bomIdByProduct.keys()) await syncDependentProductCosts(db, id, true);
+      }
       return updated;
     });
     return mapWorkCenter(row);
@@ -157,7 +166,8 @@ export class ManufacturingController {
           name: product.name,
           version: bom?.version ?? 1,
           lines: index.lookup(productId)?.length ?? 0,
-          materialCost: centsToMajor(unitCostMinor(productId, index, catalog)),
+          materialCost: canReadMargins(tenant.role) ? centsToMajor(recipeCosts(productId, index, catalog).filament.add(recipeCosts(productId, index, catalog).supplies)) : null,
+          unitCost: canReadMargins(tenant.role) && !recipeCosts(productId, index, catalog).missing ? centsToMajor(recipeCosts(productId, index, catalog).total) : null,
         });
       }
       return { data: data.sort((a, b) => a.sku.localeCompare(b.sku)) };
@@ -167,13 +177,13 @@ export class ManufacturingController {
   @Get("boms/:productId")
   async getBom(@CurrentUser() actor: Actor, @Param("productId") productId: string) {
     const tenant = requireTenant(actor);
-    return this.database.asUser(tenant, (db) => bomDetail(db, productId));
+    return this.database.asUser(tenant, async (db) => maskBomCosts(await bomDetail(db, productId), tenant));
   }
 
   @Post("boms")
   async saveBom(@CurrentUser() actor: Actor, @Body() body: unknown) {
     const tenant = assertRole(actor, [...ENGINEERING]);
-    const input = bomSchema.parse(body);
+    const input = recipeSchema.parse(body);
     const lines: BomLine[] = input.lines.map((line) => {
       const quantity = parseQty(line.quantity);
       const scrapPct = parseQty(line.scrapPct);
@@ -184,8 +194,8 @@ export class ManufacturingController {
       return { componentId: line.componentProductId, quantity, scrapPct };
     });
     return this.database.asUser(tenant, async (db) => {
-      await writeBom(db, tenant, input.productId, lines, input.notes ?? null);
-      return bomDetail(db, input.productId);
+      await writeBom(db, tenant, input.productId, lines, input.notes ?? null, input.services);
+      return maskBomCosts(await bomDetail(db, input.productId), tenant);
     });
   }
 
@@ -208,7 +218,7 @@ export class ManufacturingController {
       if (input.swap && !swapped) {
         throw new AppError("swap_not_found", "El componente a reemplazar no está en el BOM origen.", 409);
       }
-      await writeBom(db, tenant, input.targetProductId, lines, `Copiado del BOM de otro producto`);
+      await writeBom(db, tenant, input.targetProductId, lines, `Copiado del BOM de otro producto`, (index.servicesByProduct.get(productId) ?? []).map((line) => ({ serviceId: line.serviceId, quantity: formatQty(line.quantity) })));
       const routing = await activeRouting(db, productId);
       const [targetRouting] = await db
         .select()
@@ -230,7 +240,8 @@ export class ManufacturingController {
           })),
         );
       }
-      return bomDetail(db, input.targetProductId);
+      await syncDependentProductCosts(db, input.targetProductId, true);
+      return maskBomCosts(await bomDetail(db, input.targetProductId), tenant);
     });
   }
 
@@ -239,6 +250,7 @@ export class ManufacturingController {
     const tenant = assertRole(actor, ["owner", "admin"]);
     return this.database.asUser(tenant, async (db) => {
       const detail = await bomDetail(db, id);
+      if (detail.missingCosts) throw new AppError("missing_component_cost", "Completa los costos de materiales y servicios en sus catálogos.", 409);
       const unit = BigInt(new Decimal(detail.unitCostMinor).toDecimalPlaces(0, Decimal.ROUND_HALF_UP).toFixed(0));
       await db.update(products).set({ costMinor: unit, updatedAt: new Date() }).where(eq(products.id, id));
       await audit(db, tenant, "product.cost_rolled_up", "product", id, { costMinor: unit.toString() });
@@ -290,12 +302,13 @@ export class ManufacturingController {
         await one(db, workCenters, workCenters.id, op.workCenterId, "No encontramos esa estación.");
       }
       await writeRouting(db, tenant, input.productId, input.operations);
+      await syncDependentProductCosts(db, input.productId, true);
     });
     return this.getRouting(actor, input.productId);
   }
 }
 
-async function writeBom(db: Db, tenant: TenantActor, productId: string, lines: BomLine[], notes: string | null) {
+async function writeBom(db: Db, tenant: TenantActor, productId: string, lines: BomLine[], notes: string | null, serviceInput?: Array<{ serviceId: string; quantity: string }>) {
   const product = await one(db, products, products.id, productId, "No encontramos ese producto.");
   if (!canManufacture(product)) {
     throw new AppError("not_manufacturable", "Las recetas son para artículos configurados para fabricar.", 409);
@@ -316,6 +329,13 @@ async function writeBom(db: Db, tenant: TenantActor, productId: string, lines: B
   const index = await loadBomIndex(db);
   if (createsBomCycle(product.id, ids, index.lookup)) {
     throw new AppError("bom_cycle", "Ese BOM crearía un ciclo: un componente ya usa este producto.", 409);
+  }
+  const previousServices = index.servicesByProduct.get(product.id) ?? [];
+  const selectedServices = serviceInput ?? previousServices.map((line) => ({ serviceId: line.serviceId, quantity: formatQty(line.quantity) }));
+  if (new Set(selectedServices.map((line) => line.serviceId)).size !== selectedServices.length) throw new AppError("duplicate_service", "Un servicio aparece dos veces en la receta.");
+  for (const line of selectedServices) {
+    if (parseQty(line.quantity) <= 0n) throw new AppError("invalid_quantity", "La cantidad de servicio debe ser mayor a cero.");
+    await one(db, serviceOfferings, serviceOfferings.id, line.serviceId, "No encontramos ese servicio.");
   }
   const [latest] = await db
     .select({ version: boms.version })
@@ -346,6 +366,10 @@ async function writeBom(db: Db, tenant: TenantActor, productId: string, lines: B
       sequence: position + 1,
     })),
   );
+  if (selectedServices.length) await db.insert(bomServiceLines).values(selectedServices.map((line) => ({
+    tenantId: tenant.tenantId, bomId: bom.id, serviceId: line.serviceId, quantity: formatQty(parseQty(line.quantity)),
+  })));
+  await syncDependentProductCosts(db, product.id, true);
   await audit(db, tenant, "bom.saved", "bom", bom.id, { productId: product.id, version: bom.version });
 }
 
@@ -403,10 +427,16 @@ async function bomDetail(db: Db, productId: string) {
       extendedCost: minorToMajor(extendCostMinor(perUnit, unit)),
     };
   });
-  const material = bomId ? unitCostMinor(product.id, index, catalog) : new Decimal(0);
-  const labor = routing ? laborPerUnitMinor(routing.steps) : new Decimal(0);
-  const total = material.add(labor);
-  const currentCost = product.costMinor === null ? null : Money.fromMinor(BigInt(product.costMinor)).toMajor();
+  const costs = recipeCosts(product.id, index, catalog);
+  const material = bomId ? costs.filament.add(costs.supplies) : new Decimal(0);
+  const labor = bomId ? costs.labor : new Decimal(0);
+  const serviceCost = bomId ? costs.services : new Decimal(0);
+  const total = material.add(labor).add(serviceCost);
+  const serviceLines = (index.servicesByProduct.get(product.id) ?? []).map((line) => ({
+    serviceId: line.serviceId, code: line.code, name: line.name, unit: line.unit, quantity: formatQty(line.quantity),
+    extendedCost: line.costMinor === null ? null : minorToMajor(extendCostMinor(line.quantity, new Decimal(String(line.costMinor)))),
+  }));
+  const currentCost = bomId ? costs.missing ? null : centsToMajor(total) : product.costMinor === null ? null : Money.fromMinor(BigInt(product.costMinor)).toMajor();
   return {
     productId: product.id,
     sku: product.sku,
@@ -415,6 +445,11 @@ async function bomDetail(db: Db, productId: string) {
     version: bom?.version ?? null,
     notes: bom?.notes ?? null,
     lines,
+    services: serviceLines,
+    filamentCost: bomId ? centsToMajor(costs.filament) : "0.00",
+    suppliesCost: bomId ? centsToMajor(costs.supplies) : "0.00",
+    serviceCost: centsToMajor(serviceCost),
+    missingCosts: bomId ? costs.missing : false,
     materialCost: centsToMajor(material),
     laborCost: centsToMajor(labor),
     unitCost: centsToMajor(total),
@@ -454,4 +489,12 @@ function capacity(value: string): string {
   const hours = new Decimal(value);
   if (hours.lte(0) || hours.gt(24)) throw new AppError("invalid_capacity", "La capacidad va de 0 a 24 horas.");
   return hours.toFixed(2);
+}
+
+function maskBomCosts(detail: Awaited<ReturnType<typeof bomDetail>>, actor: TenantActor) {
+  if (canReadMargins(actor.role)) return detail;
+  return { ...detail, filamentCost: null, suppliesCost: null, serviceCost: null, materialCost: null,
+    laborCost: null, unitCost: null, unitCostMinor: null, currentCost: null,
+    lines: detail.lines.map((line) => ({ ...line, extendedCost: null })),
+    services: detail.services.map((line) => ({ ...line, extendedCost: null })) };
 }

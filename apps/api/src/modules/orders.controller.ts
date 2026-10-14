@@ -1,3 +1,4 @@
+import { loadCompanyProfile } from "./company-profile";
 import { Body, Controller, Get, Header, Headers, Param, Patch, Post, Put, Query, StreamableFile } from "@nestjs/common";
 import {
   assertOrderAction,
@@ -26,7 +27,6 @@ import { z } from "zod";
 import { services } from "../container";
 import {
   commercialDocuments,
-  companyProfiles,
   customerAddresses,
   customers,
   locations,
@@ -171,7 +171,7 @@ export class OrdersController {
     const tenant = requireTenant(actor);
     const file = await this.database.asUser(tenant, async (db) => {
       const order = await orderDetail(db, tenant, id);
-      const [company] = await db.select().from(companyProfiles).limit(1);
+      const company = await loadCompanyProfile(db);
       const [customer] = await db.select({ paymentTerms: customers.paymentTerms }).from(customers).where(eq(customers.id, order.customerId)).limit(1);
       const issued = new Date(order.createdAt ?? Date.now());
       const bytes = renderQuotePdf({

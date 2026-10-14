@@ -3,7 +3,7 @@ import { initReactI18next } from "react-i18next";
 
 export const esMX = {
   app: {
-    name: "PrintMTY",
+    name: "3dprintnow",
     tagline: "Operación para granjas de impresión",
   },
   common: {
@@ -40,7 +40,7 @@ export const esMX = {
   auth: {
     registerTitle: "Crea tu cuenta",
     registerIntro: "Primero tu cuenta. Después, los datos de tu taller.",
-    loginTitle: "Bienvenido a PrintMTY",
+    loginTitle: "Bienvenido a 3dprintnow",
     loginIntro: "Entra a tu cuenta para continuar con tu taller.",
     registerContinue: "Crear cuenta y continuar",
     registering: "Creando cuenta…",
@@ -182,13 +182,13 @@ export const esMX = {
   },
   privacy: {
     title: "Aviso de privacidad",
-    body: "PrintMTY trata el RFC, el correo y los datos de operación del taller para prestar el servicio. Puedes pedir exportación o baja de tu taller. No vendemos esta información.",
+    body: "3dprintnow trata el RFC, el correo y los datos de operación del taller para prestar el servicio. Puedes pedir exportación o baja de tu taller. No vendemos esta información.",
   },
 } as const;
 
 export const en = {
   app: {
-    name: "PrintMTY",
+    name: "3dprintnow",
     tagline: "Operations for print farms",
   },
   common: {
@@ -225,7 +225,7 @@ export const en = {
   auth: {
     registerTitle: "Create your account",
     registerIntro: "First, your account. Then, your workshop details.",
-    loginTitle: "Welcome to PrintMTY",
+    loginTitle: "Welcome to 3dprintnow",
     loginIntro: "Log in to continue with your workshop.",
     registerContinue: "Create account and continue",
     registering: "Creating account…",
@@ -367,7 +367,7 @@ export const en = {
   },
   privacy: {
     title: "Privacy notice",
-    body: "PrintMTY uses the RFC, email, and workshop operating data to provide the service. You can request export or deletion of your workshop. We do not sell this information.",
+    body: "3dprintnow uses the RFC, email, and workshop operating data to provide the service. You can request export or deletion of your workshop. We do not sell this information.",
   },
 } as const;
 

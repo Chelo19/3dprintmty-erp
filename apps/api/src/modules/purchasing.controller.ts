@@ -1,3 +1,5 @@
+import { syncDependentProductCosts } from "./product-cost-sync";
+import { loadCompanyProfile } from "./company-profile";
 import { canPurchase } from "@3dprintmty/domain";
 import { Body, Controller, Get, Headers, Param, Patch, Post, Query } from "@nestjs/common";
 import {
@@ -20,7 +22,6 @@ import { desc, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 import { services } from "../container";
 import {
-  companyProfiles,
   expensePayments,
   expenses,
   filaments,
@@ -589,9 +590,10 @@ async function updateAverageCost(
   const costMinor = roundMinor(perStock.mul(factor));
   if (product.kind === "filament") {
     await db.update(filaments).set({ costMinor, updatedAt: new Date() }).where(eq(filaments.id, product.id));
-    return;
+  } else {
+    await db.update(products).set({ costMinor, updatedAt: new Date() }).where(eq(products.id, product.id));
   }
-  await db.update(products).set({ costMinor, updatedAt: new Date() }).where(eq(products.id, product.id));
+  await syncDependentProductCosts(db, product.id);
 }
 
 export async function createPurchaseOrder(
@@ -629,8 +631,8 @@ export async function createPurchaseOrder(
     });
   }
   const subtotal = prepared.reduce((sum, line) => sum + line.total, 0n);
-  const [company] = await db.select({ rate: companyProfiles.defaultVatRate }).from(companyProfiles).limit(1);
-  const vat = roundDiv(subtotal * parseQty(String(company?.rate ?? "0.16")), 10_000n);
+  const company = await loadCompanyProfile(db);
+  const vat = roundDiv(subtotal * parseQty(String(company?.defaultVatRate ?? "0.16")), 10_000n);
   const [order] = await db
     .insert(purchaseOrders)
     .values({

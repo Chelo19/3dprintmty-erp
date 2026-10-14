@@ -407,7 +407,7 @@ export class ProductionController {
           .set({ status: "complete", completedAt: new Date(), actualMinutes: operation.actualMinutes ?? operation.plannedMinutes })
           .where(eq(productionOrderOperations.id, operation.id));
       }
-      const actualCost = await actualCostMinor(db, order.id);
+      const actualCost = await actualCostMinor(db, order.id) + roundDiv(BigInt(order.serviceCostMinor ?? 0n) * produced, ordered);
       const product = await one(db, products, products.id, order.productId, "No encontramos el producto.");
       const gate = await qcGate(db);
       const needsQc = requiresInspection(product.qcRigor as QcRigor, gate);
@@ -920,6 +920,7 @@ interface OrderRow {
   startedAt: Date | null;
   completedAt: Date | null;
   closedAt: Date | null;
+  serviceCostMinor: bigint;
   estimatedCostMinor: bigint | null;
   actualCostMinor: bigint | null;
   qcStatus: string;

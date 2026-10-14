@@ -29,7 +29,7 @@ export class PlatformController {
           id: tenants.id,
           slug: tenants.slug,
           status: tenants.status,
-          rfc: tenants.rfc,
+          rfc: companyProfiles.rfc,
           legalName: companyProfiles.legalName,
           createdAt: tenants.createdAt,
         })
@@ -48,7 +48,9 @@ export class PlatformController {
     }
     const input = impersonateSchema.parse(body);
     const [tenant] = await this.database.asAdmin((db) =>
-      db.select().from(tenants).where(eq(tenants.id, input.tenantId)).limit(1),
+      db.select({ id: tenants.id, slug: tenants.slug, rfc: companyProfiles.rfc }).from(tenants)
+        .leftJoin(companyProfiles, eq(companyProfiles.tenantId, tenants.id))
+        .where(eq(tenants.id, input.tenantId)).limit(1),
     );
     if (!tenant) throw new AppError("not_found", "No encontramos ese taller.", 404);
     await this.auth.ensurePlatformAdmin(actor.userId, actor.email);

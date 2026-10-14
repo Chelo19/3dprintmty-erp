@@ -1,3 +1,4 @@
+import { withRecipeCosts } from "./product-cost-sync";
 import { formatQty, Money, QTY_SCALE, qtyFromDb, roundDiv } from "@3dprintmty/domain";
 import { inArray } from "drizzle-orm";
 import { filaments, products, serviceOfferings } from "../db/schema";
@@ -157,7 +158,7 @@ async function loadCatalogCosts(db: Db, lines: CostingLineInput[]): Promise<Map<
       .select({ id: products.id, costMinor: products.costMinor, productType: products.productType })
       .from(products)
       .where(inArray(products.id, productIds));
-    for (const row of rows) {
+    for (const row of await withRecipeCosts<{ id: string; costMinor: bigint | null; productType: string }>(db, rows)) {
       result.set(row.id, { costMinor: nullableMinor(row.costMinor), group: groupFor("product", row.productType), perKg: false });
     }
   }

@@ -1,4 +1,4 @@
-# PrintMTY
+# 3dprintnow
 
 ERP operativo para granjas de impresión 3D. México primero: MXN, `America/Mexico_City`, IVA y prefactura. No es un CFDI y no timbra ante el SAT.
 

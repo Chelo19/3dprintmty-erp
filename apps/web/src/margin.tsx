@@ -41,6 +41,7 @@ export function CostPriceFields({
   initialCost = "",
   initialPrice = "",
   costRequired = false,
+  costReadOnly = false,
   priceRequired = false,
   divisor = 1,
 }: {
@@ -51,6 +52,7 @@ export function CostPriceFields({
   initialCost?: string;
   initialPrice?: string;
   costRequired?: boolean;
+  costReadOnly?: boolean;
   priceRequired?: boolean;
   divisor?: number;
 }) {
@@ -61,7 +63,7 @@ export function CostPriceFields({
     <>
       <label>
         {costLabel}
-        <input name="cost" required={costRequired} placeholder={costPlaceholder} value={cost} onChange={(event) => setCost(event.target.value)} />
+        <input name="cost" readOnly={costReadOnly} required={costRequired} placeholder={costPlaceholder} value={cost} onChange={(event) => setCost(event.target.value)} />
       </label>
       <label>
         {priceLabel}

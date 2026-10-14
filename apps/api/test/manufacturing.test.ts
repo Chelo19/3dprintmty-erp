@@ -33,6 +33,85 @@ describe("operación — compras, manufactura, calidad y prefacturas", () => {
     await app?.close();
   });
 
+  it("actualiza costos de productos fabricados al cambiar filamentos e insumos sin alterar precios ni OP existentes", async () => {
+    const owner = await onboard(app, "costos@fabricados.test", "CFA010101AAA", "Costos fabricados");
+    const filament = await api.post(owner, "/filaments", { sku: "CF-PLA", name: "PLA", material: "PLA", color: "Azul", diameterMm: "1.75", cost: "250.00" });
+    const supply = await api.post(owner, "/products", { sku: "CF-INS", name: "Insumo", itemClass: "component", supplyMode: "buy", cost: "2.00", salePrice: "4.00" });
+    const piece = await api.post(owner, "/products", { sku: "CF-PZA", name: "Pieza", productType: "finished_good", cost: "45.50", salePrice: "100.00" });
+    const assembly = await api.post(owner, "/products", { sku: "CF-ENS", name: "Ensamble", productType: "finished_good", cost: "76.00", salePrice: "200.00" });
+    for (const result of [filament, supply, piece, assembly]) expect(result.status).toBe(201);
+    expect((await api.post(owner, "/boms", { productId: piece.body.id, lines: [
+      { componentProductId: filament.body.id, quantity: "120", scrapPct: "5" },
+      { componentProductId: supply.body.id, quantity: "2" },
+    ] })).status).toBe(201);
+    expect((await api.post(owner, "/boms", { productId: assembly.body.id, lines: [{ componentProductId: piece.body.id, quantity: "2" }] })).status).toBe(201);
+    const order = await api.post(owner, "/production-orders", { productId: piece.body.id, quantity: "1" });
+    expect(order.status).toBe(201);
+    const originalOrder = (await api.get(owner, `/production-orders/${order.body.id}`)).body;
+    expect((await api.patch(owner, `/filaments/${filament.body.id}`, { cost: "300.00" })).status).toBe(200);
+    expect((await api.get(owner, `/products/${piece.body.id}`)).body).toMatchObject({ cost: "41.80", salePrice: "100.00" });
+    expect((await api.patch(owner, `/products/${supply.body.id}`, { cost: "3.00" })).status).toBe(200);
+    expect((await api.get(owner, `/products/${piece.body.id}`)).body).toMatchObject({ cost: "43.80", salePrice: "100.00" });
+    expect((await api.get(owner, `/products/${assembly.body.id}`)).body).toMatchObject({ cost: "87.60", salePrice: "200.00" });
+    expect((await api.get(owner, `/production-orders/${order.body.id}`)).body).toEqual(originalOrder);
+    expect((await api.patch(owner, `/filaments/${filament.body.id}`, { cost: "200.00" })).status).toBe(200);
+    expect((await api.get(owner, `/products/${piece.body.id}`)).body.cost).toBe("31.20");
+    expect((await api.get(owner, `/products/${assembly.body.id}`)).body.cost).toBe("62.40");
+    expect((await api.get(owner, `/products/${supply.body.id}`)).body.cost).toBe("3.00");
+    const vendor = await api.post(owner, "/vendors", { name: "Proveedor costos" });
+    expect(vendor.status).toBe(201);
+    const purchase = await api.post(owner, "/purchase-orders", { vendorId: vendor.body.id,
+      lines: [{ productId: filament.body.id, quantity: "1", unitCost: "400.00" }] });
+    expect(purchase.status).toBe(201);
+    expect((await api.post(owner, `/purchase-orders/${purchase.body.id}/transition`, { to: "ordered" })).status).toBe(201);
+    expect((await api.post(owner, `/purchase-orders/${purchase.body.id}/receive`, {
+      lines: [{ lineId: purchase.body.lines[0].id, quantity: "1" }],
+    })).status).toBe(201);
+    expect((await api.get(owner, `/products/${piece.body.id}`)).body.cost).toBe("56.40");
+    expect((await api.get(owner, `/products/${assembly.body.id}`)).body.cost).toBe("112.80");
+
+  });
+
+  it("la receta separa materiales y servicios, determina el costo y conserva sus versiones y snapshots", async () => {
+    const owner = await onboard(app, "servicios@recetas.test", "SRE010101AAA", "Servicios receta");
+    const foreign = await onboard(app, "ajeno@recetas.test", "SRA010101AAA", "Otro taller");
+    const filament = await api.post(owner, "/filaments", { sku: "SR-F", name: "PLA", material: "PLA", color: "Blanco", diameterMm: "1.75", cost: "200.00" });
+    const supply = await api.post(owner, "/products", { sku: "SR-I", name: "Insumo", itemClass: "component", supplyMode: "buy", cost: "3.00" });
+    const product = await api.post(owner, "/products", { sku: "SR-P", name: "Terminado", productType: "finished_good", cost: "999.00", salePrice: "100.00", qcRigor: "off" });
+    const service = await api.post(owner, "/services", { code: "SR-S", name: "Acabado", unit: "hora", cost: "20.00", salePrice: "30.00" });
+    const lines = [{ componentProductId: filament.body.id, quantity: "100" }, { componentProductId: supply.body.id, quantity: "2" }];
+    const services = [{ serviceId: service.body.id, quantity: "0.5" }];
+    const saved = await api.post(owner, "/boms", { productId: product.body.id, lines, services });
+    expect(saved.status).toBe(201);
+    expect(saved.body).toMatchObject({ filamentCost: "20.00", suppliesCost: "6.00", materialCost: "26.00", serviceCost: "10.00", unitCost: "36.00" });
+    expect((await api.get(owner, `/products/${product.body.id}`)).body).toMatchObject({ cost: "36.00", salePrice: "100.00" });
+    const order = await api.post(owner, "/production-orders", { productId: product.body.id, quantity: "2" });
+    expect(order.status).toBe(201);
+    expect(order.body.estimatedCost).toBe("72.00");
+    const snapshot = (await api.get(owner, `/production-orders/${order.body.id}`)).body;
+    expect(snapshot.materials).toHaveLength(2);
+    expect((await api.patch(owner, `/services/${service.body.id}`, { cost: "40.00" })).status).toBe(200);
+    expect((await api.get(owner, `/products/${product.body.id}`)).body.cost).toBe("46.00");
+    expect((await api.get(owner, `/production-orders/${order.body.id}`)).body).toEqual(snapshot);
+    expect((await api.post(owner, "/expenses", { kind: "product", itemId: supply.body.id, quantity: "4", amount: "12.00", occurredOn: "2026-10-14" })).status).toBe(201);
+    expect((await api.post(owner, `/production-orders/${order.body.id}/release`, {})).status).toBe(201);
+    const completed = await api.post(owner, `/production-orders/${order.body.id}/complete`, { quantityGood: "2", quantityScrapped: "0" });
+    expect(completed.status).toBe(201);
+    expect(completed.body.actualCost).toBe("72.00");
+    expect((await api.patch(owner, `/products/${product.body.id}`, { cost: "888.00" })).body.cost).toBe("46.00");
+    const preserved = await api.post(owner, "/boms", { productId: product.body.id, lines });
+    expect(preserved.body.services).toHaveLength(1);
+    const cleared = await api.post(owner, "/boms", { productId: product.body.id, lines, services: [] });
+    expect(cleared.body.unitCost).toBe("26.00");
+    expect((await api.post(owner, "/boms", { productId: product.body.id, lines, services: [...services, ...services] })).status).toBe(400);
+    const otherService = await api.post(foreign, "/services", { code: "SR-O", name: "Otro", unit: "pieza", cost: "1.00", salePrice: "1.00" });
+    expect((await api.post(owner, "/boms", { productId: product.body.id, lines, services: [{ serviceId: otherService.body.id, quantity: "1" }] })).status).toBe(404);
+    expect((await api.patch(owner, `/services/${service.body.id}`, { cost: null })).status).toBe(200);
+    const incomplete = await api.post(owner, "/boms", { productId: product.body.id, lines, services });
+    expect(incomplete.body.missingCosts).toBe(true);
+    expect((await api.get(owner, `/products/${product.body.id}`)).body.cost).toBeNull();
+  });
+
   it("consulta la clasificación de productos e insumos en los gastos sin duplicar existencias", async () => {
     const owner = await onboard(app, "tipos@compras.test", "TCO010101AAA", "Tipos de compras");
     const expenses: Array<{ id: string; itemClass: string; supplyMode: string }> = [];

@@ -12,7 +12,7 @@ beforeAll(async () => {
   await database.onModuleInit();
   await database.asAdmin(async (db) => {
     await db.insert(userAccounts).values({ id: actor.userId, email: actor.email });
-    await db.insert(tenants).values({ id: actor.tenantId, slug: "credit-test", rfc: "CRE010101AAA", status: "active" });
+    await db.insert(tenants).values({ id: actor.tenantId, slug: "credit-test", status: "active" });
     await db.insert(tenantMemberships).values({ userId: actor.userId, tenantId: actor.tenantId, role: actor.role, email: actor.email });
   });
 });

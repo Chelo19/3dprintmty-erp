@@ -1,11 +1,12 @@
 import { canManufacture } from "@3dprintmty/domain";
 import {
   directRequirements,
+  lineRequirement,
+  QTY_SCALE,
   extendCostMinor,
   formatQty,
   parseQty,
   qtyFromDb,
-  rollupUnitCostMinor,
   stockUnitCostMinor,
   type BomLine,
   type BomLookup,
@@ -15,6 +16,8 @@ import Decimal from "decimal.js";
 import { and, eq, inArray } from "drizzle-orm";
 import {
   bomLines,
+  bomServiceLines,
+  serviceOfferings,
   boms,
   productionOrderMaterials,
   productionOrderOperations,
@@ -33,6 +36,8 @@ export interface ProductInfo {
   sku: string;
   name: string;
   productType: string;
+  itemClass: string;
+  supplyMode: string;
   stockUom: string;
   purchaseUom: string;
   uomFactor: string;
@@ -43,6 +48,8 @@ export interface ProductInfo {
 export interface BomIndex {
   lookup: BomLookup;
   bomIdByProduct: Map<string, string>;
+  servicesByProduct: Map<string, Array<{ serviceId: string; name: string; code: string; unit: string; quantity: bigint; costMinor: bigint | null }>>;
+  laborByProduct: Map<string, Decimal>;
 }
 
 export async function loadProducts(db: Db): Promise<Map<string, ProductInfo>> {
@@ -60,6 +67,8 @@ export async function loadProducts(db: Db): Promise<Map<string, ProductInfo>> {
       sku: row.sku,
       name: row.name,
       productType: "filament",
+      itemClass: "raw_material",
+      supplyMode: "buy",
       stockUom: "G",
       purchaseUom: "KG",
       uomFactor: "1000",
@@ -89,7 +98,30 @@ export async function loadBomIndex(db: Db): Promise<BomIndex> {
       byBom.set(line.bomId, list);
     }
   }
+  const servicesByProduct: BomIndex["servicesByProduct"] = new Map();
+  const laborByProduct = new Map<string, Decimal>();
+  if (active.length) {
+    const serviceRows = await db.select({ bomId: bomServiceLines.bomId, serviceId: serviceOfferings.id,
+      name: serviceOfferings.name, code: serviceOfferings.code, unit: serviceOfferings.unit,
+      quantity: bomServiceLines.quantity, costMinor: serviceOfferings.costMinor }).from(bomServiceLines)
+      .innerJoin(serviceOfferings, eq(serviceOfferings.id, bomServiceLines.serviceId))
+      .where(inArray(bomServiceLines.bomId, active.map((bom: { id: string }) => bom.id)));
+    const productByBom = new Map(active.map((bom: { id: string; productId: string }) => [bom.id, bom.productId]));
+    for (const row of serviceRows) {
+      const id = productByBom.get(row.bomId) as string;
+      const list = servicesByProduct.get(id) ?? [];
+      list.push({ ...row, quantity: qtyFromDb(row.quantity), costMinor: row.costMinor === null ? null : BigInt(row.costMinor) });
+      servicesByProduct.set(id, list);
+    }
+    const operations = await db.select({ productId: routings.productId, runMinutes: routingOperations.runMinutes, rate: workCenters.hourlyRateMinor })
+      .from(routings).innerJoin(routingOperations, eq(routingOperations.routingId, routings.id))
+      .innerJoin(workCenters, eq(workCenters.id, routingOperations.workCenterId)).where(eq(routings.active, true));
+    for (const row of operations) laborByProduct.set(row.productId, (laborByProduct.get(row.productId) ?? new Decimal(0))
+      .add(new Decimal(row.runMinutes).mul(String(row.rate)).div(60)));
+  }
   return {
+    servicesByProduct,
+    laborByProduct,
     bomIdByProduct,
     lookup: (productId) => {
       const bomId = bomIdByProduct.get(productId);
@@ -114,8 +146,40 @@ export function leafCost(catalog: Map<string, ProductInfo>) {
 }
 
 /** Costo unitario en centavos por unidad de almacén: rollup si tiene BOM, catálogo si es hoja. */
+export interface RecipeCosts { filament: Decimal; supplies: Decimal; services: Decimal; labor: Decimal; total: Decimal; missing: boolean }
+
+/** Una sola fuente para el catálogo, el desglose de receta y las nuevas OP. */
+export function recipeCosts(productId: string, index: BomIndex, catalog: Map<string, ProductInfo>): RecipeCosts {
+  const walk = (id: string, path: Set<string>): RecipeCosts => {
+    if (path.has(id) || path.size > 12) throw new AppError("bom_cycle", "La receta tiene un ciclo o demasiados niveles.");
+    const result: RecipeCosts = { filament: new Decimal(0), supplies: new Decimal(0), services: new Decimal(0), labor: new Decimal(0), total: new Decimal(0), missing: false };
+    const lines = index.lookup(id);
+    if (!lines?.length) {
+      const item = catalog.get(id);
+      result.missing = !item || item.costMinor === null;
+      const value = item ? stockUnitCostMinor(item.costMinor, item.uomFactor) : new Decimal(0);
+      if (item?.productType === "filament") result.filament = value; else result.supplies = value;
+    } else {
+      for (const line of lines) {
+        const child = walk(line.componentId, new Set(path).add(id));
+        const units = new Decimal(formatQty(lineRequirement(QTY_SCALE, line)));
+        for (const bucket of ["filament", "supplies", "services", "labor"] as const) result[bucket] = result[bucket].add(child[bucket].mul(units));
+        result.missing ||= child.missing;
+      }
+      for (const service of index.servicesByProduct.get(id) ?? []) {
+        result.missing ||= service.costMinor === null;
+        result.services = result.services.add(new Decimal(formatQty(service.quantity)).mul(String(service.costMinor ?? 0n)));
+      }
+      result.labor = result.labor.add(index.laborByProduct.get(id) ?? 0);
+    }
+    result.total = result.filament.add(result.supplies).add(result.services).add(result.labor);
+    return result;
+  };
+  return walk(productId, new Set());
+}
+
 export function unitCostMinor(productId: string, index: BomIndex, catalog: Map<string, ProductInfo>): Decimal {
-  return rollupUnitCostMinor(productId, index.lookup, leafCost(catalog));
+  return recipeCosts(productId, index, catalog).total;
 }
 
 export interface RoutingStep {
@@ -224,8 +288,10 @@ export async function createProductionOrder(db: Db, tenant: TenantActor, input: 
     const minutes = minutesFor(step, input.quantity);
     return { step, minutes, cost: laborMinor(minutes, step.hourlyRateMinor) };
   });
-  const estimated =
-    materials.reduce((sum, item) => sum + item.extended, 0n) + operations.reduce((sum, item) => sum + item.cost, 0n);
+  const ownServices = (index.servicesByProduct.get(product.id) ?? []).reduce((sum, item) =>
+    sum.add(new Decimal(formatQty(item.quantity)).mul(String(item.costMinor ?? 0n))), new Decimal(0));
+  const estimated = materials.reduce((sum, item) => sum + item.extended, 0n)
+    + operations.reduce((sum, item) => sum + item.cost, 0n) + extendCostMinor(input.quantity, ownServices);
 
   const [order] = await db
     .insert(productionOrders)
@@ -243,6 +309,7 @@ export async function createProductionOrder(db: Db, tenant: TenantActor, input: 
       dueDate: input.dueDate ?? null,
       bomId: index.bomIdByProduct.get(product.id) ?? null,
       routingId: routing?.id ?? null,
+      serviceCostMinor: extendCostMinor(input.quantity, ownServices),
       estimatedCostMinor: estimated,
       qcStatus: "not_required",
       notes: input.notes ?? null,

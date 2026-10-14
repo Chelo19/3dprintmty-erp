@@ -1,3 +1,4 @@
+import { loadCompanyProfile } from "./company-profile";
 import { canManufacture } from "@3dprintmty/domain";
 import {
   canOverrideCredit,
@@ -32,7 +33,6 @@ import {
   auditEvents,
   boms,
   commercialDocuments,
-  companyProfiles,
   customers,
   filaments,
   payments,
@@ -522,7 +522,7 @@ export async function priceLines(
   allowInactive = false,
 ) {
   const normalized = await normalizeCommercialLines(db, lines, allowInactive);
-  const [company] = await db.select().from(companyProfiles).limit(1);
+  const company = await loadCompanyProfile(db);
   const rate = company?.defaultVatRate ? String(company.defaultVatRate) : "0.16";
   const taxLines = normalized.map((line) => ({
     description: line.description,

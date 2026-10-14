@@ -1,3 +1,4 @@
+import { withRecipeCosts } from "./product-cost-sync";
 import { createHash } from "node:crypto";
 import {
   canApproveNegativeStock,
@@ -210,11 +211,13 @@ export async function stockValueMinor(db: Db, item: StockTarget, quantity: bigin
     const unit = stockUnitCostMinor(filament.costMinor === null ? null : BigInt(filament.costMinor), "1000");
     return extendCostMinor(quantity, unit);
   }
-  const [product] = await db
-    .select({ costMinor: products.costMinor, uomFactor: products.uomFactor })
+  const [stored] = await db
+    .select({ id: products.id, costMinor: products.costMinor, uomFactor: products.uomFactor })
     .from(products)
     .where(eq(products.id, identity.productId as string))
     .limit(1);
+  if (!stored) return 0n;
+  const [product] = await withRecipeCosts<{ id: string; costMinor: bigint | null; uomFactor: string }>(db, [stored]);
   if (!product) return 0n;
   const unit = stockUnitCostMinor(product.costMinor === null ? null : BigInt(product.costMinor), String(product.uomFactor));
   return extendCostMinor(quantity, unit);

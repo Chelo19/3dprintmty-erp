@@ -334,6 +334,11 @@ export function PurchaseOrderPage() {
     await client.invalidateQueries({ queryKey: ["purchase-order", id] });
     await client.invalidateQueries({ queryKey: ["purchase-orders"] });
     await client.invalidateQueries({ queryKey: ["inventory"] });
+    await client.invalidateQueries({ queryKey: ["products"] });
+    await client.invalidateQueries({ queryKey: ["product"] });
+    await client.invalidateQueries({ queryKey: ["filaments"] });
+    await client.invalidateQueries({ queryKey: ["bom"] });
+    await client.invalidateQueries({ queryKey: ["boms"] });
   };
   const move = (to: string, reason?: string) =>
     run(async () => {

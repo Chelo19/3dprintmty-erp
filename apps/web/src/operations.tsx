@@ -3,7 +3,7 @@ import { CollectionStatusBadge, COLLECTION_METHODS, COLLECTION_STATES, collectio
 import { EmptyState } from "./empty-state";
 import { Notice } from "./notice";
 import { BackLink, BackButton } from "./back-control";
-import { canOverrideCredit, Money, MX_STATES } from "@3dprintmty/domain";
+import { canOverrideCredit, GENERIC_RFC, Money, MX_STATES } from "@3dprintmty/domain";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
@@ -177,8 +177,7 @@ export function CustomersPage() {
         <h1 style={{ margin: 0 }}>Clientes</h1>
         <NewLink to="/app/clientes/nuevo">Nuevo cliente</NewLink>
       </div>
-      {query.isPending ? <TableSkeleton columns={6} /> : query.isError ? <Notice tone="error" title="No se pudieron cargar los clientes" action={<button className="ghost" type="button" onClick={() => void query.refetch()}>Reintentar</button>}>Intenta nuevamente para consultar el catálogo.</Notice> : !all.length ? <EmptyState title="Sin clientes" to="/app/clientes/nuevo" actionLabel="Crear cliente">Agrega tu primer cliente para generar cotizaciones y pedidos.</EmptyState> : (
-      <>
+      <p>Administra los datos de tus clientes, sus términos de pago y límites de crédito para dar seguimiento a cotizaciones, pedidos y cobranza.</p>
       <FilterBar
         search={values.q}
         onSearch={(value) => set("q", value)}
@@ -202,7 +201,7 @@ export function CustomersPage() {
           options={["pue", "net_15", "net_30"].map((terms) => ({ value: terms, label: paymentTermsLabel(terms) }))}
         />
       </FilterBar>
-      {!rows.length ? <NoMatches onClear={reset} /> : (
+      {query.isPending ? <TableSkeleton columns={6} /> : query.isError ? <Notice tone="error" title="No se pudieron cargar los clientes" action={<button className="ghost" type="button" onClick={() => void query.refetch()}>Reintentar</button>}>Intenta nuevamente para consultar el catálogo.</Notice> : !all.length ? <EmptyState title="Sin clientes" to="/app/clientes/nuevo" actionLabel="Crear cliente">Agrega tu primer cliente para generar cotizaciones y pedidos.</EmptyState> : !rows.length ? <NoMatches onClear={reset} /> : (
       <Paged rows={rows}>
       {(customers) => (
       <table>
@@ -223,8 +222,6 @@ export function CustomersPage() {
       )}
       </Paged>
       )}
-      </>
-      )}
     </section>
   );
 }
@@ -233,6 +230,8 @@ export function CustomerNewPage() {
   const client = useQueryClient();
   const navigate = useNavigate();
   const { error, pendingKey, run } = useError();
+  const [useGenericRfc, setUseGenericRfc] = useState(false);
+  const [rfc, setRfc] = useState("");
   return (
     <section style={{ display: "grid", gap: 16 }}>
       <BackLink to="/app/clientes">Clientes</BackLink>
@@ -267,7 +266,15 @@ export function CustomerNewPage() {
       >
         <label>Tipo<select name="kind" defaultValue="b2b"><option value="b2b">Empresa</option><option value="b2c">Persona</option></select></label>
         <label>Nombre o razón social<input name="legalName" required /></label>
-        <label>RFC<input name="rfc" placeholder="XAXX010101000" /></label>
+        <label>
+          RFC
+          <input name="rfc" placeholder={GENERIC_RFC.domestic} value={useGenericRfc ? GENERIC_RFC.domestic : rfc}
+            readOnly={useGenericRfc} onChange={(event) => setRfc(event.target.value)} />
+        </label>
+        <label className="check-field">
+          <input type="checkbox" checked={useGenericRfc} onChange={(event) => setUseGenericRfc(event.target.checked)} />
+          Usar RFC de público en general
+        </label>
         <label>Teléfono<input name="phone" placeholder="8112345678" /></label>
         <label>
           Términos
@@ -278,9 +285,9 @@ export function CustomerNewPage() {
           </select>
         </label>
         <label>Límite de crédito<input name="creditLimit" placeholder="0.00" /></label>
-        <label>Calle<input name="line1" required /></label>
-        <label>Colonia<input name="neighborhood" required /></label>
-        <label>C.P.<input name="postalCode" required pattern="\d{5}" /></label>
+        <label>Calle<input name="line1" /></label>
+        <label>Colonia<input name="neighborhood" /></label>
+        <label>C.P.<input name="postalCode" pattern="\d{5}" /></label>
         <label>Estado<select name="state">{MX_STATES.map((state) => <option key={state}>{state}</option>)}</select></label>
         <FormActions>
           <SaveButton pending={pendingKey !== null} label="Guardar cliente" />
@@ -540,9 +547,9 @@ export function CustomerEditPage() {
             <option value="inactive">Inactivo</option>
           </select>
         </label>
-        <label>Calle<input name="line1" required defaultValue={data.fiscal?.line1 ?? ""} /></label>
-        <label>Colonia<input name="neighborhood" required defaultValue={data.fiscal?.neighborhood ?? ""} /></label>
-        <label>C.P.<input name="postalCode" required pattern="\d{5}" defaultValue={data.fiscal?.postalCode ?? ""} /></label>
+        <label>Calle<input name="line1" defaultValue={data.fiscal?.line1 ?? ""} /></label>
+        <label>Colonia<input name="neighborhood" defaultValue={data.fiscal?.neighborhood ?? ""} /></label>
+        <label>C.P.<input name="postalCode" pattern="\d{5}" defaultValue={data.fiscal?.postalCode ?? ""} /></label>
         <label>Estado<select name="state" defaultValue={data.fiscal?.state ?? MX_STATES[0]}>{MX_STATES.map((state) => <option key={state}>{state}</option>)}</select></label>
         <FormActions>
           <SaveButton pending={pendingKey !== null} />

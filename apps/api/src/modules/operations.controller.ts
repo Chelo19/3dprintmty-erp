@@ -1,3 +1,4 @@
+import { loadCompanyProfile } from "./company-profile";
 import { Body, Controller, Get, Header, Headers, Param, Patch, Post, Query, StreamableFile } from "@nestjs/common";
 import {
   assertMxState,
@@ -23,7 +24,6 @@ import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
 import { services } from "../container";
 import {
-  companyProfiles,
   customerAddresses,
   customers,
   expenses,
@@ -63,9 +63,9 @@ import { renderQuotePdf, type QuotePdfInput } from "./quote-pdf";
 import { allocateFolio, audit, defaultLocationId, one, postStock, withIdempotency, type Db } from "./support";
 
 const addressSchema = z.object({
-  line1: z.string().trim().min(1).max(160),
-  neighborhood: z.string().trim().min(1).max(80),
-  postalCode: z.string(),
+  line1: z.string().trim().max(160).default(""),
+  neighborhood: z.string().trim().max(80).default(""),
+  postalCode: z.string().trim().default(""),
   state: z.string(),
 });
 
@@ -1031,7 +1031,7 @@ async function quoteLineTarget(db: Db, line: StoredLine) {
 
 async function loadQuote(db: Db, id: string, role: TenantRole) {
   const quote = await one(db, quotes, quotes.id, id, "No encontramos esa cotización.");
-  const [company] = await db.select().from(companyProfiles).limit(1);
+  const company = await loadCompanyProfile(db);
   const prints = await db.select().from(quotePrints).where(eq(quotePrints.quoteId, quote.id)).orderBy(asc(quotePrints.position));
   const lines = await db.select().from(quoteLines).where(eq(quoteLines.quoteId, quote.id)).orderBy(asc(quoteLines.position));
   const mapped = lines.map((line: StoredLine) => mapLine(line, role));
@@ -1070,7 +1070,7 @@ async function loadQuote(db: Db, id: string, role: TenantRole) {
 }
 
 async function quotePdfInput(db: Db, quote: Awaited<ReturnType<typeof loadQuote>>): Promise<QuotePdfInput> {
-  const [company] = await db.select().from(companyProfiles).limit(1);
+  const company = await loadCompanyProfile(db);
   return {
     folio: quote.folio,
     issuedAt: new Date(quote.createdAt).toLocaleDateString("es-MX"),
@@ -1316,7 +1316,7 @@ function cleanAddress(input: z.infer<typeof addressSchema>) {
   return {
     line1: input.line1,
     neighborhood: input.neighborhood,
-    postalCode: assertPostalCode(input.postalCode),
+    postalCode: input.postalCode ? assertPostalCode(input.postalCode) : "",
     state: assertMxState(input.state),
     countryCode: "MX",
   };

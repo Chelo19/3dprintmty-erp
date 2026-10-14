@@ -23,6 +23,7 @@ interface CatalogItem {
 interface BomLine {
   componentProductId: string;
   quantity: string;
+  scrapPct?: string;
 }
 
 type Kind = "filament" | "supply" | "service";
@@ -33,6 +34,7 @@ interface Line {
   itemId: string;
   quantity: string;
   unitPrice: string;
+  scrapPct?: string;
 }
 
 /** Lo que la calculadora le pasa a la pantalla de alta de producto. */
@@ -42,6 +44,7 @@ export interface CalculatorDraft {
   salePrice: string;
   recipe: Array<{ componentProductId: string; name: string; quantity: string; uom: string }>;
   services: number;
+  serviceRecipe?: Array<{ serviceId: string; quantity: string }>;
 }
 
 const KIND_LABEL: Record<Kind, string> = { filament: "Filamento", supply: "Insumo", service: "Servicio" };
@@ -125,15 +128,14 @@ export function CostCalculatorPage() {
     const productById = new Map((products.data?.data ?? []).map((item) => [item.id, item]));
     const target = productById.get(productId);
     if (target) setName(target.name);
-    void api<{ lines: BomLine[] }>(`/boms/${productId}`)
+    void api<{ lines: BomLine[]; services: Array<{ serviceId: string; quantity: string }> }>(`/boms/${productId}`)
       .then((bom) => {
         if (cancelled) return;
-        setLines(bom.lines.map((line) => {
+        setLines([...bom.lines.map((line) => {
           const filament = filamentById.get(line.componentProductId);
-          return filament
-            ? newLine("filament", filament, line.quantity)
-            : newLine("supply", productById.get(line.componentProductId), line.quantity);
-        }));
+          return { ...(filament ? newLine("filament", filament, line.quantity)
+            : newLine("supply", productById.get(line.componentProductId), line.quantity)), scrapPct: line.scrapPct ?? "0" };
+        }), ...(bom.services ?? []).map((line) => newLine("service", services.data?.data.find((item) => item.id === line.serviceId), line.quantity))]);
       })
       .catch(() => {
         if (!cancelled) setLines([]);
@@ -141,13 +143,13 @@ export function CostCalculatorPage() {
     return () => {
       cancelled = true;
     };
-  }, [productId, loaded, filaments.data, products.data]);
+  }, [productId, loaded, filaments.data, products.data, services.data]);
 
   const computed = lines.map((line) => {
     const item = catalogs[line.kind].find((entry) => entry.id === line.itemId);
     const quantity = amount(line.quantity);
     const unitCost = item?.cost ? (amount(item.cost) * 100) / (line.kind === "filament" ? 1000 : 1) : null;
-    const cost = unitCost === null ? 0 : quantity * unitCost;
+    const cost = unitCost === null ? 0 : quantity * unitCost * (1 + amount(line.scrapPct) / 100);
     const revenue = quantity * amount(line.unitPrice) * 100;
     const uom = line.kind === "filament" ? "g" : line.kind === "service" ? item?.unit ?? "servicio" : uomShort(item?.stockUom ?? "EA");
     return { line, item, quantity, cost, revenue, uom, missingCost: Boolean(item && unitCost === null) };
@@ -184,12 +186,20 @@ export function CostCalculatorPage() {
     }));
   }
 
+  function selectedServiceRecipe() {
+    const quantities = new Map<string, number>();
+    for (const entry of usable) if (entry.line.kind === "service" && entry.item) {
+      quantities.set(entry.item.id, (quantities.get(entry.item.id) ?? 0) + entry.quantity);
+    }
+    return [...quantities].map(([serviceId, quantity]) => ({ serviceId, quantity: qtyText(quantity) }));
+  }
+
   function toNewProduct() {
     const recipe = new Map<string, CalculatorDraft["recipe"][number]>();
     for (const entry of usable) {
       if (entry.line.kind === "service" || !entry.item) continue;
       const previous = recipe.get(entry.item.id);
-      const quantity = (previous ? amount(previous.quantity) : 0) + entry.quantity;
+      const quantity = (previous ? amount(previous.quantity) : 0) + entry.quantity * (1 + amount(entry.line.scrapPct) / 100);
       recipe.set(entry.item.id, { componentProductId: entry.item.id, name: entry.item.name, quantity: qtyText(quantity), uom: entry.uom });
     }
     const draft: CalculatorDraft = {
@@ -198,6 +208,7 @@ export function CostCalculatorPage() {
       salePrice: totalPrice > 0 ? priceText : "",
       recipe: [...recipe.values()],
       services: usable.filter((entry) => entry.line.kind === "service").length,
+      serviceRecipe: selectedServiceRecipe(),
     };
     navigate("/app/productos/nuevo", { state: { calculator: draft } });
   }
@@ -208,13 +219,20 @@ export function CostCalculatorPage() {
     setError(null);
     setMessage(null);
     try {
-      await api(`/products/${product.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({ cost: costText, ...(totalPrice > 0 && !product.pricesHidden ? { salePrice: priceText } : {}) }),
+      const materials = usable.filter((entry) => entry.line.kind !== "service" && entry.item);
+      if (!materials.length) throw new Error("La receta necesita al menos un filamento o insumo.");
+      await api("/boms", { method: "POST", body: JSON.stringify({ productId: product.id,
+        lines: materials.map((entry) => ({ componentProductId: entry.item!.id, quantity: qtyText(entry.quantity), scrapPct: entry.line.scrapPct ?? "0" })),
+        services: selectedServiceRecipe(),
+      }) });
+      if (totalPrice > 0 && !product.pricesHidden) await api(`/products/${product.id}`, {
+        method: "PATCH", body: JSON.stringify({ salePrice: priceText }),
       });
+      await client.invalidateQueries({ queryKey: ["bom"] });
+      await client.invalidateQueries({ queryKey: ["boms"] });
       await client.invalidateQueries({ queryKey: ["products"] });
       await client.invalidateQueries({ queryKey: ["product", product.id] });
-      setMessage(totalPrice > 0 && !product.pricesHidden ? `Guardado: costo ${pesos(totalCost)} y precio ${pesos(totalPrice)}.` : `Costo guardado: ${pesos(totalCost)}.`);
+      setMessage(totalPrice > 0 && !product.pricesHidden ? "Receta y precio guardados. El costo del producto se recalculó desde su receta y ruta de fabricación." : "Receta guardada. El costo del producto se recalculó desde su receta y ruta de fabricación.");
     } catch (caught) {
       setError(caught instanceof ApiError ? caught.message : "No se pudo guardar.");
     } finally {
@@ -365,7 +383,7 @@ export function CostCalculatorPage() {
         </div>
         {product ? (
           <FormActions>
-            <SaveButton pending={saving} label="Guardar costo y precio en el producto" onClick={() => void saveToProduct()} />
+            <SaveButton pending={saving} label="Guardar receta y precio en el producto" onClick={() => void saveToProduct()} />
             <p className="costing-hint" style={{ margin: 0 }}>
               Hoy: costo {product.cost ? pesos(amount(product.cost) * 100) : "—"}
               {product.pricesHidden ? "" : ` · precio ${product.salePrice ? pesos(amount(product.salePrice) * 100) : "—"}`}

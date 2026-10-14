@@ -223,7 +223,7 @@ export function RecipesPage() {
   return (
     <section style={{ display: "grid", gap: 16 }}>
       <h1>Recetas</h1>
-      <p>La receta dice qué material lleva cada pieza de un producto terminado. Sin receta, el producto no se puede fabricar. Los productos e insumos se apartan y se descuentan del inventario; el filamento solo cuenta en el costo y se ajusta en Inventario ▸ Filamentos.</p>
+      <p>La receta define los materiales y servicios por pieza y determina el costo del producto terminado. Sin receta, el producto no se puede fabricar. Los productos e insumos se apartan y se descuentan del inventario; el filamento solo cuenta en el costo y se ajusta en Inventario ▸ Filamentos.</p>
       {products.isPending || recipes.isPending ? <TableSkeleton columns={6} /> : !finished.length ? (
         <EmptyState title="Sin artículos para crear recetas" to="/app/productos/nuevo?abastecimiento=make" actionLabel="Crear producto fabricado">Crea un artículo con fabricación habilitada para definir sus materiales y preparar su receta.</EmptyState>
       ) : (
@@ -249,7 +249,7 @@ export function RecipesPage() {
         <Paged rows={rows}>
         {(pageRows) => (
         <table>
-          <thead><tr><th>SKU</th><th>Producto</th><th>Componentes</th><CostOnly><th>Costo de material por pieza</th></CostOnly><th>Estado</th><th></th></tr></thead>
+          <thead><tr><th>SKU</th><th>Producto</th><th>Componentes</th><CostOnly><th>Costo por pieza</th></CostOnly><th>Estado</th><th></th></tr></thead>
           <tbody>
             {pageRows.map((product) => {
               const summary = summaries.get(product.id);
@@ -259,7 +259,7 @@ export function RecipesPage() {
                   <td>{product.sku}</td>
                   <td>{product.name}</td>
                   <td>{lines ? lines : <span className="res res-badge cat-inactive">Sin receta</span>}</td>
-                  <CostOnly><td>{lines ? money(summary?.materialCost) : "—"}</td></CostOnly>
+                  <CostOnly><td>{lines ? money(summary?.unitCost) : "—"}</td></CostOnly>
                   <td><StatusBadge status={product.status} /></td>
                   <td>
                     <div className="record-actions">
@@ -288,6 +288,7 @@ function RecipeEditor({ product, onClose }: { product: ProductOption; onClose: (
   const client = useQueryClient();
   const products = useProducts();
   const filaments = useFilaments();
+  const services = useQuery({ queryKey: ["services"], queryFn: () => api<{ data: Array<{ id: string; name: string; code: string; unit: string; status: string }> }>("/services") });
   const recipeId = product.id;
   const bom = useQuery({
     queryKey: ["bom", recipeId],
@@ -303,12 +304,14 @@ function RecipeEditor({ product, onClose }: { product: ProductOption; onClose: (
   const recipeLines = bom.data?.lines ?? [];
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editQty, setEditQty] = useState("");
-  const saveRecipe = (lines: RecipeInput[], key: string) =>
+  const saveRecipe = (lines: RecipeInput[], key: string, serviceLines = bom.data?.services ?? []) =>
     recipe.run(async () => {
-      await postJson("/boms", { productId: recipeId, lines });
+      await postJson("/boms", { productId: recipeId, lines, services: serviceLines.map((line) => ({ serviceId: line.serviceId, quantity: line.quantity })) });
       setEditingId(null);
       await client.invalidateQueries({ queryKey: ["bom", recipeId] });
       await client.invalidateQueries({ queryKey: ["boms"] });
+      await client.invalidateQueries({ queryKey: ["products"] });
+      await client.invalidateQueries({ queryKey: ["product"] });
     }, key);
   const saveQuantity = (componentId: string) => {
     void saveRecipe(
@@ -316,11 +319,18 @@ function RecipeEditor({ product, onClose }: { product: ProductOption; onClose: (
       componentId,
     );
   };
+  const saveServiceQuantity = (serviceId: string) => {
+    void saveRecipe(recipeLines.map(recipeInput), `service-${serviceId}`,
+      (bom.data?.services ?? []).map((line) => line.serviceId === serviceId ? { ...line, quantity: editQty.trim() } : line));
+  };
   if (operator) return <Modal title={`Receta de ${product.sku} · ${product.name}`} onClose={onClose}>
     {bom.isPending ? <TableSkeleton columns={3} /> : bom.isError ? <Notice tone="error" title="No se pudo cargar la receta" action={<button className="ghost" type="button" onClick={() => bom.refetch()}>Reintentar</button>}>{bom.error.message}</Notice> : <table>
       <thead><tr><th>Componente</th><th>Cantidad por pieza</th><th>Merma</th></tr></thead>
       <tbody>{recipeLines.map((line) => <tr key={line.componentProductId}><td>{line.sku} · {line.name}</td><td>{line.quantity}</td><td>{line.scrapPct}%</td></tr>)}</tbody>
     </table>}
+    <h2>Servicios por pieza</h2>
+    <table><thead><tr><th>Servicio</th><th>Cantidad</th></tr></thead>
+      <tbody>{(bom.data?.services ?? []).map((line) => <tr key={line.serviceId}><td>{line.name}</td><td>{line.quantity} {line.unit}</td></tr>)}</tbody></table>
   </Modal>;
   return (
     <Modal title={`Receta de ${product.sku} · ${product.name}`} onClose={onClose} closeDisabled={recipePending !== null}>
@@ -328,6 +338,7 @@ function RecipeEditor({ product, onClose }: { product: ProductOption; onClose: (
         {product.status === "inactive" ? <p style={{ margin: 0 }}><StatusBadge status={product.status} /></p> : null}
         {bom.isPending ? <TableSkeleton columns={4} /> : bom.data ? (
           <>
+            <h2 style={{ margin: 0 }}>Filamentos e insumos</h2>
             {recipeLines.length === 0 ? <p style={{ margin: 0 }}>Este producto todavía no tiene receta. Agrega su primer componente.</p> : (
             <Paged rows={recipeLines}>
             {(pageLines) => (
@@ -434,6 +445,73 @@ function RecipeEditor({ product, onClose }: { product: ProductOption; onClose: (
               </button>
             </form>
             <p className="costing-hint" style={{ margin: 0 }}>Si agregas un componente que ya está en la receta, se reemplaza su cantidad.</p>
+            <h2 style={{ margin: "12px 0 0" }}>Servicios por pieza</h2>
+            <p className="costing-hint">Agrega impresión, acabado, diseño u otros servicios del catálogo. Se suman al costo, sin afectar existencias.</p>
+            {(bom.data.services ?? []).length ? <table>
+              <thead><tr><th>Servicio</th><th>Cantidad por pieza</th><th>Costo por pieza</th><th></th></tr></thead>
+              <tbody>{bom.data.services.map((line) => {
+                const key = `service-${line.serviceId}`;
+                const editing = editingId === key;
+                return <tr key={line.serviceId}>
+                  <td>{line.code} · {line.name}</td>
+                  <td>{editing ? (
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                      <input aria-label={`Cantidad de ${line.name}`} inputMode="decimal" disabled={recipePending !== null}
+                        style={{ width: 100 }} value={editQty} autoFocus onChange={(event) => setEditQty(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") saveServiceQuantity(line.serviceId);
+                          if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setEditingId(null); }
+                        }} />
+                      {line.unit}
+                    </span>
+                  ) : `${line.quantity} ${line.unit}`}</td>
+                  <td>{money(line.extendedCost)}</td>
+                  <td><div className="record-actions">
+                    {editing ? <>
+                      <IconAction label="Guardar cantidad" tone="accept" pending={recipePending === key} disabled={recipePending !== null} onClick={() => saveServiceQuantity(line.serviceId)}><CheckIcon /></IconAction>
+                      <IconAction label="Descartar cambio" tone="neutral" disabled={recipePending !== null} onClick={() => setEditingId(null)}><XIcon /></IconAction>
+                    </> : <>
+                      <IconAction label="Editar cantidad" tone="edit" disabled={recipePending !== null} onClick={() => { setEditingId(key); setEditQty(line.quantity); }}><PencilIcon /></IconAction>
+                      <IconAction label={`Quitar ${line.name}`} tone="delete" disabled={recipePending !== null}
+                        onClick={() => {
+                          if (!window.confirm(`¿Quitar ${line.name} de la receta?`)) return;
+                          void saveRecipe(recipeLines.map(recipeInput), `remove-service-${line.serviceId}`,
+                            bom.data!.services.filter((entry) => entry.serviceId !== line.serviceId));
+                        }}><TrashIcon /></IconAction>
+                    </>}
+                  </div></td>
+                </tr>;
+              })}</tbody>
+            </table> : <Notice title="Sin servicios en la receta">Selecciona un servicio abajo para incorporarlo al costo por pieza.</Notice>}
+            <form style={grid} onSubmit={(event) => {
+              event.preventDefault();
+              const form = event.currentTarget;
+              const data = new FormData(form);
+              const added = { serviceId: String(data.get("serviceId")), quantity: String(data.get("quantity")) };
+              const selected = (services.data?.data ?? []).find((entry) => entry.id === added.serviceId);
+              if (!selected) return;
+              const kept = bom.data!.services.filter((entry) => entry.serviceId !== added.serviceId);
+              void saveRecipe(recipeLines.map(recipeInput), "add-service", [...kept, { ...added, code: selected.code, name: selected.name, unit: selected.unit, extendedCost: null }]).then(() => form.reset());
+            }}>
+              <label>Servicio<select name="serviceId" required disabled={!services.data?.data.length}>
+                <option value="">Selecciona un servicio</option>
+                {(services.data?.data ?? []).filter((entry) => entry.status !== "inactive").map((entry) => <option key={entry.id} value={entry.id}>{entry.code} · {entry.name}</option>)}
+              </select></label>
+              <label>Cantidad por pieza<input name="quantity" required inputMode="decimal" placeholder="1" /></label>
+              <button className="primary new-link form-inline-submit" type="submit" disabled={recipePending !== null || !recipeLines.length || !services.data?.data.length}><PlusIcon />Agregar servicio</button>
+            </form>
+            {services.isError ? <Notice tone="error" title="No se pudieron cargar los servicios" action={<button className="ghost" type="button" onClick={() => void services.refetch()}>Reintentar</button>}>Intenta nuevamente para consultar el catálogo.</Notice> : !services.isPending && !services.data?.data.length ? <EmptyState title="Sin servicios en el catálogo" to="/app/servicios/nuevo" actionLabel="Crear servicio">Registra un servicio para asociarlo a la receta.</EmptyState> : null}
+            <CostOnly><article className="card" style={{ display: "grid", gap: 8 }}>
+              <h2 style={{ margin: 0 }}>Costo por pieza</h2>
+              {bom.data.missingCosts ? <Notice title="Costo incompleto">Hay materiales o servicios sin costo en su catálogo. Captura sus costos para calcular el total del producto.</Notice> : null}
+              <div style={grid}>
+                <span>Filamento <strong>{money(bom.data.filamentCost)}</strong></span>
+                <span>Insumos <strong>{money(bom.data.suppliesCost)}</strong></span>
+                <span>Servicios <strong>{money(bom.data.serviceCost)}</strong></span>
+                <span>Ruta de fabricación <strong>{money(bom.data.laborCost)}</strong></span>
+              </div>
+              <p style={{ margin: 0 }}>Costo total <strong>{bom.data.missingCosts ? "Pendiente de completar" : money(bom.data.unitCost)}</strong></p>
+            </article></CostOnly>
             {recipeError ? <Notice tone="error" title="No se pudo guardar la receta">{recipeError}</Notice> : null}
           </>
         ) : <Notice tone="error" title="No se pudo cargar la receta" action={<button className="ghost" type="button" onClick={() => bom.refetch()}>Reintentar</button>}>Intenta nuevamente para consultar sus componentes.</Notice>}
@@ -625,10 +703,16 @@ interface RecipeSummary {
   productId: string;
   lines: number;
   materialCost: string | null;
+  unitCost: string | null;
 }
 
 interface BomDetail {
   lines: Array<{ componentProductId: string; sku: string; name: string; stockUom: string; quantity: string; scrapPct: string; requiredPerUnit: string; extendedCost: string }>;
+  services: Array<{ serviceId: string; name: string; code: string; unit: string; quantity: string; extendedCost: string | null }>;
+  filamentCost: string | null;
+  suppliesCost: string | null;
+  serviceCost: string | null;
+  missingCosts: boolean;
   materialCost: string;
   laborCost: string;
   unitCost: string;

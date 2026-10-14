@@ -625,7 +625,9 @@ function ProductEditPage() {
             supplyMode: form.get("supplyMode"),
           }).then(async () => {
             await client.invalidateQueries({ queryKey: ["products"] });
-            await client.invalidateQueries({ queryKey: ["product", id] });
+            await client.invalidateQueries({ queryKey: ["product"] });
+            await client.invalidateQueries({ queryKey: ["boms"] });
+            await client.invalidateQueries({ queryKey: ["bom"] });
             navigate(`${catalogHome(String(form.get("itemClass")), String(form.get("supplyMode")))}/${id}`);
           }).catch((caught) => setError(caught instanceof ApiError ? caught.message : "No se pudo guardar."));
         }}
@@ -635,7 +637,7 @@ function ProductEditPage() {
         <label>Clasificación<select name="itemClass" defaultValue={data.itemClass}><option value="finished_good">Producto terminado</option><option value="component">Insumo / componente</option><option value="raw_material">Materia prima</option></select></label>
         <label>Abastecimiento<select name="supplyMode" defaultValue={data.supplyMode}><option value="make">Fabricar</option><option value="buy">Comprar</option><option value="both">Fabricar o comprar</option></select></label>
         <UomSelect defaultValue={data.stockUom} hint="Si ya hay existencia, déjala en cero antes de cambiar la unidad: las cantidades no se convierten. Revisa también las recetas que lo usen." />
-        <CostPriceFields costLabel="Costo" priceLabel="Precio de venta" initialCost={data.cost ?? ""} initialPrice={data.salePrice ?? ""} />
+        <CostPriceFields costLabel={canManufacture(data) ? "Costo calculado desde la receta" : "Costo"} costReadOnly={canManufacture(data)} priceLabel="Precio de venta" initialCost={data.cost ?? ""} initialPrice={data.salePrice ?? ""} />
         <label>
           Estado
           <select name="status" defaultValue={data.status ?? "active"}>
@@ -722,6 +724,10 @@ function FilamentEditPage() {
             }),
           }).then(async () => {
             await client.invalidateQueries({ queryKey: ["filaments"] });
+            await client.invalidateQueries({ queryKey: ["products"] });
+            await client.invalidateQueries({ queryKey: ["product"] });
+            await client.invalidateQueries({ queryKey: ["boms"] });
+            await client.invalidateQueries({ queryKey: ["bom"] });
             await client.invalidateQueries({ queryKey: ["filament", id] });
             navigate(`/app/filamentos/${id}`);
           }).catch((caught) => setError(caught instanceof ApiError ? caught.message : "No se pudo guardar.")).finally(() => setSaving(false));
@@ -819,6 +825,7 @@ function ProductNewPage({ kind }: { kind?: "component" }) {
           body: JSON.stringify({
             productId: created.id,
             notes: "Desde la calculadora de costo",
+            services: draft.serviceRecipe ?? [],
             lines: draft.recipe.map((line) => ({ componentProductId: line.componentProductId, quantity: line.quantity })),
           }),
         });
@@ -866,7 +873,7 @@ function ProductNewPage({ kind }: { kind?: "component" }) {
             <ul className="payment-terms-wide" style={{ margin: 0, paddingLeft: 18 }}>
               {draft.recipe.map((line) => <li key={line.componentProductId}>{line.name} · {line.quantity} {line.uom}</li>)}
             </ul>
-            {draft.services ? <p className="payment-terms-wide muted-note">Los servicios cuentan en el costo, pero no van en la receta.</p> : null}
+            {draft.services ? <p className="payment-terms-wide muted-note">Los servicios se guardan en su propia sección de la receta.</p> : null}
           </fieldset>
         ) : null}
         <FormActions>
