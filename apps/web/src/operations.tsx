@@ -1,9 +1,10 @@
+import { EntityAutocomplete } from "./entity-autocomplete";
 import { Modal } from "./modal";
 import { CollectionStatusBadge, COLLECTION_METHODS, COLLECTION_STATES, collectionMethodLabel, collectionDateLabel } from "./collection-ui";
 import { EmptyState } from "./empty-state";
 import { Notice } from "./notice";
 import { BackLink, BackButton } from "./back-control";
-import { canOverrideCredit, GENERIC_RFC, Money, MX_STATES } from "@3dprintmty/domain";
+import { canOverrideCredit, GENERIC_RFC, Money, MX_STATES, formatQty, mulQty, parseQty } from "@3dprintmty/domain";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
@@ -1048,7 +1049,8 @@ function OrderLinesTable({
             <th>Descuento</th>
             <th>Importe</th>
             <th>IVA</th>
-            <th>Total</th>
+            <th>Retención ISR</th>
+            <th>Total por cobrar</th>
             {showResolution ? <th>Resolución</th> : null}
           </tr>
         </thead>
@@ -1084,8 +1086,9 @@ function OrderLinesTable({
               <td>{money(line.unitPrice)}</td>
               <td>{money(line.discount)}</td>
               <td>{money(line.net)}</td>
-              <td>{money(line.vat)}</td>
-              <td>{money(line.total)}</td>
+              <td>{line.vatExempt ? "Exento" : <>{money(line.vat)}<div className="costing-hint">{vatRateLabel(line.vatRate)}</div></>}</td>
+              <td>−{money(line.isrWithheld)}<div className="costing-hint">ISR {Number((Number(line.isrRate) * 100).toFixed(4))}%</div></td>
+              <td>{money(line.total == null ? null : Money.fromMajor(line.total).sub(Money.fromMajor(line.isrWithheld ?? "0")).toMajor())}</td>
               {showResolution ? <td>{line.lineKind === "service" || line.lineKind === "product" ? <ResolutionBadge resolution={line.resolution} /> : "—"}</td> : null}
             </tr>
           ))}
@@ -1109,6 +1112,7 @@ function OrderGuidance({
   onChange: () => Promise<void>;
 }) {
   const client = useQueryClient();
+  const canAllocate = useRole() !== "operator";
   const supply = order.supply;
   if (!supply) return null;
   const stocking = ["confirmed", "in_production", "on_hold"].includes(order.status);
@@ -1121,12 +1125,14 @@ function OrderGuidance({
   const allocate = order.actions?.find((action) => action.action === "allocate");
   if (!notes.length && !allocate?.allowed) return null;
   return (
-    <div style={{ display: "grid", gap: 8 }}>
+    <div className="order-guidance">
       {notes.map((note) => <p key={note} style={{ margin: 0 }}>{note}</p>)}
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-        {allocate?.allowed ? (
-          <Action
-            label="Apartar existencia"
+      <div className="order-guidance-actions">
+        {allocate?.allowed && canAllocate ? (
+          <QuoteButton
+            label={pendingKey === "allocate" ? "Apartando inventario…" : "Apartar inventario"}
+            tone="send"
+            icon={<PackageIcon />}
             pending={pendingKey === "allocate"}
             disabled={pendingKey !== null}
             onClick={() => act("allocate", async () => {
@@ -1136,8 +1142,8 @@ function OrderGuidance({
             })}
           />
         ) : null}
-        {stocking && supply.productToMake ? <Link to="/app/produccion">Ir a Producción</Link> : null}
-        {stocking && (supply.filamentShort || supply.productToBuy) ? <Link to="/app/compras">Ir a Compras</Link> : null}
+        {stocking && supply.productToMake ? <Link className="quote-btn shop" to="/app/produccion"><ArrowIcon /><span>Ir a producción</span></Link> : null}
+        {stocking && (supply.filamentShort || supply.productToBuy) ? <Link className="quote-btn neutral" to="/app/compras"><ArrowIcon /><span>Ir a compras</span></Link> : null}
       </div>
     </div>
   );
@@ -1229,10 +1235,11 @@ function OrderPanel({
         }}
       />
       <div style={{ justifySelf: "end", textAlign: "right" }}>
-        <p style={{ margin: 0 }}>Subtotal {money(order.subtotal)}</p>
-        <p style={{ margin: 0 }}>Descuento {money(order.discount)}</p>
+        <p style={{ margin: 0 }}>Subtotal neto {money(order.subtotal)}</p>
+        <p style={{ margin: 0 }}>Descuento incluido {money(order.discount)}</p>
         {order.shipping && order.shipping !== "0.00" ? <p style={{ margin: 0 }}>Envío {money(order.shipping)}</p> : null}
         <p style={{ margin: 0 }}>IVA {money(order.vat)}</p>
+        {Number(order.isrWithheld ?? 0) > 0 ? <p style={{ margin: 0 }}>Retención ISR −{money(order.isrWithheld)}</p> : null}
         <p style={{ margin: 0, fontSize: 20 }}><strong>Total {money(order.total)} {order.currency}</strong></p>
         <p style={{ margin: 0 }}>Saldo {money(order.amountDue)}</p>
       </div>
@@ -1392,14 +1399,26 @@ export function PaymentNewPage() {
   );
 }
 
+async function loadQuoteProducts() {
+  const first = await api<{ data: CatalogItem[]; total: number }>("/products?limit=100");
+  const data = [...first.data];
+  for (let page = 2; data.length < first.total; page++) {
+    const next = await api<{ data: CatalogItem[] }>(`/products?limit=100&page=${page}`);
+    if (!next.data.length) break;
+    data.push(...next.data);
+  }
+  return { data };
+}
+
 export function QuoteNewPage() {
   const client = useQueryClient();
   const navigate = useNavigate();
   const { error, pendingKey, run } = useError();
+  const company = useQuery({ queryKey: ["company"], queryFn: () => api<{ vatRate?: string | null; isrRate?: string | null }>("/company") });
   const customers = useQuery({ queryKey: ["customers"], queryFn: () => api<{ data: Customer[] }>("/customers") });
   const products = useQuery({
-    queryKey: ["products", "goods"],
-    queryFn: () => api<{ data: CatalogItem[] }>("/products?limit=100"),
+    queryKey: ["products", "quote-options"],
+    queryFn: loadQuoteProducts,
   });
   const filamentCatalog = useQuery({ queryKey: ["filaments"], queryFn: () => api<{ data: CatalogItem[] }>("/filaments") });
   const services = useQuery({ queryKey: ["services"], queryFn: () => api<{ data: ServiceOffering[] }>("/services") });
@@ -1410,8 +1429,11 @@ export function QuoteNewPage() {
     <section style={{ display: "grid", gap: 16 }}>
       <BackLink to="/app/cotizaciones">Cotizaciones</BackLink>
       <h1>Nueva cotización</h1>
-      {customers.isPending || products.isPending || filamentCatalog.isPending || services.isPending ? <FormSkeleton fields={6} /> : (
+      {customers.isPending || products.isPending || filamentCatalog.isPending || services.isPending || company.isPending ? <FormSkeleton fields={6} /> : company.isError ? (
+        <Notice tone="error" title="No se pudieron cargar los impuestos del taller" action={<button className="ghost" type="button" onClick={() => void company.refetch()}>Reintentar</button>}>Intenta nuevamente para usar las tasas por defecto.</Notice>
+      ) : (
       <QuoteBuilder
+        taxDefaults={company.data}
         customers={customers.data?.data ?? []}
         products={goods}
         filaments={filaments}
@@ -1443,8 +1465,8 @@ export function QuoteEditPage() {
   });
   const customers = useQuery({ queryKey: ["customers"], queryFn: () => api<{ data: Customer[] }>("/customers") });
   const products = useQuery({
-    queryKey: ["products", "goods"],
-    queryFn: () => api<{ data: CatalogItem[] }>("/products?limit=100"),
+    queryKey: ["products", "quote-options"],
+    queryFn: loadQuoteProducts,
   });
   const filamentCatalog = useQuery({ queryKey: ["filaments"], queryFn: () => api<{ data: CatalogItem[] }>("/filaments") });
   const services = useQuery({ queryKey: ["services"], queryFn: () => api<{ data: ServiceOffering[] }>("/services") });
@@ -1508,7 +1530,7 @@ export function QuoteDetailPage() {
                   {new Date(data.createdAt).toLocaleDateString("es-MX")} · Vigente hasta {new Date(data.validUntil).toLocaleDateString("es-MX")}
                   <QuoteStatusBadge status={data.status} />
                 </p>
-                <p style={{ margin: 0 }}>{data.mode === "prints" ? "Impresiones" : "Productos"} · {data.currency} · {paymentTermsLabel(data.paymentTerms)} · {vatRateLabel(data.vatRate)}</p>
+                <p style={{ margin: 0 }}>{data.mode === "prints" ? "Impresiones" : "Productos"} · {data.currency} · {paymentTermsLabel(data.paymentTerms)} · Impuestos por partida</p>
               </div>
               {data.issuer ? (
                 <div style={{ textAlign: "right" }}>
@@ -1527,9 +1549,10 @@ export function QuoteDetailPage() {
             <div className="quote-footer">
               <PaymentConditions data={data} total={data.total} leadTimeDays={data.leadTimeDays} />
               <div style={{ textAlign: "right" }}>
-                <p style={{ margin: 0 }}>Subtotal {money(data.subtotal)}</p>
-                <p style={{ margin: 0 }}>Descuento {money(data.discount)}</p>
+                <p style={{ margin: 0 }}>Subtotal neto {money(data.subtotal)}</p>
+                <p style={{ margin: 0 }}>Descuento incluido {money(data.discount)}</p>
                 <p style={{ margin: 0 }}>IVA {money(data.vat)}</p>
+                {Number(data.isrWithheld ?? 0) > 0 ? <p style={{ margin: 0 }}>Retención ISR −{money(data.isrWithheld)}</p> : null}
                 <p style={{ margin: 0, fontSize: 20 }}><strong>Total {money(data.total)} {data.currency}</strong></p>
               </div>
             </div>
@@ -1772,7 +1795,7 @@ function paymentTermsLabel(value: string) {
 }
 
 function vatRateLabel(rate: string) {
-  const pct = Math.round(Number(rate) * 100);
+  const pct = Number((Number(rate) * 100).toFixed(4));
   return Number.isFinite(pct) ? `IVA ${pct}%` : "IVA";
 }
 
@@ -1806,7 +1829,8 @@ function PrintBreakdown({ prints }: { prints: QuoteDetail["prints"] }) {
           <th>Importe por pieza</th>
           <th>Subtotal</th>
           <th>IVA</th>
-          <th>Total</th>
+          <th>Retención ISR</th>
+          <th>Total por cobrar</th>
         </tr>
       </thead>
       <tbody>
@@ -1961,7 +1985,7 @@ function QuoteBreakdown({ quote, costing }: { quote: QuoteDetail; costing: Quote
                   const cost = costById.get(line.id);
                   return (
                     <tr key={line.id}>
-                      <td>{line.description}{line.terms ? <div className="costing-hint">{line.terms}</div> : null}</td>
+                      <td>{line.description}{line.terms ? <div className="costing-hint">{line.terms}</div> : null}<div className="costing-hint">{line.vatExempt ? "IVA exento" : `${vatRateLabel(line.vatRate)}: ${money(line.vat)}`} · ISR {Number((Number(line.isrRate) * 100).toFixed(4))}%: −{money(line.isrWithheld)}</div><div className="costing-hint">Por cobrar {money(line.total == null ? null : Money.fromMajor(line.total).sub(Money.fromMajor(line.isrWithheld ?? "0")).toMajor())}</div></td>
                       <td>{line.quantity} {line.uom}</td>
                       <td>{money(line.unitPrice)}</td>
                       <td>{money(line.discount)}</td>
@@ -2017,7 +2041,8 @@ function QuoteLinesTable({ lines }: { lines: QuoteLine[] }) {
           <th>Descuento</th>
           <th>Importe</th>
           <th>IVA</th>
-          <th>Total</th>
+          <th>Retención ISR</th>
+          <th>Total por cobrar</th>
         </tr>
       </thead>
       <tbody>
@@ -2029,8 +2054,9 @@ function QuoteLinesTable({ lines }: { lines: QuoteLine[] }) {
             <td>{money(line.unitPrice)}</td>
             <td>{money(line.discount)}</td>
             <td>{money(line.net)}</td>
-            <td>{money(line.vat)}</td>
-            <td>{money(line.total)}</td>
+            <td>{line.vatExempt ? "Exento" : <>{money(line.vat)}<div className="costing-hint">{vatRateLabel(line.vatRate)}</div></>}</td>
+              <td>−{money(line.isrWithheld)}<div className="costing-hint">ISR {Number((Number(line.isrRate) * 100).toFixed(4))}%</div></td>
+            <td>{money(line.total == null ? null : Money.fromMajor(line.total).sub(Money.fromMajor(line.isrWithheld ?? "0")).toMajor())}</td>
           </tr>
         ))}
       </tbody>
@@ -2040,19 +2066,19 @@ function QuoteLinesTable({ lines }: { lines: QuoteLine[] }) {
   );
 }
 
-function blankPrint(filaments: CatalogItem[], services: CatalogItem[]): PrintDraft {
+function blankPrint(filaments: CatalogItem[], services: CatalogItem[], defaults?: { vatRate: string; isrRate: string }): PrintDraft {
   return {
     key: crypto.randomUUID(),
     name: "",
     quantity: "1",
-    filaments: filaments[0] ? [freshPart(filaments)] : [],
-    services: services[0] ? [freshPart(services)] : [],
+    filaments: filaments[0] ? [freshPart(filaments, defaults)] : [],
+    services: services[0] ? [freshPart(services, defaults)] : [],
   };
 }
 
-function freshPart(items: CatalogItem[]): PartDraft {
+function freshPart(items: CatalogItem[], defaults?: { vatRate: string; isrRate: string }): PartDraft {
   const first = items[0];
-  return { key: crypto.randomUUID(), catalogId: first?.id ?? "", quantity: "1", unitPrice: first?.salePrice ?? "", discount: "0", terms: first?.terms ?? "" };
+  return { vatRate: defaults?.vatRate ?? "0.16", isrRate: defaults?.isrRate ?? "0", vatExempt: false, key: crypto.randomUUID(), catalogId: first?.id ?? "", quantity: "1", unitPrice: first?.salePrice ?? "", discount: "0", terms: first?.terms ?? "" };
 }
 
 function perPieceQty(total: string, pieces: string) {
@@ -2064,6 +2090,7 @@ function perPieceQty(total: string, pieces: string) {
 
 function partFromLine(line: QuoteLine, pieces: string): PartDraft {
   return {
+    vatRate: line.vatRate, isrRate: line.isrRate, vatExempt: line.vatExempt,
     key: crypto.randomUUID(),
     catalogId: line.catalogId ?? "",
     quantity: perPieceQty(line.quantity, pieces),
@@ -2076,6 +2103,8 @@ function partFromLine(line: QuoteLine, pieces: string): PartDraft {
 function quoteToDraft(quote: QuoteDetail): QuoteDraft {
   return {
     customerId: quote.customerId,
+    validityDays: quote.validityDays,
+    vatRate: quote.vatRate, isrRate: quote.isrRate,
     mode: quote.mode,
     serviceTerms: quote.serviceTerms ?? "",
     paymentTerms: quote.paymentTerms,
@@ -2093,12 +2122,38 @@ function quoteToDraft(quote: QuoteDetail): QuoteDraft {
   };
 }
 
+function QuoteDiscountInput({ line, pieces = "1", onChange }: { line: PartDraft; pieces?: string; onChange: (discount: string) => void }) {
+  let maximum: string | undefined;
+  try {
+    const quantity = formatQty(mulQty(parseQty(line.quantity), parseQty(pieces)));
+    maximum = Money.fromMajor(line.unitPrice).timesQuantity(quantity).toMajor();
+  } catch { /* El precio y la cantidad pueden estar incompletos mientras se capturan. */ }
+  return <label>
+    Descuento de partida (MXN)
+    <input type="number" min="0" max={maximum} step="0.01" inputMode="decimal" value={line.discount} placeholder="0.00"
+      onChange={(event) => onChange(event.target.value)} />
+  </label>;
+}
+
+function PartTaxes({ line, showVat, showIsr, onChange }: {
+  line: Pick<PartDraft, "vatRate" | "vatExempt" | "isrRate">;
+  showVat: boolean;
+  showIsr: boolean;
+  onChange: (patch: Partial<PartDraft>) => void;
+}) {
+  return <>
+    {showVat ? <label>IVA (%)<input type="number" min="0" max="100" step="0.0001" required value={line.vatExempt ? 0 : line.vatRate === "" ? "" : Number((Number(line.vatRate) * 100).toFixed(4))} onChange={(event) => onChange({ vatRate: event.target.value === "" ? "" : (Number(event.target.value) / 100).toFixed(6), vatExempt: false })} /></label> : null}
+    {showIsr ? <label>Retención ISR (%)<input type="number" min="0" max="100" step="0.0001" required value={line.isrRate === "" ? "" : Number((Number(line.isrRate) * 100).toFixed(4))} onChange={(event) => onChange({ isrRate: event.target.value === "" ? "" : (Number(event.target.value) / 100).toFixed(6) })} /></label> : null}
+  </>;
+}
+
 function QuoteBuilder({
   customers,
   products,
   filaments,
   services,
   initial,
+  taxDefaults,
   error,
   pending = false,
   submitLabel = "Guardar cotización",
@@ -2109,26 +2164,34 @@ function QuoteBuilder({
   filaments: CatalogItem[];
   services: CatalogItem[];
   initial?: QuoteDraft;
+  taxDefaults?: { vatRate?: string | null; isrRate?: string | null };
   error: string | null;
   pending?: boolean;
   submitLabel?: string;
   onSubmit: (body: unknown) => void;
 }) {
+  const defaults = { vatRate: taxDefaults?.vatRate || initial?.vatRate || "0", isrRate: taxDefaults?.isrRate || initial?.isrRate || "0" };
+  // Editing keeps tax controls available for the saved document, regardless of current workshop defaults.
+  const showVat = Boolean(initial) || Number(defaults.vatRate) > 0;
+  const showIsr = Boolean(initial) || Number(defaults.isrRate) > 0;
+  const productCatalog = [...products, ...services];
+  const [customerId, setCustomerId] = useState(initial?.customerId ?? customers[0]?.id ?? "");
+  const [selectionError, setSelectionError] = useState<string | null>(null);
   const [mode, setMode] = useState<"prints" | "products">(initial?.mode ?? "prints");
-  const starter = useRef(initial?.prints[0] ?? blankPrint(filaments, services));
+  const starter = useRef(initial?.prints[0] ?? blankPrint(filaments, services, defaults));
   const [prints, setPrints] = useState<PrintDraft[]>(initial?.prints.length ? initial.prints : [starter.current]);
   const [openKey, setOpenKey] = useState<string | null>(initial?.prints[0]?.key ?? starter.current.key);
-  const [productLines, setProductLines] = useState<PartDraft[]>(initial ? initial.lines : products[0] ? [freshPart(products)] : []);
+  const [productLines, setProductLines] = useState<PartDraft[]>(initial ? initial.lines : products[0] ? [freshPart(products, defaults)] : []);
   const [paymentTerms, setPaymentTerms] = useState(initial?.paymentTerms ?? customers[0]?.paymentTerms ?? "pue");
   const seeded = useRef(false);
   useEffect(() => {
     if (initial || seeded.current) return;
     if (!filaments[0] && !services[0] && !products[0]) return;
     seeded.current = true;
-    const created = blankPrint(filaments, services);
+    const created = blankPrint(filaments, services, defaults);
     setPrints([created]);
     setOpenKey(created.key);
-    if (products[0]) setProductLines([freshPart(products)]);
+    if (products[0]) setProductLines([freshPart(products, defaults)]);
   }, [filaments, services, products, initial]);
 
   function patchPart(list: PartDraft[], key: string, patch: Partial<PartDraft>, catalog: CatalogItem[]) {
@@ -2150,10 +2213,17 @@ function QuoteBuilder({
       style={{ display: "grid", gap: 12 }}
       onSubmit={(event: FormEvent<HTMLFormElement>) => {
         event.preventDefault();
+        const selectedParts = mode === "products" ? productLines : prints.flatMap((print) => [...print.filaments, ...print.services]);
+        if (!customerId || selectedParts.some((line) => !line.catalogId)) {
+          setSelectionError("Selecciona el cliente y cada artículo desde las sugerencias.");
+          return;
+        }
+        setSelectionError(null);
         const data = new FormData(event.currentTarget);
         const leadTime = String(data.get("leadTimeDays") || "");
         const conditions = {
           customerId: data.get("customerId"),
+          validityDays: Number(data.get("validityDays")),
           serviceTerms: String(data.get("serviceTerms") || "") || undefined,
           paymentTerms,
           depositPercent: Number(data.get("depositPercent") || 0),
@@ -2165,11 +2235,13 @@ function QuoteBuilder({
             mode,
             ...conditions,
             lines: productLines.map((line) => ({
-              productId: line.catalogId,
-              description: products.find((item) => item.id === line.catalogId)?.name ?? "Producto",
+              ...(services.some((item) => item.id === line.catalogId) ? { serviceId: line.catalogId } : { productId: line.catalogId }),
+              terms: line.terms || undefined,
+              description: productCatalog.find((item) => item.id === line.catalogId)?.name ?? "Producto",
               quantity: line.quantity,
               unitPrice: line.unitPrice,
               discount: line.discount || "0",
+              vatRate: line.vatRate, vatExempt: line.vatExempt, isrRate: line.isrRate,
             })),
           });
           return;
@@ -2186,6 +2258,7 @@ function QuoteBuilder({
               quantity: line.quantity,
               unitPrice: line.unitPrice,
               discount: line.discount || "0",
+              vatRate: line.vatRate, vatExempt: line.vatExempt, isrRate: line.isrRate,
             })),
             services: print.services.map((line) => ({
               serviceId: line.catalogId,
@@ -2193,23 +2266,18 @@ function QuoteBuilder({
               quantity: line.quantity,
               unitPrice: line.unitPrice,
               discount: line.discount || "0",
+              vatRate: line.vatRate, vatExempt: line.vatExempt, isrRate: line.isrRate,
               terms: line.terms || undefined,
             })),
           })),
         });
       }}
     >
-      <label>
-        Cliente
-        <select
-          name="customerId"
-          required
-          defaultValue={initial?.customerId}
-          onChange={(event) => setPaymentTerms(customers.find((customer) => customer.id === event.target.value)?.paymentTerms ?? "pue")}
-        >
-          {customers.map((customer) => <option key={customer.id} value={customer.id}>{customer.legalName}</option>)}
-        </select>
-      </label>
+      <EntityAutocomplete label="Cliente" name="customerId" value={customerId} disabled={pending}
+        options={customers.map((customer) => ({ id: customer.id, label: [customer.legalName, customer.rfc, customer.phone].filter(Boolean).join(" · "),
+          searchText: [customer.rfc, customer.phone].filter(Boolean).join(" ") }))}
+        placeholder="Buscar por nombre, RFC o teléfono"
+        onChange={(id) => { setCustomerId(id); const customer = customers.find((entry) => entry.id === id); if (customer) setPaymentTerms(customer.paymentTerms); }} />
       <label>
         Tipo
         <select value={mode} onChange={(event) => setMode(event.target.value as "prints" | "products")}>
@@ -2217,6 +2285,7 @@ function QuoteBuilder({
           <option value="products">Productos</option>
         </select>
       </label>
+      <p className="costing-hint">Los descuentos se capturan en MXN y se aplican al total de cada partida{showVat || showIsr ? " antes de impuestos" : ""}.</p>
       {mode === "prints" ? (
         <div className="scroll-x">
         <Paged rows={prints}>
@@ -2259,18 +2328,20 @@ function QuoteBuilder({
                         <div style={{ display: "grid", gap: 10 }}>
                           <label>Nombre<input value={print.name} onChange={(event) => setPrints((current) => current.map((item) => item.key === print.key ? { ...item, name: event.target.value } : item))} required placeholder="Llavero" /></label>
                           <label>Piezas<input value={print.quantity} onChange={(event) => setPrints((current) => current.map((item) => item.key === print.key ? { ...item, quantity: event.target.value } : item))} required /></label>
-                          <p style={{ margin: 0 }}>Los gramos y los servicios son por pieza. El importe se multiplica por esta cantidad.</p>
+                          <p style={{ margin: 0 }}>Los gramos y los servicios son por pieza. El importe se multiplica por esta cantidad; el descuento es sobre el total de la partida para todas las piezas.</p>
                           <strong>Filamentos</strong>
                           {print.filaments.length === 0 ? <p style={{ margin: 0 }}>Esta impresión no lleva filamento.</p> : null}
                           {print.filaments.map((line) => (
                             <div key={line.key} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 8, alignItems: "end" }}>
-                              <label>Filamento
-                                <select value={line.catalogId} onChange={(event) => setPrints((current) => current.map((item) => item.key === print.key ? { ...item, filaments: patchPart(item.filaments, line.key, { catalogId: event.target.value }, filaments) } : item))}>
-                                  {filaments.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-                                </select>
-                              </label>
+                              <EntityAutocomplete label="Filamento" value={line.catalogId} disabled={pending}
+                                options={filaments.map((item) => ({ id: item.id, label: [item.sku ?? item.code, item.name].filter(Boolean).join(" · ") }))}
+                                placeholder="Buscar por nombre o código"
+                                onChange={(id) => setPrints((current) => current.map((item) => item.key === print.key ? { ...item, filaments: patchPart(item.filaments, line.key, { catalogId: id }, filaments) } : item))} />
                               <label>Gramos por pieza<input value={line.quantity} onChange={(event) => setPrints((current) => current.map((item) => item.key === print.key ? { ...item, filaments: patchPart(item.filaments, line.key, { quantity: event.target.value }, filaments) } : item))} required /></label>
                               <label>Precio por gramo<input value={line.unitPrice} onChange={(event) => setPrints((current) => current.map((item) => item.key === print.key ? { ...item, filaments: patchPart(item.filaments, line.key, { unitPrice: event.target.value }, filaments) } : item))} required /></label>
+                              <QuoteDiscountInput line={line} pieces={print.quantity}
+                                onChange={(discount) => setPrints((current) => current.map((item) => item.key === print.key ? { ...item, filaments: patchPart(item.filaments, line.key, { discount }, filaments) } : item))} />
+                              <PartTaxes line={line} showVat={showVat} showIsr={showIsr} onChange={(patch) => setPrints((current) => current.map((item) => item.key === print.key ? { ...item, filaments: patchPart(item.filaments, line.key, patch, filaments) } : item))} />
                               <div className="line-remove">
                                 <IconAction label="Quitar filamento" tone="delete" onClick={() => setPrints((current) => current.map((item) => item.key === print.key ? { ...item, filaments: item.filaments.filter((part) => part.key !== line.key) } : item))}>
                                   <TrashIcon />
@@ -2282,13 +2353,15 @@ function QuoteBuilder({
                           {print.services.length === 0 ? <p style={{ margin: 0 }}>Esta impresión no lleva servicios.</p> : null}
                           {print.services.map((line) => (
                             <div key={line.key} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 8, alignItems: "end" }}>
-                              <label>Servicio
-                                <select value={line.catalogId} onChange={(event) => setPrints((current) => current.map((item) => item.key === print.key ? { ...item, services: patchPart(item.services, line.key, { catalogId: event.target.value }, services) } : item))}>
-                                  {services.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-                                </select>
-                              </label>
+                              <EntityAutocomplete label="Servicio" value={line.catalogId} disabled={pending}
+                                options={services.map((item) => ({ id: item.id, label: [item.sku ?? item.code, item.name].filter(Boolean).join(" · ") }))}
+                                placeholder="Buscar por nombre o código"
+                                onChange={(id) => setPrints((current) => current.map((item) => item.key === print.key ? { ...item, services: patchPart(item.services, line.key, { catalogId: id }, services) } : item))} />
                               <label>Cantidad por pieza<input value={line.quantity} onChange={(event) => setPrints((current) => current.map((item) => item.key === print.key ? { ...item, services: patchPart(item.services, line.key, { quantity: event.target.value }, services) } : item))} required /></label>
                               <label>Precio<input value={line.unitPrice} onChange={(event) => setPrints((current) => current.map((item) => item.key === print.key ? { ...item, services: patchPart(item.services, line.key, { unitPrice: event.target.value }, services) } : item))} required /></label>
+                              <QuoteDiscountInput line={line} pieces={print.quantity}
+                                onChange={(discount) => setPrints((current) => current.map((item) => item.key === print.key ? { ...item, services: patchPart(item.services, line.key, { discount }, services) } : item))} />
+                              <PartTaxes line={line} showVat={showVat} showIsr={showIsr} onChange={(patch) => setPrints((current) => current.map((item) => item.key === print.key ? { ...item, services: patchPart(item.services, line.key, patch, services) } : item))} />
                               <label>UM<input value={services.find((item) => item.id === line.catalogId)?.unit ?? ""} readOnly /></label>
                               <label>Términos<input value={line.terms} onChange={(event) => setPrints((current) => current.map((item) => item.key === print.key ? { ...item, services: patchPart(item.services, line.key, { terms: event.target.value }, services) } : item))} /></label>
                               <div className="line-remove">
@@ -2299,8 +2372,8 @@ function QuoteBuilder({
                             </div>
                           ))}
                           <div style={{ display: "flex", gap: 8 }}>
-                            <button className="ghost" type="button" disabled={!filaments.length} onClick={() => setPrints((current) => current.map((item) => item.key === print.key ? { ...item, filaments: [...item.filaments, freshPart(filaments)] } : item))}>Agregar filamento</button>
-                            <button className="ghost" type="button" disabled={!services.length} onClick={() => setPrints((current) => current.map((item) => item.key === print.key ? { ...item, services: [...item.services, freshPart(services)] } : item))}>Agregar servicio</button>
+                            <button className="ghost" type="button" disabled={!filaments.length} onClick={() => setPrints((current) => current.map((item) => item.key === print.key ? { ...item, filaments: [...item.filaments, freshPart(filaments, defaults)] } : item))}>Agregar filamento</button>
+                            <button className="ghost" type="button" disabled={!services.length} onClick={() => setPrints((current) => current.map((item) => item.key === print.key ? { ...item, services: [...item.services, freshPart(services, defaults)] } : item))}>Agregar servicio</button>
                           </div>
                         </div>
                       </td>
@@ -2315,16 +2388,18 @@ function QuoteBuilder({
         </Paged>
         </div>
       ) : productLines.map((line) => (
-        <div key={line.key} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 8 }}>
-          <label>Producto
-            <select value={line.catalogId} onChange={(event) => setProductLines((current) => patchPart(current, line.key, { catalogId: event.target.value }, products))}>
-              {products.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-            </select>
-          </label>
+        <div key={line.key} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 8, alignItems: "end" }}>
+          <EntityAutocomplete label="Producto o servicio" value={line.catalogId} disabled={pending}
+            options={productCatalog.map((item) => ({ id: item.id, label: [item.sku ?? item.code, item.name].filter(Boolean).join(" · ") }))}
+            placeholder="Buscar por SKU o nombre"
+            onChange={(id) => setProductLines((current) => patchPart(current, line.key, { catalogId: id }, productCatalog))} />
           <label>Cantidad<input value={line.quantity} onChange={(event) => setProductLines((current) => patchPart(current, line.key, { quantity: event.target.value }, products))} required /></label>
           <label>Precio<input value={line.unitPrice} onChange={(event) => setProductLines((current) => patchPart(current, line.key, { unitPrice: event.target.value }, products))} required /></label>
+          <QuoteDiscountInput line={line} onChange={(discount) => setProductLines((current) => patchPart(current, line.key, { discount }, products))} />
+          <PartTaxes line={line} showVat={showVat} showIsr={showIsr} onChange={(patch) => setProductLines((current) => patchPart(current, line.key, patch, productCatalog))} />
+          {services.some((item) => item.id === line.catalogId) ? <label>Términos<input value={line.terms} onChange={(event) => setProductLines((current) => patchPart(current, line.key, { terms: event.target.value }, productCatalog))} /></label> : null}
           <div className="line-remove">
-            <IconAction label="Quitar producto" tone="delete" onClick={() => setProductLines((current) => current.filter((item) => item.key !== line.key))}>
+            <IconAction label="Quitar partida" tone="delete" onClick={() => setProductLines((current) => current.filter((item) => item.key !== line.key))}>
               <TrashIcon />
             </IconAction>
           </div>
@@ -2332,16 +2407,18 @@ function QuoteBuilder({
       ))}
       {mode === "prints" ? (
         <button className="ghost" type="button" onClick={() => {
-          const created = blankPrint(filaments, services);
+          const created = blankPrint(filaments, services, defaults);
           created.services = [];
           setPrints((current) => [...current, created]);
           setOpenKey(created.key);
         }}>Agregar impresión</button>
       ) : (
-        <button className="ghost" type="button" disabled={!products.length} onClick={() => setProductLines((current) => [...current, freshPart(products)])}>Agregar producto</button>
+        <div style={{ display: "flex", gap: 8 }}><button className="ghost" type="button" disabled={!products.length} onClick={() => setProductLines((current) => [...current, freshPart(products, defaults)])}>Agregar producto</button><button className="ghost" type="button" disabled={!services.length} onClick={() => setProductLines((current) => [...current, freshPart(services, defaults)])}>Agregar servicio</button></div>
       )}
+      {showVat || showIsr ? <p className="costing-hint">Los impuestos se calculan por partida después de descuentos.{showVat ? " Usa IVA 0 % cuando no corresponda cobrarlo." : ""}{showIsr ? " El ISR se resta del total por cobrar." : ""}</p> : null}
       <fieldset className="payment-terms">
-        <legend>Condiciones de pago y entrega</legend>
+        <legend>Condiciones de pago, validez y entrega</legend>
+        <label>Validez de la cotización (días)<input name="validityDays" type="number" min={1} max={365} step={1} required defaultValue={initial?.validityDays ?? 30} /><span className="costing-hint">Días naturales desde la creación de la cotización.</span></label>
         <label>
           Forma de pago
           <select value={paymentTerms} onChange={(event) => setPaymentTerms(event.target.value)}>
@@ -2362,11 +2439,12 @@ function QuoteBuilder({
           Nota de pago
           <input name="paymentNotes" maxLength={500} placeholder="Transferencia o depósito. El saldo se liquida antes de entregar." defaultValue={initial?.paymentNotes ?? ""} />
         </label>
-        <p className="payment-terms-wide muted-note">El anticipo y el saldo se calculan sobre el total con IVA. Al convertir en pedido, la fecha compromiso se llena con los días hábiles.</p>
+        <p className="payment-terms-wide muted-note">El anticipo y el saldo se calculan sobre el total por cobrar, con IVA y las retenciones aplicadas. Al convertir en pedido, la fecha compromiso se llena con los días hábiles.</p>
       </fieldset>
       <label>Términos del documento<textarea name="serviceTerms" rows={3} placeholder="Revisiones incluidas y qué queda fuera." defaultValue={initial?.serviceTerms ?? ""} /></label>
       <FormActions>
         <SaveButton pending={pending} label={submitLabel} />
+        {selectionError ? <p className="error">{selectionError}</p> : null}
         {error ? <p className="error">{error}</p> : null}
       </FormActions>
     </form>
@@ -2563,19 +2641,27 @@ async function cancelOrder(client: ReturnType<typeof useQueryClient>, id: string
 }
 
 async function transitionOrder(client: ReturnType<typeof useQueryClient>, id: string, to: string, creditOverrideReason?: string) {
-  if (to === "pending") await api(`/orders/${id}/submit`, { method: "POST" });
-  else if (to === "confirmed") await api(`/orders/${id}/confirm`, { method: "POST", body: JSON.stringify({ creditOverrideReason }) });
+  let updated: OrderDetail | undefined;
+  if (to === "pending") updated = await api<OrderDetail>(`/orders/${id}/submit`, { method: "POST" });
+  else if (to === "confirmed") updated = await api<OrderDetail>(`/orders/${id}/confirm`, { method: "POST", body: JSON.stringify({ creditOverrideReason }) });
   else if (to === "shipped") {
-    await api(`/orders/${id}/ship`, {
+    updated = await api<OrderDetail>(`/orders/${id}/ship`, {
       method: "POST",
       headers: { "idempotency-key": `ship-${id}` },
       body: JSON.stringify({ carrier: "Local" }),
     });
-  } else if (to === "delivered") await api(`/orders/${id}/deliver`, { method: "POST" });
-  else if (to === "completed") await api(`/orders/${id}/complete`, { method: "POST" });
-  await client.invalidateQueries({ queryKey: ["orders"] });
-  await client.invalidateQueries({ queryKey: ["order", id] });
-  await client.invalidateQueries({ queryKey: ["dashboard"] });
+  } else if (to === "delivered") updated = await api<OrderDetail>(`/orders/${id}/deliver`, { method: "POST" });
+  else if (to === "completed") updated = await api<OrderDetail>(`/orders/${id}/complete`, { method: "POST" });
+  if (updated) {
+    await client.cancelQueries({ queryKey: ["order", id] });
+    client.setQueryData(["order", id], updated);
+  }
+  await Promise.all([
+    client.invalidateQueries({ queryKey: ["orders"] }),
+    client.invalidateQueries({ queryKey: ["dashboard"] }),
+    client.invalidateQueries({ queryKey: ["inventory-catalog"] }),
+    client.invalidateQueries({ queryKey: ["production-demand"] }),
+  ]);
 }
 
 function useOrderTransition(client: ReturnType<typeof useQueryClient>, currentOrderId?: string) {
@@ -2753,6 +2839,9 @@ function ActivityRow({ title, detail, to }: { title: string; detail: ReactNode; 
 }
 
 interface PartDraft {
+  vatRate: string;
+  vatExempt: boolean;
+  isrRate: string;
   key: string;
   catalogId: string;
   quantity: string;
@@ -2770,7 +2859,10 @@ interface PrintDraft {
 }
 
 interface QuoteDraft {
+  validityDays: number;
   customerId: string;
+  vatRate: string;
+  isrRate: string;
   mode: "prints" | "products";
   serviceTerms: string;
   paymentTerms: string;
@@ -2800,10 +2892,13 @@ interface QuoteDetail extends PaymentConditionsData {
   serviceTerms: string | null;
   createdAt: string;
   validUntil: string;
+  validityDays: number;
   currency: string;
   paymentTerms: string;
   leadTimeDays: number | null;
   vatRate: string;
+  isrRate: string;
+  isrWithheld: string | null;
   subtotal: string | null;
   discount: string | null;
   vat: string | null;
@@ -2855,6 +2950,10 @@ interface QuoteCosting {
 }
 
 interface QuoteLine {
+  vatRate: string;
+  vatExempt: boolean;
+  isrRate: string;
+  isrWithheld: string | null;
   id: string;
   catalogId: string | null;
   description: string;
@@ -2871,6 +2970,8 @@ interface QuoteLine {
 
 interface CatalogItem {
   id: string;
+  sku?: string;
+  code?: string;
   name: string;
   salePrice: string | null;
   productType?: string;
@@ -2922,6 +3023,9 @@ interface Order {
 }
 
 interface OrderDetail extends Order, PaymentConditionsData {
+  vatRate: string;
+  isrRate: string;
+  isrWithheld: string | null;
   serviceTerms: string | null;
   promisedDate?: string | null;
   actions?: Array<{ action: string; allowed: boolean; reason: string | null }>;
@@ -2952,6 +3056,10 @@ interface OrderDetail extends Order, PaymentConditionsData {
     discount: string | null;
     net: string | null;
     vat: string | null;
+    vatRate: string;
+    vatExempt: boolean;
+    isrRate: string;
+    isrWithheld: string | null;
     total: string | null;
   }>;
 }

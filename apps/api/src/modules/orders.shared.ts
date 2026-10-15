@@ -28,7 +28,7 @@ import {
 import { calculateMxTax } from "@3dprintmty/fiscal";
 import { amountDue } from "@3dprintmty/payments";
 import { AppError } from "@3dprintmty/shared";
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, inArray } from "drizzle-orm";
 import {
   auditEvents,
   boms,
@@ -66,6 +66,9 @@ export interface OrderRow {
   subtotalMinor: bigint;
   discountMinor: bigint;
   shippingMinor: bigint;
+  vatRate: string;
+  isrRate: string;
+  isrWithheldMinor: bigint;
   vatMinor: bigint;
   totalMinor: bigint;
   creditOverrideReason: string | null;
@@ -104,6 +107,10 @@ export interface OrderLineRow {
   unitPriceMinor: bigint;
   discountMinor: bigint;
   netMinor: bigint;
+  vatRate: string;
+  vatExempt: boolean;
+  isrRate: string;
+  isrWithheldMinor: bigint;
   vatMinor: bigint;
   totalMinor: bigint;
   position: number;
@@ -127,6 +134,9 @@ export interface PaymentRow {
 }
 
 export interface PricedLineInput {
+  vatRate?: string;
+  vatExempt?: boolean;
+  isrRate?: string;
   productId?: string | null;
   filamentId?: string | null;
   serviceId?: string | null;
@@ -174,6 +184,12 @@ export async function orderLocation(db: Db, order: Pick<OrderRow, "locationId">)
 /** OP ligadas al pedido y lo que todavía van a entregar por producto. */
 export async function productionFor(db: Db, orderId: string) {
   const rows = await db.select().from(productionOrders).where(eq(productionOrders.salesOrderId, orderId));
+  return summarizeProduction(rows);
+}
+
+type ProductionSupplyRow = Pick<typeof productionOrders.$inferSelect, "productId" | "status" | "quantityCompleted" | "quantityOrdered" | "quantityScrapped">;
+
+export function summarizeProduction(rows: ProductionSupplyRow[]) {
   const pendingOutput = new Map<string, bigint>();
   for (const row of rows) {
     if (!OPEN_PRODUCTION.includes(row.status)) continue;
@@ -193,23 +209,13 @@ export async function productionFor(db: Db, orderId: string) {
 
 /** Productos terminados o componentes con BOM activo. */
 export async function manufacturableIds(db: Db, productIds: string[]): Promise<Set<string>> {
-  const result = new Set<string>();
-  for (const id of new Set(productIds)) {
-    const [product] = await db
-      .select({ productType: products.productType, supplyMode: products.supplyMode, status: products.status })
-      .from(products)
-      .where(eq(products.id, id))
-      .limit(1);
-    if (!product || product.status === "inactive") continue;
-    if (!canManufacture(product)) continue;
-    const [bom] = await db
-      .select({ id: boms.id })
-      .from(boms)
-      .where(and(eq(boms.productId, id), eq(boms.active, true)))
-      .limit(1);
-    if (bom) result.add(id);
-  }
-  return result;
+  if (!productIds.length) return new Set();
+  const rows = await db.select({ id: products.id, productType: products.productType,
+    supplyMode: products.supplyMode, status: products.status }).from(products)
+    .innerJoin(boms, and(eq(boms.productId, products.id), eq(boms.active, true)))
+    .where(inArray(products.id, [...new Set(productIds)]));
+  return new Set(rows.filter((row: typeof products.$inferSelect) => row.status !== "inactive" && canManufacture(row))
+    .map((row: { id: string }) => row.id));
 }
 
 /** Qué le falta al pedido para quedar listo, separado de la fabricación de productos. */
@@ -366,11 +372,7 @@ export async function activePrefactura(db: Db, orderId: string) {
   return document ?? null;
 }
 
-async function printsOpen(db: Db, orderId: string, lines: OrderLineRow[]): Promise<boolean> {
-  const prints: Array<{ resolution: string }> = await db
-    .select({ resolution: salesOrderPrints.resolution })
-    .from(salesOrderPrints)
-    .where(eq(salesOrderPrints.salesOrderId, orderId));
+function printsOpen(prints: Array<{ resolution: string }>, lines: OrderLineRow[]): boolean {
   const printPending = prints.some((print) => !serviceIsSettled(print.resolution));
   const looseService = lines.some((line) => line.lineKind === "service" && !line.printId && !serviceIsSettled(line.resolution));
   return printPending || looseService;
@@ -400,13 +402,26 @@ export function paidMinor(totalMinor: bigint, ledger: PaymentRow[]): bigint {
   return BigInt(totalMinor) - dueMinor(BigInt(totalMinor), ledger);
 }
 
-export async function orderContext(db: Db, tenant: TenantActor, order: OrderRow): Promise<OrderContext> {
-  const lines = await loadOrderLines(db, order.id);
+export interface OrderContextSnapshot {
+  lines?: OrderLineRow[];
+  ledger?: PaymentRow[];
+  prints?: Array<{ resolution: string }>;
+  documents?: Array<{ status: string }>;
+  production?: Awaited<ReturnType<typeof productionFor>>;
+  makeable?: Set<string>;
+  productTypes?: Map<string, string>;
+}
+
+/** Reutilizar solo datos del mismo estado de la transacción, nunca de antes de una escritura. */
+export async function orderContext(db: Db, tenant: TenantActor, order: OrderRow, snapshot: OrderContextSnapshot = {}): Promise<OrderContext> {
+  const lines = snapshot.lines ?? await loadOrderLines(db, order.id);
   const supply = await orderSupply(db, lines);
-  const production = await productionFor(db, order.id);
+  const production = snapshot.production ?? await productionFor(db, order.id);
   const shortage = uncoveredShortage(supply, production.pendingOutput);
-  const makeable = await manufacturableIds(db, [...shortage.keys()]);
-  const ledger = await orderLedger(db, order.id);
+  const makeable = snapshot.makeable ?? await manufacturableIds(db, [...shortage.keys()]);
+  const ledger = snapshot.ledger ?? await orderLedger(db, order.id);
+  const prints = snapshot.prints ?? await db.select({ resolution: salesOrderPrints.resolution })
+    .from(salesOrderPrints).where(eq(salesOrderPrints.salesOrderId, order.id));
   const due = dueMinor(BigInt(order.totalMinor), ledger);
   return {
     state: order.status as SalesOrderState,
@@ -418,26 +433,22 @@ export async function orderContext(db: Db, tenant: TenantActor, order: OrderRow)
     hasDeliverable: supply.some((line) => line.stocked && line.reserved + line.shipped > 0n),
     openProduction: production.open,
     startedProduction: production.started,
-    activePrefactura: Boolean(await activePrefactura(db, order.id)),
+    activePrefactura: snapshot.documents ? snapshot.documents.some((row) => row.status === "issued") : Boolean(await activePrefactura(db, order.id)),
     paidMinor: BigInt(order.totalMinor) - due,
     amountDueMinor: due,
-    servicesOpen: await printsOpen(db, order.id, lines),
-    articlesPrestados: await articlesArePrestados(db, order.id, lines),
+    servicesOpen: printsOpen(prints, lines),
+    articlesPrestados: await articlesArePrestados(db, prints, lines, snapshot.productTypes),
   };
 }
 
-async function articlesArePrestados(db: Db, orderId: string, lines: OrderLineRow[]): Promise<boolean> {
-  const prints: Array<{ resolution: string }> = await db
-    .select({ resolution: salesOrderPrints.resolution })
-    .from(salesOrderPrints)
-    .where(eq(salesOrderPrints.salesOrderId, orderId));
+async function articlesArePrestados(db: Db, prints: Array<{ resolution: string }>, lines: OrderLineRow[], productTypes?: Map<string, string>): Promise<boolean> {
   if (prints.some((print) => !isPrestado(print.resolution))) return false;
-  const finished = new Set<string>();
-  for (const line of lines) {
-    if (line.printId || line.lineKind !== "product" || !line.productId || finished.has(line.productId)) continue;
-    const [product] = await db.select({ productType: products.productType }).from(products).where(eq(products.id, line.productId)).limit(1);
-    if (product?.productType === "finished_good") finished.add(line.productId);
-  }
+  const ids = [...new Set(lines.flatMap((line) => !line.printId && line.lineKind === "product" && line.productId ? [line.productId] : []))];
+  const rows: Array<{ id: string }> = productTypes
+    ? ids.filter((id) => productTypes.get(id) === "finished_good").map((id) => ({ id }))
+    : ids.length ? await db.select({ id: products.id }).from(products)
+    .where(and(inArray(products.id, ids), eq(products.productType, "finished_good"))) : [];
+  const finished = new Set(rows.map((row) => row.id));
   return lines.every((line) => {
     if (line.printId || !line.productId || !finished.has(line.productId)) return true;
     return isPrestado(line.resolution);
@@ -448,6 +459,7 @@ async function normalizeCommercialLines(
   db: Db,
   lines: PricedLineInput[],
   allowInactive = false,
+  taxOverride?: { vatRate?: string; isrRate?: string; workshopIsr?: boolean },
 ): Promise<PricedLineInput[]> {
   const normalized: PricedLineInput[] = [];
   for (const line of lines) {
@@ -520,22 +532,25 @@ export async function priceLines(
   globalDiscount: string | undefined,
   shipping: string,
   allowInactive = false,
+  taxOverride?: { vatRate?: string; isrRate?: string; workshopIsr?: boolean },
 ) {
   const normalized = await normalizeCommercialLines(db, lines, allowInactive);
   const company = await loadCompanyProfile(db);
-  const rate = company?.defaultVatRate ? String(company.defaultVatRate) : "0.16";
+  const rate = taxOverride?.vatRate ?? (company?.defaultVatRate ? String(company.defaultVatRate) : "0.16");
+  const isrRate = taxOverride?.isrRate ?? (taxOverride?.workshopIsr ? company?.defaultIsrRate ?? "0" : "0");
   const taxLines = normalized.map((line) => ({
     description: line.description,
     quantity: line.quantity,
     unitPrice: line.unitPrice,
     discount: line.discount,
     taxable: true,
+    vatRate: line.vatRate, vatExempt: line.vatExempt, isrRate: line.isrRate,
   }));
   const shippingMoney = Money.fromMajor(shipping || "0");
   if (shippingMoney.minor > 0n) {
-    taxLines.push({ description: "Envío", quantity: "1", unitPrice: shippingMoney.toMajor(), discount: "0", taxable: true });
+    taxLines.push({ description: "Envío", quantity: "1", unitPrice: shippingMoney.toMajor(), discount: "0", taxable: true, vatRate: rate, vatExempt: false, isrRate });
   }
-  const priced = calculateMxTax({ lines: taxLines, globalDiscount, rate });
+  const priced = calculateMxTax({ lines: taxLines, globalDiscount, rate, isrRate });
   const stored = normalized.map((line, index) => {
     const result = priced.lines[index];
     if (!result) throw new AppError("empty_lines", "Agrega al menos una línea.");
@@ -552,6 +567,8 @@ export async function priceLines(
       unitPriceMinor: Money.fromMajor(line.unitPrice).minor,
       discountMinor: Money.fromMajor(line.discount ?? "0").minor,
       netMinor: Money.fromMajor(result.net).minor,
+      vatRate: result.rate, vatExempt: result.vatExempt, isrRate: result.isrRate,
+      isrWithheldMinor: Money.fromMajor(result.isrWithheld).minor,
       vatMinor: Money.fromMajor(result.tax).minor,
       totalMinor: Money.fromMajor(result.total).minor,
     };
@@ -601,6 +618,7 @@ export async function repriceOrder(db: Db, order: OrderRow, before: OrderLineRow
       filamentId: line.filamentId,
       serviceId: line.serviceId,
       terms: line.terms,
+      vatRate: line.vatRate, vatExempt: line.vatExempt, isrRate: line.isrRate,
       description: line.description,
       quantity: formatQty(effectiveQty(line)),
       unitPrice: Money.fromMinor(BigInt(line.unitPriceMinor)).toMajor(),
@@ -609,6 +627,7 @@ export async function repriceOrder(db: Db, order: OrderRow, before: OrderLineRow
     Money.fromMinor(newGlobal).toMajor(),
     Money.fromMinor(shipping).toMajor(),
     true,
+    { vatRate: order.vatRate, isrRate: order.isrRate },
   );
   for (const line of after) {
     const index = kept.indexOf(line);
@@ -618,6 +637,7 @@ export async function repriceOrder(db: Db, order: OrderRow, before: OrderLineRow
       .set({
         netMinor: stored?.netMinor ?? 0n,
         vatMinor: stored?.vatMinor ?? 0n,
+        isrWithheldMinor: stored?.isrWithheldMinor ?? 0n,
         totalMinor: stored?.totalMinor ?? 0n,
       })
       .where(eq(salesOrderLines.id, line.id));
@@ -627,6 +647,7 @@ export async function repriceOrder(db: Db, order: OrderRow, before: OrderLineRow
     .set({
       subtotalMinor: Money.fromMajor(priced.subtotal).minor,
       discountMinor: Money.fromMajor(priced.discount).minor,
+      vatRate: priced.rate, isrRate: priced.isrRate, isrWithheldMinor: Money.fromMajor(priced.isrWithheld).minor,
       vatMinor: Money.fromMajor(priced.tax).minor,
       totalMinor: Money.fromMajor(priced.total).minor,
       updatedAt: new Date(),
@@ -722,6 +743,7 @@ export function mapOrder(row: OrderRow, role: TenantRole) {
     subtotal: money(row.subtotalMinor, role),
     discount: money(row.discountMinor, role),
     vat: money(row.vatMinor, role),
+    vatRate: row.vatRate, isrRate: row.isrRate, isrWithheld: money(row.isrWithheldMinor, role),
     shipping: money(row.shippingMinor, role),
     total: money(row.totalMinor, role),
     currency: "MXN",
@@ -801,6 +823,7 @@ export function mapOrderLine(line: OrderLineRow, role: TenantRole) {
     unitPrice: money(line.unitPriceMinor, role),
     discount: money(line.discountMinor, role),
     net: money(line.netMinor, role),
+    vatRate: line.vatRate, vatExempt: line.vatExempt, isrRate: line.isrRate, isrWithheld: money(line.isrWithheldMinor, role),
     vat: money(line.vatMinor, role),
     total: money(line.totalMinor, role),
   };
@@ -819,4 +842,15 @@ export function mapPayment(row: PaymentRow, role: TenantRole) {
     note: row.note,
     createdAt: row.createdAt,
   };
+}
+
+/** Preserve each occurrence's tax snapshot when older clients only edit quantities/prices. */
+export function preserveLineTaxes<T extends PricedLineInput>(lines: T[], existing: Array<{ productId?: string | null; filamentId?: string | null; serviceId?: string | null; catalogId?: string | null; vatRate: string; vatExempt: boolean; isrRate: string }>): T[] {
+  const remaining = [...existing];
+  return lines.map((line) => {
+    const target = line.productId ?? line.filamentId ?? line.serviceId;
+    const index = remaining.findIndex((old) => (old.catalogId ?? old.productId ?? old.filamentId ?? old.serviceId) === target);
+    const old = index >= 0 ? remaining.splice(index, 1)[0] : undefined;
+    return { ...line, vatRate: line.vatRate ?? old?.vatRate, vatExempt: line.vatExempt ?? old?.vatExempt, isrRate: line.isrRate ?? old?.isrRate };
+  });
 }

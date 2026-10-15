@@ -93,7 +93,7 @@ export class OnboardingController {
     const locationPostalCode = assertPostalCode(input.locationPostalCode);
     const slug = slugify(input.tradeName || input.legalName);
 
-    const created = await this.database.atomic(() => this.database.asAdmin(async (db) => {
+    const created = await this.database.atomic(() => this.database.asAdminActor(actor, async (db) => {
       const [tenant] = await db
         .insert(tenants)
         .values({ slug, status: "active", countryCode: "MX", plan: "beta" })

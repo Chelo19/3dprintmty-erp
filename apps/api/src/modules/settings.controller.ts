@@ -1,3 +1,4 @@
+import { taxRateSchema } from "./tax-rates";
 import { Body, Controller, Get, Param, Patch, Post } from "@nestjs/common";
 import {
   assertMxState,
@@ -28,6 +29,7 @@ const companySchema = z.object({
   taxRegime: z.string(),
   fiscalPostalCode: z.string(),
   vatRate: z.enum(["0.16", "0.08", "0"]),
+  isrRate: taxRateSchema.optional(),
 });
 
 const locationSchema = z.object({
@@ -64,6 +66,7 @@ export class SettingsController {
       timezone: profile.timezone,
       locale: profile.locale,
       vatRate: profile.defaultVatRate,
+      isrRate: profile.defaultIsrRate,
       preinvoiceSeries: profile.preinvoiceSeries,
     };
   }
@@ -79,6 +82,7 @@ export class SettingsController {
       rfc,
       taxRegime: assertTaxRegime(input.taxRegime),
       fiscalPostalCode: assertPostalCode(input.fiscalPostalCode),
+      ...(input.isrRate !== undefined ? { defaultIsrRate: input.isrRate } : {}),
     };
     await this.database.asUser(tenant, async (db) => {
       const profile = await loadCompanyProfile(db);
@@ -94,7 +98,7 @@ export class SettingsController {
         action: "company.fiscal_updated",
         entityType: "company",
         entityId: tenant.tenantId,
-        metadata: { rfc, vatRate: input.vatRate },
+        metadata: { rfc, vatRate: input.vatRate, isrRate: input.isrRate },
       });
     });
     return this.company(actor);

@@ -29,7 +29,6 @@ export type Dashboard = {
     productionOpen: number;
     productionLate: number;
     qcHold: number;
-    purchasesIncoming: number;
     lowStock: number;
   };
 };
@@ -55,7 +54,6 @@ export function DashboardPage() {
   const activity = [
     { label: t("dashboard.readyToShip"), value: operations.ordersReadyToShip, to: "/app/pedidos?estado=ready_to_ship" },
     { label: t("dashboard.productionOpen"), value: operations.productionOpen, to: "/app/produccion" },
-    { label: t("dashboard.purchasesIncoming"), value: operations.purchasesIncoming, to: "/app/compras" },
   ];
   const labels: Record<Dashboard["pipeline"][number]["status"], string> = {
     pending: t("dashboard.pending"), confirmed: t("dashboard.confirmed"), in_production: t("dashboard.inProduction"),

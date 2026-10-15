@@ -1,3 +1,4 @@
+import { AuditPage } from "./audit";
 import { AuthPage } from "./auth-page";
 import { OnboardingPage } from "./onboarding";
 import { DashboardPage } from "./dashboard";
@@ -20,7 +21,7 @@ import { FilamentAdjustPage } from "./filament-stock";
 import { CostCalculatorPage, clearCalculatorDraft, type CalculatorDraft } from "./costing";
 import { FilterBar, FilterSelect, NoMatches, StatusBadge, distinct, matchesStatus, matchesText, useFilters } from "./filters";
 import { CostOnly, CostPriceFields, MarginValue, ProfitValue } from "./margin";
-import { ExpenseNewPage, ExpensePage, PrefacturaPage, PrefacturasPage, PurchaseOrderPage, PurchasingPage } from "./purchasing";
+import { ExpenseNewPage, ExpensePage, PrefacturaPage, PrefacturasPage, PurchasingPage } from "./purchasing";
 import { CardsSkeleton, DetailSkeleton, FormSkeleton, TableSkeleton } from "./skeleton";
 import { Paged } from "./pager";
 import { canWritePath, homeFor, useRole } from "./roles";
@@ -89,10 +90,11 @@ export function App() {
         <Route path="compras" element={<PurchasingPage />} />
         <Route path="compras/nuevo" element={<ExpenseNewPage />} />
         <Route path="compras/gastos/:id" element={<ExpensePage />} />
-        <Route path="compras/:id" element={<PurchaseOrderPage />} />
+        <Route path="compras/:id" element={<Navigate to="/app/compras" replace />} />
         <Route path="sucursales" element={<LocationsPage />} />
         <Route path="equipo" element={<TeamPage />} />
         <Route path="configuracion" element={<SettingsPage />} />
+        <Route path="configuracion/bitacora" element={<AuditPage />} />
         <Route path="plataforma" element={<PlatformPage />} />
       </Route>
     </Routes>
@@ -190,6 +192,7 @@ function Shell() {
           {canAccessModule(role, "purchasing") ? <Nav to="/app/compras">{t("nav.purchasing")}</Nav> : null}
           <NavGroup label={t("nav.settings")} open={at("/app/configuracion", "/app/sucursales", "/app/equipo", "/app/plataforma")}>
             <Nav to="/app/configuracion">{t("settings.title")}</Nav>
+            {canAccessModule(role, "settings") ? <Nav to="/app/configuracion/bitacora">Bitácora de actividad</Nav> : null}
             <Nav to="/app/sucursales">{t("nav.locations")}</Nav>
             <Nav to="/app/equipo">{t("nav.team")}</Nav>
             {auth.user.platformAdmin && !auth.user.impersonator ? <Nav to="/app/plataforma">{t("nav.platform")}</Nav> : null}
@@ -215,7 +218,7 @@ function Nav({ to, children }: { to: string; children: ReactNode }) {
   const auth = useAuth();
   const role = useRole();
   if (to === "/app/plataforma" ? !auth.user?.platformAdmin || !!auth.user.impersonator : !canAccessPath(role, to)) return null;
-  return <NavLink className="nav-link" to={to} end={to === "/app"}>{children}</NavLink>;
+  return <NavLink className="nav-link" to={to} end={to === "/app" || to === "/app/configuracion"}>{children}</NavLink>;
 }
 
 function NavGroup({ label, open, children }: { label: string; open: boolean; children: ReactNode }) {
@@ -1011,6 +1014,7 @@ function SettingsPage() {
       taxRegime: string;
       fiscalPostalCode: string;
       vatRate: string;
+      isrRate: string;
     }>("/company"),
   });
   const role = useRole();
@@ -1040,6 +1044,7 @@ function SettingsPage() {
                 taxRegime: form.get("taxRegime"),
                 fiscalPostalCode: form.get("fiscalPostalCode"),
                 vatRate: form.get("vatRate"),
+                isrRate: (Number(form.get("isrPercent") || 0) / 100).toFixed(6),
               }),
             });
             await company.refetch();
@@ -1069,6 +1074,11 @@ function SettingsPage() {
             <option value="0">Tasa 0</option>
           </select>
         </label>
+        <label>Retención de ISR por defecto (%)
+          <input name="isrPercent" type="number" min="0" max="100" step="0.0001" inputMode="decimal" required
+            defaultValue={Number((Number(company.data.isrRate ?? "0") * 100).toFixed(4))} />
+        </label>
+        <p className="costing-hint">Se usa en partidas nuevas de cotizaciones. Puedes cambiar la tasa por partida; 0% significa sin retención.</p>
         </fieldset>
         {canEdit ? (
           <FormActions>
@@ -1085,14 +1095,15 @@ function SettingsPage() {
           const form = new FormData(event.currentTarget);
           setBusy("preview");
           try {
-            const result = await api<{ tax: string; total: string }>("/tax/preview", {
+            const result = await api<{ tax: string; total: string; isrWithheld: string }>("/tax/preview", {
             method: "POST",
             body: JSON.stringify({
               lines: [{ description: "Vista previa", quantity: "1", unitPrice: String(form.get("amount")) }],
               rate: String(form.get("rate") ?? "0.16"),
+              isrRate: company.data.isrRate ?? "0",
             }),
           });
-          setPreview(`IVA ${Money.fromMajor(result.tax).format("es-MX")} · Total ${Money.fromMajor(result.total).format("es-MX")}`);
+          setPreview(`IVA ${Money.fromMajor(result.tax).format("es-MX")}${Number(result.isrWithheld) > 0 ? ` · Retención ISR −${Money.fromMajor(result.isrWithheld).format("es-MX")}` : ""} · Total ${Money.fromMajor(result.total).format("es-MX")}`);
           } finally {
             setBusy(null);
           }

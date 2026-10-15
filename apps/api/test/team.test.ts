@@ -136,7 +136,7 @@ describe("equipo — invitaciones, roles y bajas", () => {
     const cases = [
       { role: "sales", allowed: ["customers", "quotes", "orders", "payments", "products", "filaments"], denied: ["inventory", "expenses", "production-orders", "team", "dashboard"] },
       { role: "production", allowed: ["production-orders", "boms", "inventory", "products", "filaments"], denied: ["customers", "quotes", "orders", "payments", "expenses", "team", "dashboard"] },
-      { role: "warehouse", allowed: ["inventory", "expenses", "purchase-orders", "orders", "products"], denied: ["customers", "quotes", "payments", "production-orders", "team", "dashboard"] },
+      { role: "warehouse", allowed: ["inventory", "expenses", "orders", "products"], denied: ["customers", "quotes", "payments", "production-orders", "team", "dashboard"] },
       { role: "viewer", allowed: ["customers", "orders", "inventory", "expenses", "production-orders", "dashboard"], denied: ["team"] },
       { role: "admin", allowed: ["customers", "orders", "inventory", "expenses", "production-orders", "team", "dashboard"], denied: [] },
     ];

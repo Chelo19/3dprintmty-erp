@@ -1,3 +1,5 @@
+import { useRecordActions } from "./use-record-actions";
+import { finishProduction } from "./production-actions";
 import { Modal } from "./modal";
 import { Notice } from "./notice";
 import { EmptyState } from "./empty-state";
@@ -46,6 +48,7 @@ export function useFilaments() {
 export function ProductionPage() {
   const client = useQueryClient();
   const { error, pendingKey, run } = useError();
+  const rowActions = useRecordActions();
   const [status, setStatus] = useState("draft,released,scheduled,in_progress,qc_hold,on_hold");
   const orders = useQuery({
     queryKey: ["production-orders", status],
@@ -62,10 +65,26 @@ export function ProductionPage() {
     canManufacture(product) && product.status !== "inactive" && withRecipe.has(product.id));
   const pending = demand.data?.data ?? [];
   const refresh = async () => {
-    await client.invalidateQueries({ queryKey: ["production-orders"] });
-    await client.invalidateQueries({ queryKey: ["orders"] });
-    await client.invalidateQueries({ queryKey: ["production-demand"] });
+    await Promise.all([
+      client.invalidateQueries({ queryKey: ["production-orders"] }),
+      client.invalidateQueries({ queryKey: ["orders"] }),
+      client.invalidateQueries({ queryKey: ["production-demand"] }),
+      client.invalidateQueries({ queryKey: ["order"] }),
+      client.invalidateQueries({ queryKey: ["inventory-catalog"] }),
+    ]);
   };
+  const runOrder = (order: ProductionOrder, action: "finish" | "cancel", reason?: string) => rowActions.run(order.id, action, async () => {
+    try {
+      const updated = action === "finish"
+        ? await finishProduction<ProductionDetail>(order.id, order.status, order.quantityOrdered)
+        : await cancelProduction(order.id, reason!);
+      await client.cancelQueries({ queryKey: ["production-order", order.id] });
+      client.setQueryData(["production-order", order.id], updated);
+    } finally {
+      // También refresca si falló una etapa después de liberar o consumir material.
+      await refresh();
+    }
+  });
   return (
     <section style={{ display: "grid", gap: 16 }}>
       <h1>Producción</h1>
@@ -145,6 +164,11 @@ export function ProductionPage() {
           <option value="">Todas</option>
         </select>
       </label>
+      {rowActions.pendingCount > 0 ? (
+        <p className="costing-hint" role="status" aria-live="polite">
+          Procesando {rowActions.pendingCount} {rowActions.pendingCount === 1 ? "orden" : "órdenes"}. Puedes continuar con las demás.
+        </p>
+      ) : null}
       {orders.isPending ? <TableSkeleton columns={5} /> : (
       <Paged rows={orders.data?.data ?? []}>
       {(pageOrders) => (
@@ -153,6 +177,7 @@ export function ProductionPage() {
         <tbody>
           {pageOrders.map((order) => {
             const step = nextStep(order.status);
+            const state = rowActions.records[order.id];
             return (
               <tr key={order.id}>
                 <td>{order.folio}</td>
@@ -163,19 +188,20 @@ export function ProductionPage() {
                   <div className="record-actions">
                     <ViewLink to={`/app/produccion/${order.id}`} />
                     {step ? (
-                      <IconAction operatorAllowed label={step.label} tone={step.tone} pending={pendingKey === order.id} disabled={pendingKey !== null} onClick={() => void run(() => finishProduction(order.id, order.status, order.quantityOrdered).then(refresh), order.id)}>
+                      <IconAction operatorAllowed label={step.label} tone={step.tone} pending={state?.pending && state.action === "finish"} disabled={state?.pending} onClick={() => void runOrder(order, "finish")}>
                         {step.icon}
                       </IconAction>
                     ) : null}
                     {CANCELLABLE.has(order.status) ? (
-                      <IconAction operatorAllowed label="Cancelar orden" tone="delete" pending={pendingKey === `cancel-${order.id}`} disabled={pendingKey !== null} onClick={() => {
+                      <IconAction operatorAllowed label="Cancelar orden" tone="delete" pending={state?.pending && state.action === "cancel"} disabled={state?.pending} onClick={() => {
                         const reason = askCancelReason(order.folio);
-                        if (reason) void run(() => cancelProduction(order.id, reason).then(refresh), `cancel-${order.id}`);
+                        if (reason) void runOrder(order, "cancel", reason);
                       }}>
                         <BanIcon />
                       </IconAction>
                     ) : null}
                   </div>
+                  {state?.error ? <p className="error" role="alert">{order.folio}: {state.error}</p> : null}
                 </td>
               </tr>
             );
@@ -550,7 +576,7 @@ function askCancelReason(folio: string): string | null {
 }
 
 async function cancelProduction(id: string, reason: string) {
-  await postJson(`/production-orders/${id}/transition`, { to: "cancelled", reason });
+  return postJson<ProductionDetail>(`/production-orders/${id}/transition`, { to: "cancelled", reason });
 }
 
 interface RecipeInput {
@@ -579,20 +605,6 @@ function LockIcon() {
       <path d="M8 11V7a4 4 0 0 1 8 0v4" />
     </svg>
   );
-}
-
-async function finishProduction(id: string, status: string, quantity: string) {
-  if (status === "draft") await postJson(`/production-orders/${id}/release`, {});
-  if (status === "on_hold") await postJson(`/production-orders/${id}/transition`, { to: "in_progress" });
-  if (!["qc_hold", "completed", "closed"].includes(status)) {
-    await postJson(`/production-orders/${id}/complete`, { quantityGood: quantity, quantityScrapped: "0" });
-  }
-  const detail = await api<ProductionDetail>(`/production-orders/${id}`);
-  if (detail.status === "qc_hold") {
-    await postJson(`/production-orders/${id}/inspections`, { result: "pass", qtyPassed: detail.quantityCompleted, qtyFailed: "0" });
-  }
-  const after = await api<ProductionDetail>(`/production-orders/${id}`);
-  if (after.status === "completed") await postJson(`/production-orders/${id}/close`, {});
 }
 
 export function ProductionDetailPage() {
@@ -636,8 +648,16 @@ export function ProductionDetailPage() {
                   pending={pendingKey === "finish"}
                   disabled={pendingKey !== null}
                   onClick={() => void run(async () => {
-                    await finishProduction(data.id, data.status, data.quantityOrdered);
-                    await refresh();
+                    const updated = await finishProduction<ProductionDetail>(data.id, data.status, data.quantityOrdered);
+                    await client.cancelQueries({ queryKey: ["production-order", id] });
+                    client.setQueryData(["production-order", id], updated);
+                    await Promise.all([
+                      client.invalidateQueries({ queryKey: ["production-orders"] }),
+                      client.invalidateQueries({ queryKey: ["production-demand"] }),
+                      client.invalidateQueries({ queryKey: ["orders"] }),
+                      client.invalidateQueries({ queryKey: ["order"] }),
+                      client.invalidateQueries({ queryKey: ["inventory-catalog"] }),
+                    ]);
                   }, "finish")}
                 />
               ) : null}

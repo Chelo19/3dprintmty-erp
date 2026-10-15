@@ -3,6 +3,7 @@ import type { INestApplication } from "@nestjs/common";
 import request from "supertest";
 import { vi, afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "../src/main";
+import * as manufacturing from "../src/modules/manufacturing.shared";
 
 // Conserva cobertura del módulo para cuando se reactive; el despliegue usa FEATURES.prefacturas=false.
 vi.mock("@3dprintmty/domain", async (importOriginal) => {
@@ -60,13 +61,8 @@ describe("operación — compras, manufactura, calidad y prefacturas", () => {
     expect((await api.get(owner, `/products/${supply.body.id}`)).body.cost).toBe("3.00");
     const vendor = await api.post(owner, "/vendors", { name: "Proveedor costos" });
     expect(vendor.status).toBe(201);
-    const purchase = await api.post(owner, "/purchase-orders", { vendorId: vendor.body.id,
-      lines: [{ productId: filament.body.id, quantity: "1", unitCost: "400.00" }] });
+    const purchase = await api.post(owner, "/expenses", { kind: "filament", itemId: filament.body.id, vendorId: vendor.body.id, quantity: "1", amount: "400.00", occurredOn: "2026-10-14" });
     expect(purchase.status).toBe(201);
-    expect((await api.post(owner, `/purchase-orders/${purchase.body.id}/transition`, { to: "ordered" })).status).toBe(201);
-    expect((await api.post(owner, `/purchase-orders/${purchase.body.id}/receive`, {
-      lines: [{ lineId: purchase.body.lines[0].id, quantity: "1" }],
-    })).status).toBe(201);
     expect((await api.get(owner, `/products/${piece.body.id}`)).body.cost).toBe("56.40");
     expect((await api.get(owner, `/products/${assembly.body.id}`)).body.cost).toBe("112.80");
 
@@ -129,9 +125,7 @@ describe("operación — compras, manufactura, calidad y prefacturas", () => {
       const expense = await api.post(owner, "/expenses", { kind: "product", itemId: product.body.id, quantity: "3", amount: "3.00", occurredOn: "2026-10-13" });
       expect(expense.status).toBe(409);
       expect(expense.body.code).toBe("not_purchasable");
-      const order = await api.post(owner, "/purchase-orders", { vendorId: vendors.body.data[0].id, lines: [{ productId: product.body.id, quantity: "3", unitCost: "1.00" }] });
-      expect(order.status).toBe(409);
-      expect(order.body.code).toBe("not_purchasable");
+
     }
     const listed = await api.get(owner, "/expenses");
     expect(listed.status).toBe(200);
@@ -226,33 +220,12 @@ describe("operación — compras, manufactura, calidad y prefacturas", () => {
     expect(insufficient.status).toBe(409);
 
     const vendor = await api.post(owner, "/vendors", { name: "Filamentos del Norte", leadTimeDays: 3 });
-    const po = await api.post(owner, "/purchase-orders", {
-      vendorId: vendor.body.id,
-      lines: [{ productId: pla.body.id, quantity: "1", unitCost: "250.00" }],
-    });
-    expect(po.status).toBe(201);
-    expect(po.body.folio).toBe("OC-1");
-    expect(po.body.total).toBe("290.00");
-    const ordered = await api.post(owner, `/purchase-orders/${po.body.id}/transition`, { to: "ordered" });
-    expect(ordered.body.status).toBe("ordered");
-
-    const lineId = po.body.lines[0].id as string;
-    const receipt = await api.post(
-      owner,
-      `/purchase-orders/${po.body.id}/receive`,
-      { lines: [{ lineId, quantity: "1", vendorLot: "FN-2026-09" }] },
-      { "Idempotency-Key": "recepcion-oc-1" },
-    );
+    const purchaseBody = { kind: "filament", itemId: pla.body.id, vendorId: vendor.body.id, quantity: "1", amount: "250.00", occurredOn: "2026-10-14", vendorLot: "FN-2026-09" };
+    const receipt = await api.post(owner, "/expenses", purchaseBody, { "Idempotency-Key": "compra-directa-1" });
     expect(receipt.status).toBe(201);
-    expect(receipt.body.receipt.folio).toBe("REC-1");
-    expect(receipt.body.purchaseOrder.status).toBe("received");
-    const replay = await api.post(
-      owner,
-      `/purchase-orders/${po.body.id}/receive`,
-      { lines: [{ lineId, quantity: "1", vendorLot: "FN-2026-09" }] },
-      { "Idempotency-Key": "recepcion-oc-1" },
-    );
-    expect(replay.body.receipt.folio).toBe("REC-1");
+    expect(receipt.body.folio).toBe("GAS-1");
+    const replay = await api.post(owner, "/expenses", purchaseBody, { "Idempotency-Key": "compra-directa-1" });
+    expect(replay.body.id).toBe(receipt.body.id);
     expect(await plaBalance(owner, pla.body.id)).toMatchObject({ onHand: "1000", allocated: "0" });
     const lots = await api.get(owner, "/lots");
     expect(lots.body.data[0]).toMatchObject({ lotNumber: "REC-1-1", vendorLot: "FN-2026-09", receivedQty: "1000" });
@@ -395,9 +368,9 @@ describe("operación — compras, manufactura, calidad y prefacturas", () => {
     expect(loaded.body.payments).toHaveLength(2);
     const rent = await api.post(owner, "/expenses", { kind: "other", description: "Renta de local", amount: "12000.00", occurredOn: "2026-09-01" });
     expect(rent.status).toBe(201);
-    expect((await api.get(owner, "/expenses")).body.data).toHaveLength(3);
+    expect((await api.get(owner, "/expenses")).body.data).toHaveLength(4);
     expect((await api.get(other, "/expenses")).body.data).toEqual([]);
-    expect((await api.get(other, "/purchase-orders")).body.data).toEqual([]);
+    expect((await api.get(other, "/purchase-orders")).status).toBe(503);
     expect((await api.get(other, `/production-orders/${opId}`)).status).toBe(404);
 
     const dashboard = await api.get(owner, "/dashboard");
@@ -473,6 +446,37 @@ describe("operación — compras, manufactura, calidad y prefacturas", () => {
     const inactive = await api.post(owner, "/production-orders", { productId: plain.body.id, quantity: "1" });
     expect(inactive.status).toBe(409);
     expect(inactive.body).toMatchObject({ code: "product_inactive", message: "«Portallaves liso» está inactivo. Actívalo en el catálogo para fabricarlo." });
+  });
+
+  it("revierte todas las OP y sus folios si falla la generación de un pedido, y no duplica producción al repetir", async () => {
+    const owner = await onboard(app, "atomic@produccion.test", "ATP010101AAA", "Producción atómica");
+    const component = await api.post(owner, "/products", { sku: "AT-I", name: "Insumo", itemClass: "component", supplyMode: "buy", cost: "1.00" });
+    const items = [];
+    for (const sku of ["AT-A", "AT-B"]) {
+      const product = await api.post(owner, "/products", { sku, name: sku, productType: "finished_good", salePrice: "10.00" });
+      expect(product.status).toBe(201);
+      expect((await api.post(owner, "/boms", { productId: product.body.id, lines: [{ componentProductId: component.body.id, quantity: "1" }] })).status).toBe(201);
+      items.push(product.body.id);
+    }
+    const customer = await api.post(owner, "/customers", { kind: "b2c", legalName: "Cliente", paymentTerms: "pue", fiscal: { state: "Nuevo León" } });
+    expect(customer.status).toBe(201);
+    const order = await api.post(owner, "/orders", { customerId: customer.body.id, lines: items.map((productId) => ({ productId, description: "Pieza", quantity: "1", unitPrice: "10.00" })) });
+    expect(order.status).toBe(201);
+    expect((await api.post(owner, `/orders/${order.body.id}/submit`, {})).status).toBe(201);
+    expect((await api.post(owner, `/orders/${order.body.id}/confirm`, {})).status).toBe(201);
+    const original = manufacturing.createProductionOrder;
+    const create = vi.spyOn(manufacturing, "createProductionOrder")
+      .mockImplementationOnce(original).mockRejectedValueOnce(new Error("Falla en la segunda OP"));
+    try {
+      expect((await api.post(owner, `/production-orders/from-sales-order/${order.body.id}`, {})).status).toBe(500);
+    } finally { create.mockRestore(); }
+    expect((await api.get(owner, "/production-orders")).body.data).toHaveLength(0);
+    expect((await api.get(owner, `/orders/${order.body.id}`)).body.status).toBe("confirmed");
+    const retry = await api.post(owner, `/production-orders/from-sales-order/${order.body.id}`, {});
+    expect(retry.status).toBe(201);
+    expect(retry.body.data.map((row: { folio: string }) => row.folio)).toEqual(["OP-1", "OP-2"]);
+    expect((await api.post(owner, `/production-orders/from-sales-order/${order.body.id}`, {})).status).toBe(409);
+    expect((await api.get(owner, "/production-orders")).body.data).toHaveLength(2);
   });
 
   async function plaBalance(token: string, productId: string) {

@@ -84,6 +84,7 @@ function issue(draft: CommercialDraft): IssuedDocument {
       lines: draft.lines,
       globalDiscount: draft.globalDiscount,
       rate: draft.taxRate,
+      isrRate: draft.isrRate,
     }),
     intendedPayment: draft.intendedPayment,
     satPaymentForm: draft.satPaymentForm,

@@ -19,7 +19,7 @@ import {
 } from "@3dprintmty/domain";
 import { AppError } from "@3dprintmty/shared";
 import Decimal from "decimal.js";
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, or } from "drizzle-orm";
 import { z } from "zod";
 import { services } from "../container";
 import {
@@ -34,6 +34,7 @@ import {
   productionOrders,
   products,
   salesOrders,
+  stockBalances,
   workCenters,
 } from "../db/schema";
 import { assertRole, CurrentUser, requireTenant, type Actor, type TenantActor } from "../http/actor";
@@ -208,47 +209,51 @@ export class ProductionController {
     const tenant = requireTenant(actor);
     const read = async (db: Db) => {
       const order = await loadSalesOrder(db, orderId);
-      assertOrderAction(await orderContext(db, tenant, order), "make");
-      const supply = await orderSupply(db, await loadOrderLines(db, order.id));
+      const lines = await loadOrderLines(db, order.id);
+      const supply = await orderSupply(db, lines);
       const production = await productionFor(db, order.id);
       const shortage = uncoveredShortage(supply, production.pendingOutput);
       const makeable = await manufacturableIds(db, [...shortage.keys()]);
+      assertOrderAction(await orderContext(db, tenant, order, { lines, production, makeable }), "make");
       const items = [...shortage.entries()]
         .filter(([productId]) => makeable.has(productId))
         .map(([productId, quantity]) => ({ productId, quantity }));
       return { order, items };
     };
-    const plan = await this.database.asUser(tenant, read);
-    if (!plan.items.length) {
-      throw new AppError("nothing_to_make", "El pedido no tiene faltantes que se puedan fabricar.", 409);
-    }
-    const first = await allocateFolios(this.database, tenant.tenantId, "production_order", "OP", plan.items.length);
-    return this.database.asUser(tenant, async (db) => {
-      const { order: salesOrder, items } = await read(db);
-      const locationId = await orderLocation(db, salesOrder);
-      const created = [];
-      for (const [position, item] of items.entries()) {
-        const order = await createProductionOrder(db, tenant, {
-          folio: `OP-${first + position}`,
-          productId: item.productId,
-          quantity: item.quantity,
-          locationId,
-          salesOrderId: salesOrder.id,
-          dueDate: salesOrder.promisedDate ?? null,
-          notes: `Para el pedido ${salesOrder.folio}`,
-          source: "sales_order",
-          kind: "make_to_order",
-        });
-        created.push(order);
+    // El bloqueo del taller se mantiene hasta el commit: plan y folios son atómicos.
+    return this.database.asAdminActor(tenant, async () => {
+      const plan = await this.database.asUser(tenant, read);
+      if (!plan.items.length) {
+        throw new AppError("nothing_to_make", "El pedido no tiene faltantes que se puedan fabricar.", 409);
       }
-      await syncOrderState(db, tenant, salesOrder.id);
-      await orderEvent(db, tenant, salesOrder.id, "production_created", {
-        note: created.map((order: { folio: string }) => order.folio).join(", "),
+      const first = await allocateFolios(this.database, tenant.tenantId, "production_order", "OP", plan.items.length);
+      return this.database.asUser(tenant, async (db) => {
+        const { order: salesOrder, items } = plan;
+        const locationId = await orderLocation(db, salesOrder);
+        const created = [];
+        for (const [position, item] of items.entries()) {
+          const order = await createProductionOrder(db, tenant, {
+            folio: `OP-${first + position}`,
+            productId: item.productId,
+            quantity: item.quantity,
+            locationId,
+            salesOrderId: salesOrder.id,
+            dueDate: salesOrder.promisedDate ?? null,
+            notes: `Para el pedido ${salesOrder.folio}`,
+            source: "sales_order",
+            kind: "make_to_order",
+          });
+          created.push(order);
+        }
+        await syncOrderState(db, tenant, salesOrder.id);
+        await orderEvent(db, tenant, salesOrder.id, "production_created", {
+          note: created.map((order: { folio: string }) => order.folio).join(", "),
+        });
+        await audit(db, tenant, "production_order.created_from_sales_order", "sales_order", salesOrder.id, {
+          productionOrders: created.map((order: { folio: string }) => order.folio),
+        });
+        return { data: created.map((order: OrderRow) => mapOrder(order)) };
       });
-      await audit(db, tenant, "production_order.created_from_sales_order", "sales_order", salesOrder.id, {
-        productionOrders: created.map((order: { folio: string }) => order.folio),
-      });
-      return { data: created.map((order: OrderRow) => mapOrder(order)) };
     });
   }
 
@@ -780,11 +785,25 @@ async function receiveFinishedGoods(db: Db, tenant: TenantActor, order: OrderRow
 }
 
 async function loadDetail(db: Db, id: string) {
-  const order = await one(db, productionOrders, productionOrders.id, id, "No encontramos esa orden de producción.");
-  const [product] = await db.select().from(products).where(eq(products.id, order.productId)).limit(1);
-  const materials = await db
-    .select()
+  if (!/^[0-9a-f-]{36}$/i.test(id)) throw new AppError("not_found", "No encontramos esa orden de producción.", 404);
+  const [head]: Array<{ order: OrderRow; product: typeof products.$inferSelect | null; salesOrderFolio: string | null }> = await db
+    .select({ order: productionOrders, product: products, salesOrderFolio: salesOrders.folio })
+    .from(productionOrders)
+    .leftJoin(products, eq(products.id, productionOrders.productId))
+    .leftJoin(salesOrders, eq(salesOrders.id, productionOrders.salesOrderId))
+    .where(eq(productionOrders.id, id)).limit(1);
+  if (!head) throw new AppError("not_found", "No encontramos esa orden de producción.", 404);
+  const { order, product } = head;
+  const materials: Array<{ material: MaterialRow; productSku: string | null; productName: string | null;
+    filamentSku: string | null; filamentName: string | null; onHand: string | null; allocated: string | null }> = await db
+    .select({ material: productionOrderMaterials, productSku: products.sku, productName: products.name,
+      filamentSku: filaments.sku, filamentName: filaments.name, onHand: stockBalances.onHand, allocated: stockBalances.allocated })
     .from(productionOrderMaterials)
+    .leftJoin(products, eq(products.id, productionOrderMaterials.componentProductId))
+    .leftJoin(filaments, eq(filaments.id, productionOrderMaterials.componentFilamentId))
+    .leftJoin(stockBalances, and(eq(stockBalances.locationId, order.locationId), or(
+      eq(stockBalances.productId, productionOrderMaterials.componentProductId),
+      eq(stockBalances.filamentId, productionOrderMaterials.componentFilamentId))))
     .where(eq(productionOrderMaterials.productionOrderId, order.id));
   const operations = await db
     .select({ operation: productionOrderOperations, workCenterName: workCenters.name })
@@ -802,22 +821,20 @@ async function loadDetail(db: Db, id: string) {
     .leftJoin(defectTypes, eq(defectTypes.id, inspections.defectTypeId))
     .where(eq(inspections.productionOrderId, order.id))
     .orderBy(desc(inspections.createdAt));
-  const [sales] = order.salesOrderId
-    ? await db.select({ folio: salesOrders.folio }).from(salesOrders).where(eq(salesOrders.id, order.salesOrderId)).limit(1)
-    : [];
+
 
   const materialRows = [];
-  for (const material of materials as MaterialRow[]) {
+  for (const row of materials) {
+    const material = row.material;
     const required = qtyFromDb(material.requiredQty);
     const consumed = qtyFromDb(material.consumedQty);
     const allocated = qtyFromDb(material.allocatedQty);
     const tracksStock = !material.componentFilamentId;
-    const available = await availableAt(db, materialStock(material), order.locationId);
+    const available = qtyFromDb(row.onHand ?? "0") - qtyFromDb(row.allocated ?? "0");
     const open = maxQty(0n, required - consumed);
-    const named = material.componentFilamentId
-      ? await db.select({ sku: filaments.sku, name: filaments.name }).from(filaments).where(eq(filaments.id, material.componentFilamentId)).limit(1)
-      : await db.select({ sku: products.sku, name: products.name }).from(products).where(eq(products.id, material.componentProductId as string)).limit(1);
-    const info = named[0];
+    const info = material.componentFilamentId
+      ? { sku: row.filamentSku, name: row.filamentName }
+      : { sku: row.productSku, name: row.productName };
     materialRows.push({
       id: material.id,
       componentProductId: material.componentFilamentId ?? material.componentProductId,
@@ -836,7 +853,7 @@ async function loadDetail(db: Db, id: string) {
 
   return {
     ...mapOrder(order, product),
-    salesOrderFolio: sales?.folio ?? null,
+    salesOrderFolio: head.salesOrderFolio,
     qcRigor: product?.qcRigor ?? "off",
     materials: materialRows,
     operations: (operations as Array<{ operation: OperationRow; workCenterName: string }>)

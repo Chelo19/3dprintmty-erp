@@ -1,6 +1,6 @@
 import "reflect-metadata";
 import { afterAll, beforeAll, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { DatabaseService } from "../src/db/database.service";
 import { auditEvents, customers, payments, salesOrders, tenantMemberships, tenants, userAccounts } from "../src/db/schema";
 import { assertCredit } from "../src/modules/orders.shared";
@@ -67,7 +67,7 @@ it("excluye cancelados y borradores; una excepción requiere rol autorizado y qu
   const sales = { ...actor, role: "sales" as const };
   await expect(database.asUser(sales, (db) => assertCredit(db, sales, current, "Autorizado"))).rejects.toMatchObject({ code: "credit_limit" });
   await expect(database.asUser(actor, (db) => assertCredit(db, actor, current, "Excepción autorizada"))).resolves.toBe("Excepción autorizada");
-  const history = await database.asUser(actor, (db) => db.select().from(auditEvents).where(eq(auditEvents.entityId, current.id)));
+  const history = await database.asUser(actor, (db) => db.select().from(auditEvents).where(and(eq(auditEvents.entityId, current.id), eq(auditEvents.action, "credit.override"))));
   expect(history).toHaveLength(1);
   expect(history[0]).toMatchObject({ action: "credit.override", actorUserId: actor.userId, metadata: { reason: "Excepción autorizada" } });
 });

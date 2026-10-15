@@ -34,6 +34,9 @@ export class AuthGuard implements CanActivate {
     // Usa la ruta registrada: Express acepta variaciones de mayúsculas en la URL.
     const route = request.route?.path ?? request.path;
     const section = route.replace(/^\/api\/v1\//i, "").split("/")[0]?.toLowerCase() ?? "";
+    if (section === "purchase-orders" && !FEATURES.purchaseOrders) {
+      throw new AppError("module_disabled", "Las órdenes de compra quedan fuera del alcance actual.", 503);
+    }
     if (section === "prefacturas" && !FEATURES.prefacturas) {
       throw new AppError("module_disabled", "El módulo de prefacturas está temporalmente desactivado.", 503);
     }

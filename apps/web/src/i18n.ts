@@ -166,7 +166,7 @@ export const esMX = {
   },
   settings: {
     title: "Empresa",
-    preview: "Vista previa de IVA",
+    preview: "Vista previa de impuestos",
     amount: "Importe",
     methods: "Métodos de cobro",
   },
@@ -351,7 +351,7 @@ export const en = {
   },
   settings: {
     title: "Company",
-    preview: "VAT preview",
+    preview: "Tax preview",
     amount: "Amount",
     methods: "Payment methods",
   },

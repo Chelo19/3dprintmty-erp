@@ -34,6 +34,8 @@ interface Inventory {
 }
 
 interface Movement {
+  createdBy: string;
+  actorEmail: string | null;
   id: string;
   createdAt: string;
   kind: string;
@@ -47,7 +49,7 @@ interface Movement {
   locationName: string;
   production: { id: string; folio: string } | null;
   salesOrder: { id: string; folio: string; customerName: string | null } | null;
-  purchase: { kind: "expense" | "purchase_order"; id: string; folio: string; receiptFolio?: string } | null;
+  purchase: { kind: "expense" | "receipt"; id: string; folio: string; receiptFolio?: string } | null;
 }
 
 const SECTION = {
@@ -271,7 +273,7 @@ function Movements({
           </select>
         </label>
       </div>
-      {movements.isPending ? <TableSkeleton columns={isFilament ? 6 : 8} /> : movements.isError ? (
+      {movements.isPending ? <TableSkeleton columns={isFilament ? 7 : 9} /> : movements.isError ? (
         <Notice title="No se pudo cargar el historial" tone="error" action={<button className="ghost" type="button" onClick={() => void movements.refetch()}>Reintentar</button>}>Intenta nuevamente para consultar las entradas y salidas.</Notice>
       ) : !rows.length ? (
         <Notice title={direction ? "Sin movimientos que coincidan" : "Todavía no hay movimientos"}
@@ -286,6 +288,7 @@ function Movements({
           <thead>
             <tr>
               <th>Fecha</th>
+              <th>Usuario</th>
               <th>Artículo</th>
               <th>Movimiento</th>
               <th>Cantidad</th>
@@ -299,6 +302,7 @@ function Movements({
             {pageRows.map((row) => (
               <tr key={row.id}>
                 <td style={{ whiteSpace: "nowrap" }}>{formatDate(row.createdAt)}</td>
+                <td>{row.actorEmail ?? row.createdBy}</td>
                 <td>{row.sku} · {row.name}</td>
                 <td><span className={`res res-badge mov-${row.direction}`}>{movementLabel(row)}</span></td>
                 <td className={row.direction === "in" ? "profit-positive" : "profit-negative"} style={{ whiteSpace: "nowrap", fontWeight: 600 }}>
@@ -318,7 +322,7 @@ function Movements({
                 <td>
                   {row.purchase ? (
                     <>
-                      <Link to={row.purchase.kind === "expense" ? `/app/compras/gastos/${row.purchase.id}` : `/app/compras/${row.purchase.id}`}>{row.purchase.folio}</Link>
+                      {row.purchase.kind === "expense" ? <Link to={`/app/compras/gastos/${row.purchase.id}`}>{row.purchase.folio}</Link> : <span>{row.purchase.folio}</span>}
                       {row.purchase.receiptFolio ? <div className="costing-hint">{row.purchase.receiptFolio}</div> : null}
                     </>
                   ) : "—"}

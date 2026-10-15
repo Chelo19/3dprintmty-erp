@@ -11,6 +11,20 @@ const emitter = {
 describe("IVA México", () => {
   const tax = countryPolicy("MX").taxEngine;
 
+  it("retiene ISR sobre el neto después de descuentos, sin incluir IVA", () => {
+    const result = tax.calculate({ lines: [{ description: "Servicio", quantity: "1", unitPrice: "1000.00", discount: "100.00" }], rate: "0.16", isrRate: "0.0125" });
+    expect(result).toMatchObject({ subtotal: "900.00", tax: "144.00", isrWithheld: "11.25", total: "1032.75", isrRate: "0.012500" });
+  });
+  it("redondea la retención a centavos y admite IVA cero", () => {
+    expect(tax.calculate({ lines: [{ description: "Servicio", quantity: "1", unitPrice: "90.00" }], rate: "0", isrRate: "0.0125" })).toMatchObject({ isrWithheld: "1.13", total: "88.87" });
+  });
+  it("aplica el descuento global antes de calcular la retención", () => {
+    expect(tax.calculate({ lines: [{ description: "Servicio", quantity: "1", unitPrice: "100.00" }], globalDiscount: "10.00", rate: "0.08", isrRate: "0.1" })).toMatchObject({ tax: "7.20", isrWithheld: "9.00", total: "88.20" });
+  });
+  it("rechaza tasas de ISR fuera de rango o no finitas", () => {
+    for (const isrRate of ["-0.1", "1.01", "NaN", "Infinity"]) expect(() => tax.calculate({ lines: [{ description: "Servicio", quantity: "1", unitPrice: "100.00" }], rate: "0.16", isrRate })).toThrow();
+  });
+
   it("calcula 16% sobre $100", () => {
     const result = tax.calculate({
       lines: [{ description: "Pieza", quantity: "1", unitPrice: "100.00" }],
@@ -115,5 +129,35 @@ describe("puerto de país", () => {
     expect(() => countryPolicy("US").taxEngine.calculate({ lines: [], rate: "0" })).toThrow(
       /México/,
     );
+  });
+});
+
+
+describe("impuestos por partida", () => {
+  const tax = countryPolicy("MX").taxEngine;
+  it("mezcla exento, tasa cero y producto con IVA e ISR después del descuento", () => {
+    const result = tax.calculate({ rate: "0.16", isrRate: "0.10", lines: [
+      { description: "Servicio", quantity: "1", unitPrice: "100", vatExempt: true, isrRate: "0" },
+      { description: "Producto", quantity: "1", unitPrice: "100", discount: "10", vatRate: "0.16", isrRate: "0.0125" },
+      { description: "Tasa cero", quantity: "1", unitPrice: "100", vatRate: "0", isrRate: "0" },
+    ] });
+    expect(result).toMatchObject({ tax: "14.40", isrWithheld: "1.13", total: "303.27" });
+    expect(result.lines[0]).toMatchObject({ vatExempt: true, tax: "0.00", isrWithheld: "0.00" });
+    expect(result.lines[1]).toMatchObject({ net: "90.00", tax: "14.40", isrRate: "0.012500", isrWithheld: "1.13" });
+    expect(result.lines[2]).toMatchObject({ vatExempt: false, rate: "0.000000", tax: "0.00" });
+  });
+  it("suma las retenciones redondeadas por partida, sin retener sobre las otras bases", () => {
+    const result = tax.calculate({ rate: "0", lines: [
+      { description: "A", quantity: "1", unitPrice: "0.50", isrRate: "0.01" },
+      { description: "B", quantity: "1", unitPrice: "0.50", isrRate: "0.01" },
+      { description: "C", quantity: "1", unitPrice: "100", isrRate: "0" },
+    ] });
+    expect(result.isrWithheld).toBe("0.02");
+    expect(result.total).toBe("100.98");
+  });
+  it("valida tasas por partida incluso cuando el IVA es exento", () => {
+    for (const rate of ["-0.1", "1.1", "NaN", "Infinity"]) {
+      for (const field of ["vatRate", "isrRate"]) expect(() => tax.calculate({ rate: "0.16", lines: [{ description: "A", quantity: "1", unitPrice: "100", vatExempt: true, [field]: rate }] })).toThrow();
+    }
   });
 });

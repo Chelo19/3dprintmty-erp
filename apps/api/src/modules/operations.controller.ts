@@ -1,3 +1,5 @@
+import { preserveLineTaxes } from "./orders.shared";
+import { taxRateSchema } from "./tax-rates";
 import { loadCompanyProfile } from "./company-profile";
 import { Body, Controller, Get, Header, Headers, Param, Patch, Post, Query, StreamableFile } from "@nestjs/common";
 import {
@@ -33,7 +35,6 @@ import {
   payments,
   productionOrders,
   products,
-  purchaseOrders,
   quoteLines,
   quotePrints,
   quotes,
@@ -44,6 +45,7 @@ import {
   serviceOfferings,
   stockBalances,
   stockLedgers,
+  tenantMemberships,
 } from "../db/schema";
 import { assertRole, CurrentUser, requireTenant, type Actor, type TenantActor } from "../http/actor";
 import {
@@ -101,6 +103,9 @@ const lineSchema = z
     quantity: z.string(),
     unitPrice: z.string(),
     discount: z.string().optional(),
+    vatRate: taxRateSchema.optional(),
+    vatExempt: z.boolean().optional(),
+    isrRate: taxRateSchema.optional(),
     terms: z.string().trim().max(1000).optional(),
   })
   .refine((line) => Boolean(line.productId) !== Boolean(line.serviceId), {
@@ -108,6 +113,9 @@ const lineSchema = z
   });
 
 const quoteConditions = {
+  validityDays: z.number().int().min(1).max(365).optional(),
+  vatRate: taxRateSchema.optional(),
+  isrRate: taxRateSchema.optional(),
   customerId: z.string().uuid(),
   serviceTerms: z.string().trim().max(2000).optional(),
   paymentTerms: z.enum(["pue", "net_15", "net_30"]).optional(),
@@ -317,6 +325,8 @@ export class OperationsController {
               referenceType: stockLedgers.referenceType,
               referenceId: stockLedgers.referenceId,
               createdAt: stockLedgers.createdAt,
+              createdBy: stockLedgers.createdBy,
+              actorEmail: tenantMemberships.email,
               productId: filaments.id,
               sku: filaments.sku,
               name: filaments.name,
@@ -325,6 +335,7 @@ export class OperationsController {
               locationName: locations.name,
             })
             .from(stockLedgers)
+            .leftJoin(tenantMemberships, and(eq(tenantMemberships.tenantId, stockLedgers.tenantId), eq(tenantMemberships.userId, stockLedgers.createdBy)))
             .innerJoin(filaments, eq(filaments.id, stockLedgers.filamentId))
             .innerJoin(locations, eq(locations.id, stockLedgers.locationId))
             .where(
@@ -344,6 +355,8 @@ export class OperationsController {
           referenceType: stockLedgers.referenceType,
           referenceId: stockLedgers.referenceId,
           createdAt: stockLedgers.createdAt,
+          createdBy: stockLedgers.createdBy,
+          actorEmail: tenantMemberships.email,
           productId: products.id,
           sku: products.sku,
           name: products.name,
@@ -352,6 +365,7 @@ export class OperationsController {
           locationName: locations.name,
         })
         .from(stockLedgers)
+        .leftJoin(tenantMemberships, and(eq(tenantMemberships.tenantId, stockLedgers.tenantId), eq(tenantMemberships.userId, stockLedgers.createdBy)))
         .innerJoin(products, eq(products.id, stockLedgers.productId))
         .innerJoin(locations, eq(locations.id, stockLedgers.locationId))
         .where(
@@ -389,22 +403,10 @@ export class OperationsController {
             .where(inArray(salesOrders.id, salesIds))
         : [];
       const salesById = new Map<string, { id: string; folio: string; customerName: string | null }>(sales.map((row: { id: string; folio: string; customerName: string | null }) => [row.id, row]));
-      const receiptRows = receiptIds.length
-        ? await db
-            .select({ id: receipts.id, folio: receipts.folio, purchaseOrderId: receipts.purchaseOrderId, purchaseFolio: purchaseOrders.folio })
-            .from(receipts)
-            .innerJoin(purchaseOrders, eq(purchaseOrders.id, receipts.purchaseOrderId))
-            .where(inArray(receipts.id, receiptIds))
-        : [];
-      const receiptById = new Map<string, { id: string; folio: string; purchaseOrderId: string; purchaseFolio: string }>(receiptRows.map((row: { id: string; folio: string; purchaseOrderId: string; purchaseFolio: string }) => [row.id, row]));
-      const purchaseIds: string[] = [...new Set<string>(receiptRows.map((row: { purchaseOrderId: string }) => row.purchaseOrderId))];
-      const expenseRows = purchaseIds.length
-        ? await db
-            .select({ id: expenses.id, folio: expenses.folio, purchaseOrderId: expenses.purchaseOrderId })
-            .from(expenses)
-            .where(inArray(expenses.purchaseOrderId, purchaseIds))
-        : [];
-      const expenseByPurchase = new Map<string | null, { id: string; folio: string; purchaseOrderId: string | null }>(expenseRows.map((row: { id: string; folio: string; purchaseOrderId: string | null }) => [row.purchaseOrderId, row]));
+      const receiptRows: Array<{ id: string; folio: string; expenseId: string | null; expenseFolio: string | null; sourceFolio: string | null }> = receiptIds.length
+        ? await db.select({ id: receipts.id, folio: receipts.folio, expenseId: receipts.expenseId, expenseFolio: expenses.folio, sourceFolio: receipts.sourceFolio }).from(receipts)
+          .leftJoin(expenses, eq(expenses.id, receipts.expenseId)).where(inArray(receipts.id, receiptIds)) : [];
+      const receiptById = new Map(receiptRows.map((row) => [row.id, row]));
 
       return {
         data: rows.map((row) => {
@@ -413,10 +415,12 @@ export class OperationsController {
           const salesId = row.referenceType === "sales_order" ? row.referenceId : made?.salesOrderId ?? null;
           const sale = salesId ? salesById.get(salesId) : undefined;
           const receipt = row.referenceType === "receipt" && row.referenceId ? receiptById.get(row.referenceId) : undefined;
-          const expense = receipt ? expenseByPurchase.get(receipt.purchaseOrderId) : undefined;
+
           return {
             id: row.id,
             createdAt: row.createdAt,
+            createdBy: row.createdBy,
+            actorEmail: row.actorEmail,
             kind: row.kind,
             direction: quantity >= 0n ? "in" : "out",
             quantity: fromQty(quantity),
@@ -430,9 +434,9 @@ export class OperationsController {
             production: made ? { id: made.id, folio: made.folio } : null,
             salesOrder: sale ? { id: sale.id, folio: sale.folio, customerName: sale.customerName } : null,
             purchase: receipt
-              ? expense
-                ? { kind: "expense", id: expense.id, folio: expense.folio }
-                : { kind: "purchase_order", id: receipt.purchaseOrderId, folio: receipt.purchaseFolio, receiptFolio: receipt.folio }
+              ? receipt.expenseId && receipt.expenseFolio
+                ? { kind: "expense", id: receipt.expenseId, folio: receipt.expenseFolio, receiptFolio: receipt.folio }
+                : { kind: "receipt", id: receipt.id, folio: receipt.sourceFolio ?? receipt.folio, receiptFolio: receipt.folio }
               : null,
           };
         }),
@@ -749,7 +753,7 @@ export class OperationsController {
         throw new AppError("customer_inactive", "Ese cliente no puede recibir cotizaciones.", 409);
       }
       const draft = draftQuoteLines(input);
-      const priced = await priceLines(db, draft.lines, undefined, "0");
+      const priced = await priceLines(db, preserveLineTaxes(draft.lines, await db.select().from(quoteLines).where(eq(quoteLines.quoteId, existing.id)).orderBy(asc(quoteLines.position))), undefined, "0", false, { vatRate: input.vatRate ?? existing.vatRate, isrRate: input.isrRate ?? existing.isrRate });
       assertQuoteMode(input.mode, priced.stored.map((line) => line.lineKind));
       await db.delete(quoteLines).where(eq(quoteLines.quoteId, existing.id));
       await db.delete(quotePrints).where(eq(quotePrints.quoteId, existing.id));
@@ -760,8 +764,10 @@ export class OperationsController {
           customerName: customer.legalName,
           customerRfc: customer.rfc,
           mode: input.mode,
+          ...(input.validityDays !== undefined ? { validUntil: new Date(new Date(existing.createdAt).getTime() + input.validityDays * 86_400_000) } : {}),
           subtotalMinor: Money.fromMajor(priced.subtotal).minor,
           discountMinor: Money.fromMajor(priced.discount).minor,
+          vatRate: priced.rate, isrRate: priced.isrRate, isrWithheldMinor: Money.fromMajor(priced.isrWithheld).minor,
           vatMinor: Money.fromMajor(priced.tax).minor,
           totalMinor: Money.fromMajor(priced.total).minor,
           ...quoteConditionValues(input, customer.paymentTerms),
@@ -815,6 +821,7 @@ export class OperationsController {
           subtotalMinor: quote.subtotalMinor,
           discountMinor: quote.discountMinor,
           shippingMinor: 0n,
+          vatRate: quote.vatRate, isrRate: quote.isrRate, isrWithheldMinor: quote.isrWithheldMinor,
           vatMinor: quote.vatMinor,
           totalMinor: quote.totalMinor,
           serviceTerms: quote.serviceTerms,
@@ -860,6 +867,7 @@ export class OperationsController {
             unitPriceMinor: line.unitPriceMinor,
             discountMinor: line.discountMinor,
             netMinor: line.netMinor,
+            vatRate: line.vatRate, vatExempt: line.vatExempt, isrRate: line.isrRate, isrWithheldMinor: line.isrWithheldMinor,
             vatMinor: line.vatMinor,
             totalMinor: line.totalMinor,
           });
@@ -1040,7 +1048,7 @@ async function loadQuote(db: Db, id: string, role: TenantRole) {
     ...mapQuote(quote, role),
     costing,
     paymentTerms: quote.paymentTerms,
-    vatRate: company ? String(company.defaultVatRate) : "0.1600",
+    vatRate: quote.vatRate,
     issuer: company
       ? {
           legalName: company.legalName,
@@ -1061,7 +1069,7 @@ async function loadQuote(db: Db, id: string, role: TenantRole) {
         subtotal: sumMinor(raw, "netMinor", role),
         discount: sumMinor(raw, "discountMinor", role),
         vat: sumMinor(raw, "vatMinor", role),
-        total: sumMinor(raw, "totalMinor", role),
+        total: money(raw.reduce((sum: bigint, line: StoredLine) => sum + line.totalMinor - line.isrWithheldMinor, 0n), role),
         lines: mapped.filter((line: { printId: string | null }) => line.printId === print.id),
       };
     }),
@@ -1084,6 +1092,8 @@ async function quotePdfInput(db: Db, quote: Awaited<ReturnType<typeof loadQuote>
     discount: quote.discount,
     vat: quote.vat,
     vatRate: quote.vatRate,
+    isrRate: quote.isrRate,
+    isrWithheld: quote.isrWithheld,
     total: quote.total,
     currency: quote.currency,
     issuer: quote.issuer?.tradeName || quote.issuer?.legalName || company?.tradeName || company?.legalName || "Taller",
@@ -1156,8 +1166,9 @@ async function insertQuote(db: Db, tenant: TenantActor, input: z.infer<typeof qu
     throw new AppError("customer_inactive", "Ese cliente no puede recibir cotizaciones.", 409);
   }
   const draft = draftQuoteLines(input);
-  const priced = await priceLines(db, draft.lines, undefined, "0");
+  const priced = await priceLines(db, draft.lines, undefined, "0", false, { vatRate: input.vatRate, isrRate: input.isrRate, workshopIsr: true });
   assertQuoteMode(input.mode, priced.stored.map((line) => line.lineKind));
+  const createdAt = new Date();
   const [created] = await db
     .insert(quotes)
     .values({
@@ -1167,9 +1178,11 @@ async function insertQuote(db: Db, tenant: TenantActor, input: z.infer<typeof qu
       customerName: customer.legalName,
       customerRfc: customer.rfc,
       mode: input.mode,
-      validUntil: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+      createdAt,
+      validUntil: new Date(createdAt.getTime() + (input.validityDays ?? 30) * 86_400_000),
       subtotalMinor: Money.fromMajor(priced.subtotal).minor,
       discountMinor: Money.fromMajor(priced.discount).minor,
+      vatRate: priced.rate, isrRate: priced.isrRate, isrWithheldMinor: Money.fromMajor(priced.isrWithheld).minor,
       vatMinor: Money.fromMajor(priced.tax).minor,
       totalMinor: Money.fromMajor(priced.total).minor,
       ...quoteConditionValues(input, customer.paymentTerms),
@@ -1226,6 +1239,7 @@ async function writeQuoteChildren(
       unitPriceMinor: line.unitPriceMinor,
       discountMinor: line.discountMinor,
       netMinor: line.netMinor,
+      vatRate: line.vatRate, vatExempt: line.vatExempt, isrRate: line.isrRate, isrWithheldMinor: line.isrWithheldMinor,
       vatMinor: line.vatMinor,
       totalMinor: line.totalMinor,
       tenantId,
@@ -1235,12 +1249,14 @@ async function writeQuoteChildren(
 }
 
 function quoteInputFromStored(
-  quote: Pick<QuoteRow, "customerId" | "serviceTerms" | "paymentTerms" | "depositPercent" | "paymentNotes" | "leadTimeDays" | "mode">,
+  quote: Pick<QuoteRow, "customerId" | "serviceTerms" | "paymentTerms" | "depositPercent" | "paymentNotes" | "leadTimeDays" | "mode" | "vatRate" | "isrRate" | "createdAt" | "validUntil">,
   prints: Array<{ id: string; name: string; quantity: string }>,
   lines: StoredLine[],
 ): z.infer<typeof quoteSchema> {
   const conditions = {
+    validityDays: quoteValidityDays(quote),
     customerId: quote.customerId,
+    vatRate: quote.vatRate, isrRate: quote.isrRate,
     serviceTerms: quote.serviceTerms ?? undefined,
     paymentTerms: quote.paymentTerms as "pue" | "net_15" | "net_30",
     depositPercent: quote.depositPercent,
@@ -1282,6 +1298,7 @@ function storedLineInput(line: StoredLine, print?: { name: string; quantity: str
   const shared = {
     description: description || "Partida",
     quantity,
+    vatRate: line.vatRate, vatExempt: line.vatExempt, isrRate: line.isrRate,
     unitPrice: Money.fromMinor(line.unitPriceMinor).toMajor(),
     discount: Money.fromMinor(line.discountMinor).toMajor(),
   };
@@ -1290,10 +1307,10 @@ function storedLineInput(line: StoredLine, print?: { name: string; quantity: str
 }
 
 function assertQuoteMode(mode: "prints" | "products", kinds: string[]) {
-  if (mode === "products" && kinds.some((kind) => kind !== "product")) {
+  if (mode === "products" && kinds.some((kind) => kind !== "product" && kind !== "service")) {
     throw new AppError(
       "quote_mode",
-      "Una cotización de productos solo lleva productos. El filamento y los servicios van dentro de una impresión.",
+      "Una cotización de productos puede incluir servicios. El filamento va dentro de una impresión.",
       409,
     );
   }
@@ -1343,6 +1360,10 @@ function mapCustomer(row: CustomerRow, role: TenantRole) {
   };
 }
 
+function quoteValidityDays(quote: Pick<QuoteRow, "createdAt" | "validUntil">) {
+  return Math.max(1, Math.min(365, Math.round((new Date(quote.validUntil).getTime() - new Date(quote.createdAt).getTime()) / 86_400_000)));
+}
+
 function mapQuote(row: QuoteRow, role: TenantRole) {
   return {
     id: row.id,
@@ -1352,9 +1373,11 @@ function mapQuote(row: QuoteRow, role: TenantRole) {
     customerRfc: row.customerRfc,
     status: row.status,
     validUntil: row.validUntil,
+    validityDays: quoteValidityDays(row),
     subtotal: money(row.subtotalMinor, role),
     discount: money(row.discountMinor, role),
     vat: money(row.vatMinor, role),
+    vatRate: row.vatRate, isrRate: row.isrRate, isrWithheld: money(row.isrWithheldMinor, role),
     total: money(row.totalMinor, role),
     serviceTerms: row.serviceTerms,
     ...paymentConditions(row.paymentTerms, row.depositPercent, row.paymentNotes, BigInt(row.totalMinor), role),
@@ -1379,12 +1402,15 @@ function mapLine(line: StoredLine, role: TenantRole) {
     unitPrice: money(line.unitPriceMinor, role),
     discount: money(line.discountMinor, role),
     net: money(line.netMinor, role),
+    vatRate: line.vatRate, vatExempt: line.vatExempt, isrRate: line.isrRate, isrWithheld: money(line.isrWithheldMinor, role),
     vat: money(line.vatMinor, role),
     total: money(line.totalMinor, role),
   };
 }
 
 interface LedgerRow {
+  createdBy: string;
+  actorEmail: string | null;
   id: string;
   kind: string;
   quantity: string;
@@ -1438,6 +1464,9 @@ interface QuoteRow {
   validUntil: Date;
   subtotalMinor: bigint;
   discountMinor: bigint;
+  vatRate: string;
+  isrRate: string;
+  isrWithheldMinor: bigint;
   vatMinor: bigint;
   totalMinor: bigint;
   serviceTerms: string | null;
@@ -1462,6 +1491,10 @@ interface StoredLine {
   unitPriceMinor: bigint;
   discountMinor: bigint;
   netMinor: bigint;
+  vatRate: string;
+  vatExempt: boolean;
+  isrRate: string;
+  isrWithheldMinor: bigint;
   vatMinor: bigint;
   totalMinor: bigint;
 }

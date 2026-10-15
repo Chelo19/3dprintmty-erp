@@ -184,18 +184,13 @@ for (const driver of ["pglite", "postgres"] as const) {
       expect(ledger.reduce((sum: number, entry: typeof stockLedgers.$inferSelect) => sum + Number(entry.quantity), 0)).toBe(4);
     });
 
-    it("dos recepciones simultáneas no reciben por encima de la OC", async () => {
+    it("una compra directa simultánea con la misma llave registra una sola entrada", async () => {
       const item = await product();
-      const vendor = await post("/vendors", { name: `Vendor ${crypto.randomUUID()}` });
-      expect(vendor.status).toBe(201);
-      const purchase = await post("/purchase-orders", { vendorId: vendor.body.id, locationId, lines: [{ productId: item.id, quantity: "10", unitCost: "1.00" }] });
-      expect(purchase.status).toBe(201);
-      expect((await post(`/purchase-orders/${purchase.body.id}/transition`, { to: "ordered" })).status).toBe(201);
-      const payload = { lines: [{ lineId: purchase.body.lines[0].id, quantity: "6" }] };
-      const receipts = await Promise.all([post(`/purchase-orders/${purchase.body.id}/receive`, payload, crypto.randomUUID()), post(`/purchase-orders/${purchase.body.id}/receive`, payload, crypto.randomUUID())]);
-      expect(receipts.map((response) => response.status).sort()).toEqual([201, 409]);
-      const received = await get(`/purchase-orders/${purchase.body.id}`);
-      expect(Number(received.body.lines[0].receivedQty)).toBe(6);
+      const payload = { kind: "product", itemId: item.id, locationId, quantity: "6", amount: "6.00", occurredOn: "2026-10-14" };
+      const key = crypto.randomUUID();
+      const purchases = await Promise.all([post("/expenses", payload, key), post("/expenses", payload, key)]);
+      expect(purchases.map((response) => response.status)).toEqual([201, 201]);
+      expect(purchases[0].body.id).toBe(purchases[1].body.id);
       const [balance] = await services().database.asUser(actor, (db) => db.select().from(stockBalances).where(eq(stockBalances.productId, item.id)));
       expect(Number(balance.onHand)).toBe(6);
     });
@@ -231,7 +226,7 @@ for (const driver of ["pglite", "postgres"] as const) {
       expect(payment.status).toBe(400);
       expect(payment.body.code).toBe("idempotency_key_required");
       expect((await post("/prefacturas", { salesOrderId: current.id })).status).toBe(400);
-      expect((await post(`/purchase-orders/${current.id}/receive`, { lines: [{ lineId: current.id, quantity: "1" }] })).status).toBe(400);
+      expect((await post(`/purchase-orders/${current.id}/receive`, { lines: [{ lineId: current.id, quantity: "1" }] })).status).toBe(503);
     });
 
     it("COD no puede exceder ni comprometer dos veces el mismo saldo", async () => {
@@ -321,7 +316,7 @@ for (const driver of ["pglite", "postgres"] as const) {
       const purchased = await get("/products?itemClass=finished_good&supplyMode=buy&limit=100");
       expect(purchased.body.data.map((item: { id: string }) => item.id)).toEqual(expect.arrayContaining([buy.id, both.id]));
       const vendor = await post("/vendors", { name: "Source vendor" });
-      const purchase = (productId: string) => post("/purchase-orders", { vendorId: vendor.body.id, locationId, lines: [{ productId, quantity: "1", unitCost: "1.00" }] });
+      const purchase = (productId: string) => post("/expenses", { kind: "product", itemId: productId, vendorId: vendor.body.id, locationId, quantity: "1", amount: "1.00", occurredOn: "2026-10-14" });
       expect((await purchase(make.id)).body.code).toBe("not_purchasable");
       expect((await purchase(buy.id)).status).toBe(201);
       expect((await purchase(both.id)).body.code).toBe("not_purchasable");
@@ -331,8 +326,7 @@ for (const driver of ["pglite", "postgres"] as const) {
       expect((await recipe(make.id)).status).toBe(201);
       expect((await recipe(both.id)).status).toBe(201);
       const change = await request(app.getHttpServer()).patch(`/api/v1/products/${buy.id}`).set("Authorization", `Bearer ${token}`).send({ supplyMode: "make" });
-      expect(change.status).toBe(409);
-      expect(change.body.code).toBe("supply_in_use");
+      expect(change.status).toBe(200);
     });
 
     it("Prestado requiere unidades, registra salida y no las descuenta otra vez al embarcar", async () => {

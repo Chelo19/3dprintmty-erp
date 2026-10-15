@@ -38,6 +38,11 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       const connectionString = process.env.DATABASE_URL;
       const pool = new pg.default.Pool({
         connectionString,
+        // Mantener una conexión evita repetir DNS/TLS al navegar entre pantallas.
+        min: 1,
+        idleTimeoutMillis: 60_000,
+        connectionTimeoutMillis: 10_000,
+        keepAlive: true,
         ssl: connectionString.includes("supabase.co") || connectionString.includes("supabase.com")
           ? { rejectUnauthorized: false } : undefined,
       });
@@ -91,6 +96,19 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     const current = this.context.getStore();
     if (current?.actor) throw new Error("No se permite elevar privilegios dentro de asUser.");
     return fn(current?.tx ?? this.orm);
+  }
+
+  /** Privileged business writes still carry verified authorship in the same transaction. */
+  async asAdminActor<T>(actor: Actor, fn: (db: any) => T | Promise<T>): Promise<T> {
+    if (this.context.getStore()?.actor) throw new Error("No se permite elevar privilegios dentro de asUser.");
+    return this.atomic(async () => {
+      const tx = this.context.getStore()!.tx;
+      const previous = await tx.execute(sql`select current_setting('request.jwt.claims', true) as claims`);
+      await tx.execute(sql`select set_config('request.jwt.claims', ${this.claims(actor)}, true)`);
+      const result = await fn(tx);
+      await tx.execute(sql`select set_config('request.jwt.claims', ${previous.rows[0]?.claims ?? ""}, true)`);
+      return result;
+    });
   }
 
   async asUser<T>(actor: Actor, fn: (db: any) => T | Promise<T>): Promise<T> {
@@ -147,7 +165,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   }
 
   private claims(actor: Actor): string {
-    return JSON.stringify({ sub: actor.userId, tenant_id: actor.tenantId, role: actor.role,
+    return JSON.stringify({ sub: actor.userId, email: actor.email, tenant_id: actor.tenantId, role: actor.role,
       ...(actor.impersonator ? { impersonator: actor.impersonator } : {}) });
   }
 

@@ -96,6 +96,7 @@ export class PrefacturasController {
           subtotalMinor: BigInt(order.subtotalMinor),
           discountMinor: BigInt(order.discountMinor),
           shippingMinor: BigInt(order.shippingMinor),
+          vatRate: order.vatRate, isrRate: order.isrRate, isrWithheldMinor: BigInt(order.isrWithheldMinor),
           vatMinor: BigInt(order.vatMinor),
           totalMinor: BigInt(order.totalMinor),
           incomplete: warnings.length > 0,
@@ -112,6 +113,7 @@ export class PrefacturasController {
           unitPriceMinor: BigInt(line.unitPriceMinor),
           discountMinor: BigInt(line.discountMinor),
           netMinor: BigInt(line.netMinor),
+          vatRate: line.vatRate, vatExempt: line.vatExempt, isrRate: line.isrRate, isrWithheldMinor: BigInt(line.isrWithheldMinor),
           vatMinor: BigInt(line.vatMinor),
           totalMinor: BigInt(line.totalMinor),
         })),
@@ -216,7 +218,7 @@ export class PrefacturasController {
     const documentsCsv = toCsv(
       [
         "serie", "folio", "fecha", "estado", "receptor_rfc", "receptor_nombre", "uso_cfdi", "metodo_pago",
-        "forma_pago", "subtotal", "descuento", "envio", "iva", "total", "moneda", "incompleta", "motivo_cancelacion",
+        "forma_pago", "subtotal", "descuento", "envio", "iva", "tasa_isr", "isr_retenido", "total", "moneda", "incompleta", "motivo_cancelacion",
       ],
       data.documents.map((row: DocumentRow) => {
         const receiver = row.receiver as { rfc?: string; legalName?: string; cfdiUse?: string };
@@ -224,7 +226,7 @@ export class PrefacturasController {
           row.series, String(row.folio), row.issuedAt.toISOString(), row.status === "issued" ? "vigente" : "cancelada",
           receiver.rfc ?? "", receiver.legalName ?? "", receiver.cfdiUse ?? "", row.intendedPayment, row.satPaymentForm,
           minorToMajor(row.subtotalMinor), minorToMajor(row.discountMinor), minorToMajor(row.shippingMinor),
-          minorToMajor(row.vatMinor), minorToMajor(row.totalMinor), row.currency, row.incomplete ? "si" : "no",
+          minorToMajor(row.vatMinor), row.isrRate, minorToMajor(row.isrWithheldMinor), minorToMajor(row.totalMinor), row.currency, row.incomplete ? "si" : "no",
           row.voidReason ?? "",
         ];
       }),
@@ -331,9 +333,9 @@ async function buildPrefactura(db: Db, salesOrderId: string) {
       quantity: line.quantity,
       unitPrice: Money.fromMinor(BigInt(line.unitPriceMinor)).toMajor(),
       discount: Money.fromMinor(BigInt(line.discountMinor)).toMajor(),
-      taxable: true,
+      taxable: true, vatRate: line.vatRate, vatExempt: line.vatExempt, isrRate: line.isrRate,
     })),
-    taxRate: String(company.defaultVatRate),
+    taxRate: order.vatRate, isrRate: order.isrRate,
     intendedPayment,
     satPaymentForm,
     series: company.preinvoiceSeries,
@@ -418,6 +420,7 @@ function mapDocument(row: DocumentRow) {
     subtotal: minorToMajor(row.subtotalMinor),
     discount: minorToMajor(row.discountMinor),
     shipping: minorToMajor(row.shippingMinor),
+    vatRate: row.vatRate, isrRate: row.isrRate, isrWithheld: minorToMajor(row.isrWithheldMinor),
     vat: minorToMajor(row.vatMinor),
     total: minorToMajor(row.totalMinor),
     currency: row.currency,
@@ -450,6 +453,9 @@ interface DocumentRow {
   subtotalMinor: bigint;
   discountMinor: bigint;
   shippingMinor: bigint;
+  vatRate: string;
+  isrRate: string;
+  isrWithheldMinor: bigint;
   vatMinor: bigint;
   totalMinor: bigint;
   incomplete: boolean;
@@ -466,6 +472,10 @@ interface DocumentLineRow {
   unitPriceMinor: bigint;
   discountMinor: bigint;
   netMinor: bigint;
+  vatRate: string;
+  vatExempt: boolean;
+  isrRate: string;
+  isrWithheldMinor: bigint;
   vatMinor: bigint;
   totalMinor: bigint;
 }
@@ -476,6 +486,10 @@ interface SalesLineRow {
   unitPriceMinor: bigint;
   discountMinor: bigint;
   netMinor: bigint;
+  vatRate: string;
+  vatExempt: boolean;
+  isrRate: string;
+  isrWithheldMinor: bigint;
   vatMinor: bigint;
   totalMinor: bigint;
 }

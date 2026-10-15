@@ -1,3 +1,4 @@
+import { AuditController } from "./modules/audit.controller";
 import { Module } from "@nestjs/common";
 import { APP_GUARD, APP_INTERCEPTOR } from "@nestjs/core";
 import { OperatorCostsInterceptor } from "./http/operator-costs.interceptor";
@@ -14,13 +15,14 @@ import { OrdersController } from "./modules/orders.controller";
 import { PlatformController } from "./modules/platform.controller";
 import { PrefacturasController } from "./modules/prefacturas.controller";
 import { ProductionController } from "./modules/production.controller";
-import { PurchasingController } from "./modules/purchasing.controller";
+import { DisabledPurchaseOrdersController, PurchasingController } from "./modules/purchasing.controller";
 import { SettingsController } from "./modules/settings.controller";
 import { SpoolsController } from "./modules/spools.controller";
 import { TeamController } from "./modules/team.controller";
 
 @Module({
   controllers: [
+    AuditController,
     HealthController,
     AuthController,
     OnboardingController,
@@ -34,6 +36,7 @@ import { TeamController } from "./modules/team.controller";
     ManufacturingController,
     ProductionController,
     PurchasingController,
+    DisabledPurchaseOrdersController,
     SpoolsController,
     PrefacturasController,
   ],

@@ -1,3 +1,4 @@
+import { taxRateSchema } from "./tax-rates";
 import { loadCompanyProfile } from "./company-profile";
 import { Body, Controller, Get, Header, Headers, Param, Patch, Post, Put, Query, StreamableFile } from "@nestjs/common";
 import {
@@ -63,7 +64,9 @@ import {
   manufacturableIds,
   supplyPicture,
   priceLines,
+  preserveLineTaxes,
   productionFor,
+  summarizeProduction,
   refreshPaymentStatus,
   releaseOrderReservations,
   repriceOrder,
@@ -85,6 +88,9 @@ const lineSchema = z
     quantity: z.string(),
     unitPrice: z.string(),
     discount: z.string().optional(),
+    vatRate: taxRateSchema.optional(),
+    vatExempt: z.boolean().optional(),
+    isrRate: taxRateSchema.optional(),
     terms: z.string().trim().max(1000).optional(),
   })
   .refine((line) => Boolean(line.productId) !== Boolean(line.serviceId), {
@@ -189,7 +195,7 @@ export class OrdersController {
         subtotal: order.subtotal,
         discount: order.discount,
         vat: order.vat,
-        vatRate: company ? String(company.defaultVatRate) : "0.1600",
+        vatRate: order.vatRate, isrRate: order.isrRate, isrWithheld: order.isrWithheld,
         total: order.total,
         currency: order.currency,
         issuer: company?.tradeName || company?.legalName || "Taller",
@@ -205,6 +211,7 @@ export class OrdersController {
           unitPrice: line.unitPrice,
           discount: line.discount,
           net: line.net,
+          vatRate: line.vatRate, vatExempt: line.vatExempt, isrRate: line.isrRate, isrWithheld: line.isrWithheld,
           vat: line.vat,
           total: line.total,
         })),
@@ -274,6 +281,7 @@ export class OrdersController {
           subtotalMinor: Money.fromMajor(priced.subtotal).minor,
           discountMinor: Money.fromMajor(priced.discount).minor,
           shippingMinor: Money.fromMajor(input.shipping ?? "0").minor,
+          vatRate: priced.rate, isrRate: priced.isrRate, isrWithheldMinor: Money.fromMajor(priced.isrWithheld).minor,
           vatMinor: Money.fromMajor(priced.tax).minor,
           totalMinor: Money.fromMajor(priced.total).minor,
           locationId: input.locationId ?? null,
@@ -329,7 +337,7 @@ export class OrdersController {
       const order = await loadOrder(db, id);
       assertOrderAction(await orderContext(db, tenant, order), "edit");
       if (input.locationId) await one(db, locations, locations.id, input.locationId, "No encontramos esa sucursal.");
-      const priced = await priceLines(db, input.lines, input.globalDiscount, input.shipping ?? "0");
+      const priced = await priceLines(db, preserveLineTaxes(input.lines, await loadOrderLines(db, order.id)), input.globalDiscount, input.shipping ?? "0", false, { vatRate: order.vatRate, isrRate: order.isrRate });
       const total = Money.fromMajor(priced.total).minor;
       const paid = paidMinor(BigInt(order.totalMinor), await orderLedger(db, order.id));
       if (total < paid) {
@@ -356,6 +364,7 @@ export class OrdersController {
           subtotalMinor: Money.fromMajor(priced.subtotal).minor,
           discountMinor: Money.fromMajor(priced.discount).minor,
           shippingMinor: Money.fromMajor(input.shipping ?? "0").minor,
+          vatRate: priced.rate, isrRate: priced.isrRate, isrWithheldMinor: Money.fromMajor(priced.isrWithheld).minor,
           vatMinor: Money.fromMajor(priced.tax).minor,
           totalMinor: total,
           ...(input.locationId ? { locationId: input.locationId } : {}),
@@ -762,10 +771,11 @@ export async function orderDetail(db: Db, tenant: TenantActor, id: string) {
     .where(eq(salesOrderPrints.salesOrderId, order.id))
     .orderBy(asc(salesOrderPrints.position));
   const ledger: PaymentRow[] = await orderLedger(db, order.id);
-  const context = await orderContext(db, tenant, order);
   const production = await db
     .select({
       id: productionOrders.id,
+      productId: productionOrders.productId,
+      quantityScrapped: productionOrders.quantityScrapped,
       folio: productionOrders.folio,
       status: productionOrders.status,
       quantityOrdered: productionOrders.quantityOrdered,
@@ -798,24 +808,20 @@ export async function orderDetail(db: Db, tenant: TenantActor, id: string) {
   const productTypes = new Map<string, string>();
   const productUnits = new Map<string, string>();
   const serviceUnits = new Map<string, string>();
-  for (const line of lines) {
-    if (line.productId && !skus.has(line.productId)) {
-      const [product] = await db
-        .select({ sku: products.sku, productType: products.productType, stockUom: products.stockUom })
-        .from(products)
-        .where(eq(products.id, line.productId))
-        .limit(1);
-      if (product) {
-        skus.set(line.productId, product.sku);
-        productTypes.set(line.productId, product.productType);
-        productUnits.set(line.productId, uomShort(product.stockUom));
-      }
-    }
-    if (line.serviceId && !serviceUnits.has(line.serviceId)) {
-      const [service] = await db.select({ unit: serviceOfferings.unit }).from(serviceOfferings).where(eq(serviceOfferings.id, line.serviceId)).limit(1);
-      if (service) serviceUnits.set(line.serviceId, service.unit);
-    }
+  const productIds = [...new Set(lines.flatMap((line) => line.productId ? [line.productId] : []))];
+  const productRows: Array<{ id: string; sku: string; productType: string; stockUom: string }> = productIds.length
+    ? await db.select({ id: products.id, sku: products.sku, productType: products.productType, stockUom: products.stockUom })
+      .from(products).where(inArray(products.id, productIds)) : [];
+  for (const product of productRows) {
+    skus.set(product.id, product.sku);
+    productTypes.set(product.id, product.productType);
+    productUnits.set(product.id, uomShort(product.stockUom));
   }
+  const serviceIds = [...new Set(lines.flatMap((line) => line.serviceId ? [line.serviceId] : []))];
+  const serviceRows: Array<{ id: string; unit: string }> = serviceIds.length
+    ? await db.select({ id: serviceOfferings.id, unit: serviceOfferings.unit }).from(serviceOfferings)
+      .where(inArray(serviceOfferings.id, serviceIds)) : [];
+  for (const service of serviceRows) serviceUnits.set(service.id, service.unit);
   const filamentIds = [...new Set(lines.flatMap((line) => (line.filamentId ? [line.filamentId] : [])))];
   const onHandByFilament = new Map<string, bigint>();
   if (filamentIds.length) {
@@ -832,7 +838,11 @@ export async function orderDetail(db: Db, tenant: TenantActor, id: string) {
   const shortageIds = supply.flatMap((line, index) =>
     line.productId && !lines[index]?.filamentId && openQuantity(line) > 0n ? [line.productId] : [],
   );
-  const picture = supplyPicture(lines, supply, await manufacturableIds(db, shortageIds), context.servicesOpen);
+  const makeable = await manufacturableIds(db, shortageIds);
+  const context = await orderContext(db, tenant, order, {
+    lines, ledger, prints, documents, productTypes, makeable, production: summarizeProduction(production),
+  });
+  const picture = supplyPicture(lines, supply, makeable, context.servicesOpen);
   const due = dueMinor(BigInt(order.totalMinor), ledger);
   const canSeeMoney = canReadSalePrice(tenant.role);
   return {
@@ -862,7 +872,7 @@ export async function orderDetail(db: Db, tenant: TenantActor, id: string) {
     })),
     actions: orderActions(context),
     supply: picture,
-    production: production.map((row: { quantityOrdered: string; quantityCompleted: string }) => ({
+    production: production.map(({ productId: _productId, quantityScrapped: _quantityScrapped, ...row }: { productId: string; quantityScrapped: string; quantityOrdered: string; quantityCompleted: string }) => ({
       ...row,
       quantityOrdered: formatQty(qtyFromDb(row.quantityOrdered)),
       quantityCompleted: formatQty(qtyFromDb(row.quantityCompleted)),

@@ -2,6 +2,10 @@ import { Money } from "@3dprintmty/domain";
 import type { QuoteCosting } from "./quote-costing";
 
 export interface QuotePdfLine {
+  vatRate?: string;
+  vatExempt?: boolean;
+  isrRate?: string;
+  isrWithheld?: string | null;
   description: string;
   terms: string | null;
   uom: string;
@@ -37,6 +41,8 @@ export interface QuotePdfInput {
   discount: string | null;
   vat: string | null;
   vatRate: string;
+  isrRate?: string;
+  isrWithheld?: string | null;
   total: string | null;
   currency: string;
   title?: string;
@@ -252,7 +258,7 @@ export function renderQuotePdf(input: QuotePdfInput): Uint8Array {
   const kind = input.kindLabel ?? (input.mode === "prints" ? "Impresiones" : "Productos");
   const panels: Array<[string, string, string]> = [
     ["CLIENTE", input.customerName, input.customerRfc ? `RFC ${input.customerRfc}` : "Sin RFC"],
-    ["CONDICIONES", `${input.currency} · ${input.paymentTerms}`, `${vatLabel(input.vatRate)} · ${kind}`],
+    ["CONDICIONES", `${input.currency} · ${input.paymentTerms}`, `Impuestos por partida · ${kind}`],
   ];
   panels.forEach(([label, main, detail], index) => {
     const x = LEFT + index * (panelWidth + 12);
@@ -299,9 +305,10 @@ export function renderQuotePdf(input: QuotePdfInput): Uint8Array {
   }
 
   function lineRow(line: QuotePdfLine) {
-    const description = line.terms ? `${line.description} · ${line.terms}` : line.description;
+    const detail = line.terms ? `${line.description} · ${line.terms}` : line.description;
+    const description = `${detail} · ${line.vatExempt ? "IVA exento" : vatLabel(line.vatRate ?? input.vatRate)} · ISR ${Number((Number(line.isrRate ?? input.isrRate ?? 0) * 100).toFixed(4))}%: -${money(line.isrWithheld ?? "0")}`;
     row(
-      [description, trimQty(line.quantity), line.uom, money(line.unitPrice), money(line.discount), money(line.net), money(line.vat), money(line.total)],
+      [description, trimQty(line.quantity), line.uom, money(line.unitPrice), money(line.discount), money(line.net), money(line.vat), money(line.total == null ? null : Money.fromMajor(line.total).sub(Money.fromMajor(line.isrWithheld ?? "0")).toMajor())],
       { bold: [7] },
     );
   }
@@ -310,7 +317,8 @@ export function renderQuotePdf(input: QuotePdfInput): Uint8Array {
   y -= 12;
   const totalsWidth = 220;
   const totalsX = RIGHT - totalsWidth;
-  const totalsHeight = 92;
+  const hasIsr = Number(input.isrWithheld ?? 0) > 0;
+  const totalsHeight = hasIsr ? 107 : 92;
   const termsWidth = WIDTH - totalsWidth - 12;
   const termRows = input.payment ? paymentRows(input.payment, input.total) : [];
   const noteLines = input.payment?.notes ? wrapToWidth(input.payment.notes, 8, termsWidth - 24) : [];
@@ -332,18 +340,19 @@ export function renderQuotePdf(input: QuotePdfInput): Uint8Array {
   fillRect(totalsX, y, totalsWidth, totalsHeight, PANEL);
   strokeRect(totalsX, y, totalsWidth, totalsHeight, LINE);
   const totalRows: Array<[string, string]> = [
-    ["Subtotal", money(input.subtotal)],
-    ["Descuento", money(input.discount)],
+    ["Subtotal neto", money(input.subtotal)],
+    ["Descuento incluido", money(input.discount)],
     ["IVA", money(input.vat)],
+    ...(hasIsr ? [["Retención ISR", `-${money(input.isrWithheld ?? "0")}`] as [string, string]] : []),
   ];
   totalRows.forEach(([label, amount], index) => {
     const baseline = y - 18 - index * 15;
     text(label, 9, totalsX + 14, baseline, { color: MUTED });
     textRight(amount, 9, RIGHT - 14, baseline);
   });
-  hline(totalsX + 14, RIGHT - 14, y - 60);
-  text(`Total ${input.currency}`, 11, totalsX + 14, y - 79, { bold: true });
-  textRight(money(input.total), 14, RIGHT - 14, y - 80, { bold: true, color: input.costing ? ORANGE : ACCENT });
+  hline(totalsX + 14, RIGHT - 14, y - (hasIsr ? 75 : 60));
+  text(`Total ${input.currency}`, 11, totalsX + 14, y - (hasIsr ? 94 : 79), { bold: true });
+  textRight(money(input.total), 14, RIGHT - 14, y - (hasIsr ? 95 : 80), { bold: true, color: input.costing ? ORANGE : ACCENT });
   y -= Math.max(totalsHeight, termsHeight);
 
   if (input.serviceTerms) {
@@ -574,7 +583,7 @@ function n(value: number): string {
 }
 
 function vatLabel(rate: string): string {
-  const pct = Math.round(Number(rate) * 100);
+  const pct = Number((Number(rate) * 100).toFixed(4));
   return Number.isFinite(pct) ? `IVA ${pct}%` : "IVA";
 }
 

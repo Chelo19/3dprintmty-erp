@@ -44,18 +44,21 @@ export function calculateMxTax(input: {
   lines: TaxLineInput[];
   globalDiscount?: string;
   rate: string;
+  isrRate?: string;
 }): TaxBreakdown {
   if (input.lines.length === 0) {
     throw new AppError("empty_lines", "Agrega al menos una línea.");
   }
   const rate = new Decimal(input.rate);
-  if (rate.lt(0) || rate.gt(1)) {
+  if (!rate.isFinite() || rate.lt(0) || rate.gt(1)) {
     throw new AppError("invalid_tax_rate", "La tasa de impuesto no es válida.");
   }
 
+  const isrRate = new Decimal(input.isrRate ?? "0");
+  if (!isrRate.isFinite() || isrRate.lt(0) || isrRate.gt(1)) throw new AppError("invalid_tax_rate", "La retención de ISR debe estar entre 0 y 100 %.");
   const nets = input.lines.map(lineNet);
   const taxableIndexes = input.lines
-    .map((line, index) => ({ index, taxable: line.taxable !== false }))
+    .map((line, index) => ({ index, taxable: line.taxable !== false && !line.vatExempt }))
     .filter((line) => line.taxable)
     .map((line) => line.index);
   const taxableWeights = taxableIndexes.map((index) => nets[index] ?? 0n);
@@ -78,21 +81,30 @@ export function calculateMxTax(input: {
 
   const lines: TaxLineResult[] = input.lines.map((line, index) => {
     const net = (nets[index] ?? 0n) - (discountByIndex.get(index) ?? 0n);
-    const taxable = line.taxable !== false;
+    const taxable = line.taxable !== false && !line.vatExempt;
+    const lineRate = new Decimal(line.vatRate ?? input.rate);
+    const lineIsrRate = new Decimal(line.isrRate ?? input.isrRate ?? "0");
+    for (const value of [lineRate, lineIsrRate]) {
+      if (!value.isFinite() || value.lt(0) || value.gt(1)) throw new AppError("invalid_tax_rate", "La tasa de la partida debe estar entre 0 y 100 %.");
+    }
+    const withheld = Money.fromMinor(net).timesQuantity(lineIsrRate.toFixed(6));
     const tax = taxable
       ? Money.fromMajor(
           new Decimal(Money.fromMinor(net).toMajor())
-            .mul(rate)
+            .mul(lineRate)
             .toDecimalPlaces(2, Decimal.ROUND_HALF_UP)
             .toFixed(2),
         ).minor
       : 0n;
     return {
+      vatExempt: !taxable,
+      isrRate: lineIsrRate.toFixed(6),
+      isrWithheld: withheld.toMajor(),
       description: line.description,
       net: Money.fromMinor(net).toMajor(),
       tax: Money.fromMinor(tax).toMajor(),
       total: Money.fromMinor(net + tax).toMajor(),
-      rate: taxable ? rate.toFixed(4) : "0.0000",
+      rate: taxable ? lineRate.toFixed(6) : "0.000000",
     };
   });
 
@@ -103,7 +115,8 @@ export function calculateMxTax(input: {
   );
   const tax = lines.reduce((acc, line) => acc + Money.fromMajor(line.tax).minor, 0n);
   const taxableBase = taxableSum - globalDiscount;
-  const total = lines.reduce((acc, line) => acc + Money.fromMajor(line.total).minor, 0n);
+  const isrWithheld = Money.fromMinor(lines.reduce((acc, line) => acc + Money.fromMajor(line.isrWithheld).minor, 0n));
+  const total = lines.reduce((acc, line) => acc + Money.fromMajor(line.total).minor, 0n) - isrWithheld.minor;
 
   return {
     currency: "MXN",
@@ -111,8 +124,10 @@ export function calculateMxTax(input: {
     discount: Money.fromMinor(lineDiscount + globalDiscount).toMajor(),
     taxableBase: Money.fromMinor(taxableBase).toMajor(),
     tax: Money.fromMinor(tax).toMajor(),
+    isrRate: isrRate.toFixed(6),
+    isrWithheld: isrWithheld.toMajor(),
     total: Money.fromMinor(total).toMajor(),
-    rate: rate.toFixed(4),
+    rate: rate.toFixed(6),
     lines,
   };
 }

@@ -4,12 +4,19 @@ export interface TaxLineInput {
   unitPrice: string;
   discount?: string;
   taxable?: boolean;
+  vatRate?: string;
+  vatExempt?: boolean;
+  isrRate?: string;
 }
 
 export interface TaxLineResult {
+  vatExempt: boolean;
+  isrRate: string;
+  isrWithheld: string;
   description: string;
   net: string;
   tax: string;
+  /** Gross line amount including VAT; deduct isrWithheld for the amount payable. */
   total: string;
   rate: string;
 }
@@ -20,6 +27,8 @@ export interface TaxBreakdown {
   discount: string;
   taxableBase: string;
   tax: string;
+  isrWithheld: string;
+  isrRate: string;
   total: string;
   rate: string;
   lines: TaxLineResult[];
@@ -39,6 +48,7 @@ export interface CommercialDraft {
   lines: TaxLineInput[];
   globalDiscount?: string;
   taxRate: string;
+  isrRate?: string;
   intendedPayment: "PUE" | "PPD";
   satPaymentForm: string;
   series: string;
@@ -77,6 +87,7 @@ export interface CountryPolicy {
       lines: TaxLineInput[];
       globalDiscount?: string;
       rate: string;
+      isrRate?: string;
     }): TaxBreakdown;
   };
   invoiceEngine: {

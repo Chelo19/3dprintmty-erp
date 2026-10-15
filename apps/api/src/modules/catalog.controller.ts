@@ -1,3 +1,4 @@
+import { taxRateSchema } from "./tax-rates";
 import { syncDependentProductCosts, withRecipeCosts } from "./product-cost-sync";
 import { ITEM_CLASSES, SUPPLY_MODES, defaultSupplyMode, legacyProductType } from "@3dprintmty/domain";
 import { Body, Controller, Delete, Get, Headers, Param, Patch, Post, Query } from "@nestjs/common";
@@ -8,7 +9,7 @@ import { and, count, desc, eq, ilike, inArray, ne, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { getViewConfig } from "drizzle-orm/pg-core";
 import { services } from "../container";
-import { filaments, products, productsVisible, serviceOfferings, stockBalances, productionOrders, purchaseOrderLines, purchaseOrders } from "../db/schema";
+import { filaments, products, productsVisible, serviceOfferings, stockBalances, productionOrders } from "../db/schema";
 import { assertRole, CurrentUser, requireTenant, type Actor, type TenantActor } from "../http/actor";
 import { one, withIdempotency, type Db } from "./support";
 
@@ -84,9 +85,13 @@ const previewSchema = z.object({
     unitPrice: z.string(),
     discount: z.string().optional(),
     taxable: z.boolean().optional(),
+    vatRate: taxRateSchema.optional(),
+    vatExempt: z.boolean().optional(),
+    isrRate: taxRateSchema.optional(),
   })).min(1),
   globalDiscount: z.string().optional(),
   rate: z.string().default("0.16"),
+  isrRate: taxRateSchema.optional(),
 });
 
 @Controller()
@@ -187,10 +192,7 @@ export class CatalogController {
           const [active] = await db.select({ id: productionOrders.id }).from(productionOrders).where(and(eq(productionOrders.productId, product.id), inArray(productionOrders.status, ["draft", "released", "scheduled", "in_progress", "qc_hold", "completed", "on_hold"]))).limit(1);
           if (active) throw new AppError("supply_in_use", "Cierra o cancela las órdenes de producción antes de deshabilitar fabricación.", 409);
         }
-        if (input.supplyMode === "make") {
-          const [active] = await db.select({ id: purchaseOrderLines.id }).from(purchaseOrderLines).innerJoin(purchaseOrders, eq(purchaseOrderLines.purchaseOrderId, purchaseOrders.id)).where(and(eq(purchaseOrderLines.productId, product.id), inArray(purchaseOrders.status, ["draft", "ordered", "partially_received"]))).limit(1);
-          if (active) throw new AppError("supply_in_use", "Cierra o cancela las compras pendientes antes de deshabilitar compras.", 409);
-        }
+
       }
       const sku = input.sku?.toUpperCase();
       if (sku && sku !== product.sku) await assertSkuFree(db, tenant.tenantId, sku, { table: "product", id: product.id });

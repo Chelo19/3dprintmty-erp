@@ -1096,6 +1096,44 @@ button.quote-btn {
   color: #475569;
 }
 
+.order-guidance {
+  display: grid;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--color-line);
+  border-radius: 12px;
+  background: var(--color-paper);
+  font-size: 14px;
+}
+
+.order-guidance-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.order-guidance-actions .quote-btn {
+  min-height: 44px;
+  height: auto;
+  justify-content: center;
+}
+
+.order-guidance-actions .quote-btn.shop {
+  --btn-ink: #9a3412;
+  color: #9a3412;
+  border-color: #fdba74;
+  background: #fff7ed;
+}
+
+.order-guidance-actions .quote-btn:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 3px;
+}
+
+@media (max-width: 640px) {
+  .order-guidance-actions .quote-btn { width: 100%; }
+}
+
 .res-badge[class*="quote-"] {
   border: 1px solid transparent;
 }
@@ -1750,3 +1788,6 @@ td {
   .auth-panel { padding: 20px 16px; }
   .auth-switch { font-size: 13px; }
 }
+
+.entity-autocomplete { display: grid; gap: 6px; min-width: 0; }
+.entity-autocomplete-options { position: fixed; right: auto; z-index: 1500; }

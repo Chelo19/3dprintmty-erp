@@ -80,13 +80,13 @@ export async function withIdempotency<T>(
 ): Promise<T> {
   if (!key) {
     if (options.required !== false) throw new AppError("idempotency_key_required", "Falta la llave de idempotencia.");
-    return fn();
+    return database.asAdminActor(actor, () => fn());
   }
   if (key.trim().length === 0 || key.length > 80) {
     throw new AppError("invalid_idempotency_key", "La llave de idempotencia debe tener entre 1 y 80 caracteres.");
   }
   const hash = createHash("sha256").update(canonicalJson(payload)).digest("hex");
-  return database.atomic(async () => {
+  return database.asAdminActor(actor, async () => {
     const match = and(eq(idempotencyRequests.tenantId, actor.tenantId),
       eq(idempotencyRequests.userId, actor.userId), eq(idempotencyRequests.operation, payload.route),
       eq(idempotencyRequests.key, key));
@@ -345,7 +345,7 @@ export async function ensureLot(
   item: StockTarget,
   lotNumber: string,
   receivedQty: bigint,
-  extra: { source?: "manual" | "purchase"; vendorLot?: string | null; vendorId?: string; purchaseOrderId?: string; receiptId?: string } = {},
+  extra: { source?: "manual" | "purchase"; vendorLot?: string | null; vendorId?: string; expenseId?: string; receiptId?: string } = {},
 ): Promise<string> {
   const filamentId = item.filamentId ?? null;
   const productId = filamentId ? null : item.productId ?? null;
@@ -371,7 +371,7 @@ export async function ensureLot(
       source: extra.source ?? "manual",
       receivedQty: formatQty(receivedQty),
       vendorId: extra.vendorId ?? null,
-      purchaseOrderId: extra.purchaseOrderId ?? null,
+      expenseId: extra.expenseId ?? null,
       receiptId: extra.receiptId ?? null,
       createdBy: tenant.userId,
     })

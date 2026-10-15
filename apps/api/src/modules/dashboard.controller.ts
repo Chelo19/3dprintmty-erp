@@ -2,12 +2,10 @@ import { loadCompanyProfile } from "./company-profile";
 import { Controller, Get } from "@nestjs/common";
 import {
   canReadSalePrice,
-  countsAsIncoming,
   isOpenProductionOrder,
   Money,
   qtyFromDb,
   type ProductionOrderState,
-  type PurchaseOrderState,
 } from "@3dprintmty/domain";
 import { amountDue } from "@3dprintmty/payments";
 import { services } from "../container";
@@ -17,7 +15,6 @@ import {
   expenses,
   payments,
   productionOrders,
-  purchaseOrders,
   quotes,
   salesOrders,
   stockBalances,
@@ -49,7 +46,6 @@ type QuoteRow = { status: string; totalMinor: bigint };
 type ExpenseRow = { id: string; amountMinor: bigint; occurredOn: string };
 type ExpensePaymentRow = { expenseId: string; amountMinor: bigint };
 type ProductionRow = { status: string; dueDate: string | null };
-type PurchaseRow = { status: string };
 type BalanceRow = { onHand: string; reorderPoint: string };
 type DocumentRow = { status: string; totalMinor: bigint; issuedAt: Date };
 
@@ -102,9 +98,6 @@ export class DashboardController {
     );
     const production: ProductionRow[] = await this.database.asUser(tenant, (db) =>
       db.select({ status: productionOrders.status, dueDate: productionOrders.dueDate }).from(productionOrders),
-    );
-    const purchases: PurchaseRow[] = await this.database.asUser(tenant, (db) =>
-      db.select({ status: purchaseOrders.status }).from(purchaseOrders),
     );
     const balances: BalanceRow[] = await this.database.asUser(tenant, (db) =>
       db.select({ onHand: stockBalances.onHand, reorderPoint: stockBalances.reorderPoint }).from(stockBalances),
@@ -171,7 +164,6 @@ export class DashboardController {
       ).length,
       productionOpen: production.filter((row) => isOpenProductionOrder(row.status as ProductionOrderState)).length,
       qcHold: production.filter((row) => row.status === "qc_hold").length,
-      purchasesIncoming: purchases.filter((row) => countsAsIncoming(row.status as PurchaseOrderState)).length,
       lowStock: balances.filter((row) => {
         const reorder = qtyFromDb(row.reorderPoint);
         return reorder > 0n && qtyFromDb(row.onHand) <= reorder;

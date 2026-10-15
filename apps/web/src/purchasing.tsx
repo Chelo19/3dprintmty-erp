@@ -10,21 +10,12 @@ import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { api, download, postJson } from "./api";
 import { useIdempotencyAttempt } from "./idempotency";
 import { useFilaments, useProducts } from "./factory";
-import { BanIcon, CheckIcon, DownloadIcon, FormActions, NewLink, PayIcon, PlusIcon, QuoteButton, SaveButton, SendIcon, ViewLink, money, useError } from "./operations";
+import { BanIcon, DownloadIcon, FormActions, NewLink, PayIcon, PlusIcon, QuoteButton, SaveButton, ViewLink, money, useError } from "./operations";
 import { DetailSkeleton, FormSkeleton, TableSkeleton } from "./skeleton";
 import { useRole, useCanWrite } from "./roles";
 import { Paged } from "./pager";
 
 const grid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 } as const;
-
-const PO_STATUS: Record<string, string> = {
-  draft: "Borrador",
-  ordered: "Colocada",
-  partially_received: "Recibida parcial",
-  received: "Recibida",
-  closed: "Cerrada",
-  cancelled: "Cancelada",
-};
 
 const EXPENSE_PAYMENT: Record<string, string> = {
   pending: "Por pagar",
@@ -66,7 +57,6 @@ function showDay(value: string) {
 
 export function PurchasingPage() {
   const expenses = useQuery({ queryKey: ["expenses"], queryFn: () => api<{ data: Expense[] }>("/expenses") });
-  const orders = useQuery({ queryKey: ["purchase-orders"], queryFn: () => api<{ data: PurchaseOrder[] }>("/purchase-orders") });
   return (
     <section style={{ display: "grid", gap: 16 }}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
@@ -74,7 +64,15 @@ export function PurchasingPage() {
         <NewLink to="/app/compras/nuevo">Registrar gasto</NewLink>
       </div>
       <p>La fecha del gasto es el día en que aplica. El pago puede ser parcial o en otra fecha. Un filamento, insumo o producto entra a existencia; un servicio pagado solo se describe y no usa el catálogo de lo que vendes.</p>
-      {expenses.isPending ? <TableSkeleton columns={8} /> : (
+      {expenses.isPending ? <TableSkeleton columns={8} /> : expenses.isError ? (
+        <Notice tone="error" title="No se pudieron cargar las compras" action={<button className="ghost" type="button" onClick={() => void expenses.refetch()}>Reintentar</button>}>
+          Intenta nuevamente para consultar los gastos registrados.
+        </Notice>
+      ) : !expenses.data?.data.length ? (
+        <EmptyState title="Sin gastos registrados" to="/app/compras/nuevo" actionLabel="Registrar gasto">
+          Registra tu primera compra o gasto para llevar el control de sus importes, pagos y entradas al inventario.
+        </EmptyState>
+      ) : (
       <Paged rows={expenses.data?.data ?? []}>
       {(pageExpenses) => (
       <table>
@@ -102,33 +100,13 @@ export function PurchasingPage() {
       )}
       </Paged>
       )}
-      {(orders.data?.data.length ?? 0) > 0 ? (
-        <>
-          <h2>Órdenes anteriores</h2>
-          <Paged rows={orders.data?.data ?? []}>
-          {(pageOrders) => (
-          <table>
-            <thead><tr><th>Folio</th><th>Proveedor</th><th>Estado</th><th>Total</th></tr></thead>
-            <tbody>
-              {pageOrders.map((order) => (
-                <tr key={order.id}>
-                  <td><Link to={`/app/compras/${order.id}`}>{order.folio}</Link></td>
-                  <td>{order.vendorName}</td>
-                  <td>{PO_STATUS[order.status] ?? order.status}</td>
-                  <td>{money(order.total)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          )}
-          </Paged>
-        </>
-      ) : null}
+
     </section>
   );
 }
 
 export function ExpenseNewPage() {
+  const attempt = useIdempotencyAttempt();
   const client = useQueryClient();
   const navigate = useNavigate();
   const { error, pendingKey, run } = useError();
@@ -158,7 +136,7 @@ export function ExpenseNewPage() {
           const form = event.currentTarget;
           const data = new FormData(form);
           void run(async () => {
-            const created = await postJson<{ id: string }>("/expenses", {
+            const payload = {
               kind: expenseKindForType(String(data.get("kind"))),
               itemId: String(data.get("itemId") || "") || undefined,
               description: String(data.get("description") || "") || undefined,
@@ -168,7 +146,9 @@ export function ExpenseNewPage() {
               paid,
               paidOn: paid ? data.get("paidOn") : undefined,
               note: String(data.get("note") || "") || undefined,
-            });
+            };
+            const created = await postJson<{ id: string }>("/expenses", payload, attempt.headers(payload));
+            attempt.complete();
             await client.invalidateQueries({ queryKey: ["expenses"] });
             await client.invalidateQueries({ queryKey: ["filaments"] });
             await client.invalidateQueries({ queryKey: ["products"] });
@@ -316,137 +296,6 @@ export function ExpensePage() {
         </Modal>
       ) : null}
       {!open ? <p className="muted-note">Este gasto ya está pagado.</p> : null}
-    </section>
-  );
-}
-
-export function PurchaseOrderPage() {
-  const attempt = useIdempotencyAttempt();
-  const { id } = useParams();
-  const client = useQueryClient();
-  const { error, pendingKey, run } = useError();
-  const [result, setResult] = useState<string | null>(null);
-  const order = useQuery({ queryKey: ["purchase-order", id], queryFn: () => api<PurchaseOrderDetail>(`/purchase-orders/${id}`) });
-  if (order.isPending) return <DetailSkeleton />;
-  if (!order.data) return <p className="error">No se pudo cargar la compra.</p>;
-  const data = order.data;
-  const refresh = async () => {
-    await client.invalidateQueries({ queryKey: ["purchase-order", id] });
-    await client.invalidateQueries({ queryKey: ["purchase-orders"] });
-    await client.invalidateQueries({ queryKey: ["inventory"] });
-    await client.invalidateQueries({ queryKey: ["products"] });
-    await client.invalidateQueries({ queryKey: ["product"] });
-    await client.invalidateQueries({ queryKey: ["filaments"] });
-    await client.invalidateQueries({ queryKey: ["bom"] });
-    await client.invalidateQueries({ queryKey: ["boms"] });
-  };
-  const move = (to: string, reason?: string) =>
-    run(async () => {
-      await postJson(`/purchase-orders/${id}/transition`, { to, reason });
-      await refresh();
-    }, to);
-  const receivable = data.status === "ordered" || data.status === "partially_received";
-  return (
-    <section style={{ display: "grid", gap: 16 }}>
-      <BackLink to="/app/compras">Compras</BackLink>
-      <h1>{data.folio} · {data.vendorName}</h1>
-      <p>{PO_STATUS[data.status] ?? data.status}</p>
-      <div className="costing-kpis">
-        <div><span>Subtotal</span><strong>{money(data.subtotal)}</strong></div>
-        <div><span>IVA</span><strong>{money(data.vat)}</strong></div>
-        <div><span>Total</span><strong>{money(data.total)}</strong></div>
-      </div>
-      {data.status === "draft" || data.status === "ordered" || data.status === "partially_received" || data.status === "received" ? (
-        <div className="card quote-actions">
-          <div className="quote-actions-group">
-            <span className="quote-actions-label">Siguiente paso</span>
-            <div className="quote-actions-row">
-              {data.status === "draft" ? (
-                <QuoteButton label="Colocar con el proveedor" tone="send" icon={<SendIcon />} pending={pendingKey === "ordered"} disabled={pendingKey !== null} onClick={() => void move("ordered")} />
-              ) : null}
-              {data.status === "partially_received" || data.status === "received" ? (
-                <QuoteButton label="Cerrar compra" tone="accept" icon={<CheckIcon />} pending={pendingKey === "closed"} disabled={pendingKey !== null} onClick={() => void move("closed")} />
-              ) : null}
-              {data.status === "draft" || data.status === "ordered" ? (
-                <QuoteButton
-                  label="Cancelar compra"
-                  tone="danger"
-                  icon={<BanIcon />}
-                  pending={pendingKey === "cancelled"}
-                  disabled={pendingKey !== null}
-                  onClick={() => {
-                    const reason = window.prompt("¿Por qué se cancela?");
-                    if (reason) void move("cancelled", reason);
-                  }}
-                />
-              ) : null}
-            </div>
-          </div>
-        </div>
-      ) : null}
-      {error ? <p className="error">{error}</p> : null}
-      {result ? <p className="banner">{result}</p> : null}
-      <Paged rows={data.lines}>
-      {(lines) => (
-      <table>
-        <thead><tr><th>Producto</th><th>Pedido</th><th>Recibido</th><th>Pendiente</th><th>Costo</th><th>Importe</th></tr></thead>
-        <tbody>
-          {lines.map((line) => (
-            <tr key={line.id}>
-              <td>{line.description}</td>
-              <td>{line.quantity} {line.purchaseUom}</td>
-              <td>{line.receivedQty}</td>
-              <td>{line.pendingQty}</td>
-              <td>{money(line.unitCost)}</td>
-              <td>{money(line.lineTotal)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      )}
-      </Paged>
-      {receivable ? (
-        <form
-          className="card form-vertical"
-          onSubmit={(event) => {
-            event.preventDefault();
-            const form = event.currentTarget;
-            const values = new FormData(form);
-            void run(async () => {
-              const payload = { lines: [{ lineId: values.get("lineId"), quantity: values.get("quantity"),
-                lotNumber: String(values.get("lotNumber") || "") || undefined,
-                vendorLot: String(values.get("vendorLot") || "") || undefined }] };
-              const response = await postJson<{ receipt: { folio: string } }>(
-                `/purchase-orders/${id}/receive`, payload, attempt.headers(payload));
-              attempt.complete();
-              setResult(`Recepción ${response.receipt.folio}`);
-              form.reset();
-              await refresh();
-            }, "receive");
-          }}
-        >
-          <h2 style={{ margin: 0 }}>Recibir</h2>
-          <label>
-            Línea
-            <select name="lineId" required>
-              {data.lines.filter((line) => line.pendingQty !== "0").map((line) => <option key={line.id} value={line.id}>{line.sku} · faltan {line.pendingQty} {line.purchaseUom}</option>)}
-            </select>
-          </label>
-          <label>Cantidad (unidad de compra)<input name="quantity" required placeholder="1" /></label>
-          <label>Lote interno<input name="lotNumber" placeholder="Automático" /></label>
-          <label>Lote del proveedor<input name="vendorLot" /></label>
-          <p className="costing-hint">El filamento entra al inventario en gramos. El costo del catálogo se actualiza con promedio ponderado.</p>
-          <FormActions>
-            <SaveButton label="Registrar recepción" pending={pendingKey === "receive"} />
-          </FormActions>
-        </form>
-      ) : null}
-      {data.receipts.length ? (
-        <>
-          <h2>Recepciones</h2>
-          <ul>{data.receipts.map((receipt) => <li key={receipt.id}>{receipt.folio} · {new Date(receipt.createdAt).toLocaleString("es-MX")}</li>)}</ul>
-        </>
-      ) : null}
     </section>
   );
 }
@@ -660,22 +509,6 @@ interface Vendor {
   id: string;
   name: string;
   active: boolean;
-}
-
-interface PurchaseOrder {
-  id: string;
-  folio: string;
-  vendorName: string;
-  status: string;
-  expectedDate: string | null;
-  subtotal: string;
-  vat: string;
-  total: string;
-}
-
-interface PurchaseOrderDetail extends PurchaseOrder {
-  lines: Array<{ id: string; sku: string; description: string; purchaseUom: string; quantity: string; receivedQty: string; pendingQty: string; unitCost: string; lineTotal: string }>;
-  receipts: Array<{ id: string; folio: string; createdAt: string }>;
 }
 
 interface Prefactura {

@@ -172,7 +172,7 @@ export class TeamController {
     const input = roleSchema.parse(body);
     const member = await this.manageableMember(tenant, userId);
     this.assertAssignable(tenant, input.role);
-    await this.database.asAdmin(async (db) => {
+    await this.database.asAdminActor(tenant, async (db) => {
       await db
         .update(tenantMemberships)
         .set({ role: input.role })
@@ -192,7 +192,7 @@ export class TeamController {
   async remove(@CurrentUser() actor: Actor, @Param("userId") userId: string) {
     const tenant = assertRole(actor, ["owner", "admin"]);
     const member = await this.manageableMember(tenant, userId);
-    await this.database.asAdmin(async (db) => {
+    await this.database.asAdminActor(tenant, async (db) => {
       await db
         .delete(tenantMemberships)
         .where(and(eq(tenantMemberships.tenantId, tenant.tenantId), eq(tenantMemberships.userId, userId)));
@@ -273,7 +273,7 @@ export class TeamController {
         ? new AppError("member_exists", "Ya eres parte de este taller.", 409)
         : new AppError("tenant_exists", "Esa cuenta ya pertenece a otro taller.", 409);
     }
-    await this.database.asAdmin(async (db) => {
+    await this.database.asAdminActor({ userId, email, tenantId: invite.tenantId, role: invite.role as Actor["role"], platformAdmin: false, impersonator: null }, async (db) => {
       await db.insert(tenantMemberships).values({
         tenantId: invite.tenantId,
         userId,
