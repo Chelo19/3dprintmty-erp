@@ -18,6 +18,8 @@ Pagos, prefacturas y recepciones exigen el encabezado `Idempotency-Key`.
 
 ## Requisitos
 
+Para publicar el monorepo en Render y Vercel, consulta [la guía de despliegue](docs/deployment.md).
+
 - Node.js 22+
 
 ## Arranque local

@@ -11,6 +11,9 @@
     "packages/*"
   ],
   "scripts": {
+    "start:api": "npm run start -w @3dprintmty/api",
+    "build:vercel": "node scripts/build-vercel.mjs",
+    "test:deploy": "node --test scripts/*.test.mjs",
     "dev": "concurrently -n api,web -c blue,green \"npm run dev -w @3dprintmty/api\" \"npm run dev -w @3dprintmty/web\"",
     "dev:api": "npm run dev -w @3dprintmty/api",
     "dev:web": "npm run dev -w @3dprintmty/web",

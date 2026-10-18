@@ -1,0 +1,17 @@
+.git
+.agents
+.codex
+.aws
+.backups
+.data
+.vercel
+**/node_modules
+**/dist
+**/coverage
+**/.vite
+**/.env*
+**/*.log
+**/*.test.*
+**/test
+**/.DS_Store
+supabase/.temp

@@ -38,7 +38,19 @@ export async function createApp(options: DbOptions = {}) {
 async function bootstrap() {
   const app = await createApp();
   const port = Number(process.env.PORT ?? 3000);
-  await app.listen(port);
+  await app.listen(port, "0.0.0.0");
+  // Node recibe las señales directamente en Docker; cerrar también el pool externo a Nest.
+  let stopping = false;
+  const shutdown = () => {
+    if (stopping) return;
+    stopping = true;
+    void app.close().catch((error) => {
+      console.error("No se pudo cerrar la API correctamente:", error);
+      process.exitCode = 1;
+    });
+  };
+  process.once("SIGTERM", shutdown);
+  process.once("SIGINT", shutdown);
   console.log(`API lista en http://localhost:${port}/api/v1`);
 }
 

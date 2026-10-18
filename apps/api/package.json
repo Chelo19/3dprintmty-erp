@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "tsx watch src/main.ts",
-    "start": "tsx src/main.ts",
+    "start": "node --import tsx src/main.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "db:migrate": "tsx src/db/migrate.ts"
@@ -19,11 +19,12 @@
     "@nestjs/core": "^11.1.6",
     "@nestjs/platform-express": "^11.1.6",
     "decimal.js": "^10.6.0",
-    "drizzle-orm": "^0.44.5",
+    "drizzle-orm": "0.45.4",
     "jose": "^6.1.0",
     "pg": "^8.16.3",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
+    "tsx": "^4.20.5",
     "zod": "^3.25.76"
   },
   "devDependencies": {
@@ -32,7 +33,6 @@
     "@types/pg": "^8.15.5",
     "@types/supertest": "^6.0.3",
     "supertest": "^7.1.4",
-    "tsx": "^4.20.5",
     "typescript": "^5.9.2",
     "vitest": "^3.2.4"
   }

@@ -10,3 +10,4 @@ coverage/
 supabase/.temp/
 
 .backups/
+.vercel/
