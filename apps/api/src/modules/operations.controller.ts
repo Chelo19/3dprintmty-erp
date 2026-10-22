@@ -97,6 +97,7 @@ const customerPatchSchema = z.object({
 
 const lineSchema = z
   .object({
+    lineKind: z.literal("temporary").optional(),
     productId: z.string().uuid().optional(),
     serviceId: z.string().uuid().optional(),
     description: z.string().trim().min(1).max(180),
@@ -108,8 +109,10 @@ const lineSchema = z
     isrRate: taxRateSchema.optional(),
     terms: z.string().trim().max(1000).optional(),
   })
-  .refine((line) => Boolean(line.productId) !== Boolean(line.serviceId), {
-    message: "Cada partida es un producto o un servicio.",
+  .refine((line) => line.lineKind === "temporary"
+    ? !line.productId && !line.serviceId
+    : Boolean(line.productId) !== Boolean(line.serviceId), {
+    message: "Cada partida debe referenciar un producto o servicio, o ser temporal sin referencia de catálogo.",
   });
 
 const quoteConditions = {
@@ -1022,6 +1025,7 @@ export class OperationsController {
 }
 
 async function quoteLineTarget(db: Db, line: StoredLine) {
+  if (line.lineKind === "temporary") return { productId: null, filamentId: null, serviceId: null };
   if (!line.catalogId) {
     throw new AppError("catalog_missing", "Esa partida no tiene una referencia de catálogo para convertirla.", 409);
   }
@@ -1286,7 +1290,7 @@ function quoteInputFromStored(
 }
 
 function storedLineInput(line: StoredLine, print?: { name: string; quantity: string }) {
-  if (!line.catalogId) {
+  if (!line.catalogId && line.lineKind !== "temporary") {
     throw new AppError("catalog_missing", "Esa partida no tiene una referencia de catálogo para clonarla.", 409);
   }
   const pieces = print ? qtyFromDb(print.quantity) : 0n;
@@ -1302,19 +1306,20 @@ function storedLineInput(line: StoredLine, print?: { name: string; quantity: str
     unitPrice: Money.fromMinor(line.unitPriceMinor).toMajor(),
     discount: Money.fromMinor(line.discountMinor).toMajor(),
   };
-  if (line.lineKind === "service") return { ...shared, serviceId: line.catalogId, terms: line.terms ?? undefined };
-  return { ...shared, productId: line.catalogId };
+  if (line.lineKind === "temporary") return { ...shared, lineKind: "temporary" as const };
+  if (line.lineKind === "service") return { ...shared, serviceId: line.catalogId!, terms: line.terms ?? undefined };
+  return { ...shared, productId: line.catalogId! };
 }
 
 function assertQuoteMode(mode: "prints" | "products", kinds: string[]) {
-  if (mode === "products" && kinds.some((kind) => kind !== "product" && kind !== "service")) {
+  if (mode === "products" && kinds.some((kind) => kind !== "product" && kind !== "service" && kind !== "temporary")) {
     throw new AppError(
       "quote_mode",
       "Una cotización de productos puede incluir servicios. El filamento va dentro de una impresión.",
       409,
     );
   }
-  if (mode === "prints" && kinds.some((kind) => kind === "product")) {
+  if (mode === "prints" && kinds.some((kind) => kind !== "filament" && kind !== "service")) {
     throw new AppError("quote_mode", "Una impresión lleva filamentos y servicios, no productos de catálogo.", 409);
   }
 }

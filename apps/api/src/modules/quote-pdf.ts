@@ -393,7 +393,7 @@ export function renderQuotePdf(input: QuotePdfInput): Uint8Array {
     y -= 56;
 
     if (costing.missing > 0) {
-      const warning = `${costing.missing} partida${costing.missing === 1 ? "" : "s"} sin costo en el catálogo. La utilidad real es menor.`;
+      const warning = `${costing.missing} partida${costing.missing === 1 ? "" : "s"} sin costo interno conocido. Costo y utilidad incompletos.`;
       fillRect(LEFT, y, WIDTH, 20, ORANGE_SOFT);
       text(warning, 8.5, LEFT + 10, y - 13.5, { color: ORANGE, bold: true });
       y -= 28;

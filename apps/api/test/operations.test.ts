@@ -25,6 +25,85 @@ describe("operación — inventario y ventas", () => {
     await app?.close();
   });
 
+  it("cotiza piezas temporales sin catálogo y conserva edición, copia, PDF y atención en pedido", async () => {
+    const account = await register(app, "temporal@cotizaciones.test");
+    const onboard = await request(app.getHttpServer()).post("/api/v1/onboarding").set(bearer(account.token)).send(workshop("TMP010101AAA", "Temporales", false));
+    const token = onboard.body.token as string;
+    const post = (path: string, body: unknown) => request(app.getHttpServer()).post(`/api/v1${path}`).set(bearer(token)).set("Idempotency-Key", crypto.randomUUID()).send(body as object);
+    const get = (path: string) => request(app.getHttpServer()).get(`/api/v1${path}`).set(bearer(token));
+    const customer = await post("/customers", { kind: "b2c", legalName: "Cliente temporal", fiscal: { state: "Jalisco" } });
+    const body = { mode: "products", customerId: customer.body.id, lines: [
+      { lineKind: "temporary", description: "PIEZA TEMPORAL 1", quantity: "3", unitPrice: "332.42", vatRate: "0.16", isrRate: "0.0125" },
+      { lineKind: "temporary", description: "PIEZA TEMPORAL 2", quantity: "3", unitPrice: "55.34", vatRate: "0", isrRate: "0", discount: "6.02" },
+    ] };
+    const quote = await post("/quotes", body);
+    expect(quote.status).toBe(201);
+    expect(quote.body).toMatchObject({ subtotal: "1157.26", discount: "6.02", vat: "159.56", isrWithheld: "12.47", total: "1304.35" });
+    let detail = (await get(`/quotes/${quote.body.id}`)).body;
+    expect(detail.lines).toHaveLength(2);
+    expect(detail.lines[0]).toMatchObject({ lineKind: "temporary", catalogId: null, description: "PIEZA TEMPORAL 1", quantity: "3", unitPrice: "332.42", uom: "pza" });
+    expect(detail.costing.groups).toEqual([{ label: "Piezas temporales", cost: null, profit: null, revenue: "1157.26" }]);
+    expect(detail.costing.missing).toBe(2); // No inventar un costo interno ni margen sin receta o catálogo.
+    const editedBody = { ...body, lines: [{ ...body.lines[0]!, description: "Pieza personalizada" }, body.lines[1]!] };
+    const edited = await request(app.getHttpServer()).patch(`/api/v1/quotes/${quote.body.id}`).set(bearer(token)).send(editedBody);
+    expect(edited.status).toBe(200);
+    const copy = await post(`/quotes/${quote.body.id}/clone`, {});
+    expect(copy.status).toBe(201);
+    detail = (await get(`/quotes/${copy.body.id}`)).body;
+    expect(detail.lines[0]).toMatchObject({ catalogId: null, lineKind: "temporary", description: "Pieza personalizada", unitPrice: "332.42" });
+    expect(detail.total).toBe("1304.35");
+    const pdf = await get(`/quotes/${copy.body.id}/pdf`);
+    expect(pdf.status).toBe(200);
+    expect(pdf.body.toString("latin1")).toContain("Pieza personalizada");
+    expect((await get(`/quotes/${copy.body.id}/pdf/taller`)).status).toBe(200);
+    await post(`/quotes/${quote.body.id}/transition`, { to: "sent" });
+    await post(`/quotes/${quote.body.id}/transition`, { to: "accepted" });
+    const converted = await post(`/quotes/${quote.body.id}/convert`, {});
+    expect(converted.status).toBe(201);
+    let order = (await get(`/orders/${converted.body.id}`)).body;
+    expect(order.total).toBe("1304.35");
+    expect(order.lines[0]).toMatchObject({ lineKind: "temporary", productId: null, serviceId: null, stocked: false, unitPrice: "332.42" });
+    const repriced = await request(app.getHttpServer()).put(`/api/v1/orders/${order.id}/lines`).set(bearer(token)).send({ lines: editedBody.lines.map(({ vatRate, isrRate, ...line }) => line) });
+    expect(repriced.status).toBe(200);
+    expect(repriced.body.total).toBe("1304.35");
+    expect((await post(`/orders/${order.id}/confirm`, { creditOverrideReason: "Prueba de partidas temporales" })).status).toBe(201);
+    order = (await get(`/orders/${order.id}`)).body;
+    expect(order.supply.printsOpen).toBe(true);
+    expect((await post(`/orders/${order.id}/ship`, { carrier: "Local" })).status).toBe(409);
+    for (const line of order.lines) {
+      const base = `/orders/${order.id}/lines/${line.id}/resolution`;
+      expect((await post(base, { resolution: "in_progress" })).status).toBe(201);
+      expect((await post(base, { resolution: "delivered" })).status).toBe(201);
+    }
+    expect((await get(`/orders/${order.id}`)).body.supply.printsOpen).toBe(false);
+    expect((await post(`/orders/${order.id}/ship`, { carrier: "Local" })).status).toBe(201);
+    expect((await get("/products")).body.data).toEqual([]);
+    expect((await get("/inventory/balances")).body.data).toEqual([]);
+    expect((await get("/production-orders")).body.data).toEqual([]);
+  });
+
+  it("valida referencias, importes y tipo de cotización al mezclar partidas temporales y de catálogo", async () => {
+    const account = await register(app, "mixtas@cotizaciones.test");
+    const onboard = await request(app.getHttpServer()).post("/api/v1/onboarding").set(bearer(account.token)).send(workshop("MTX010101AAA", "Mixtas", false));
+    const token = onboard.body.token as string;
+    const post = (path: string, body: unknown) => request(app.getHttpServer()).post(`/api/v1${path}`).set(bearer(token)).send(body as object);
+    const customer = await post("/customers", { kind: "b2c", legalName: "Cliente mixto", fiscal: { state: "Jalisco" } });
+    const product = await post("/products", { sku: "MIX-P", name: "Producto", productType: "resale", cost: "10", salePrice: "100" });
+    const temporary = { lineKind: "temporary", description: "Pieza especial", quantity: "3", unitPrice: "55.34", vatRate: "0" };
+    const body = { mode: "products", customerId: customer.body.id, lines: [temporary, { productId: product.body.id, description: "Producto", quantity: "1", unitPrice: "100", vatRate: "0" }] };
+    const quote = await post("/quotes", body);
+    expect(quote.status).toBe(201);
+    expect(quote.body.total).toBe("266.02");
+    for (const invalid of [
+      { ...temporary, productId: product.body.id },
+      { ...temporary, description: " " },
+      { ...temporary, quantity: "0" },
+      { ...temporary, unitPrice: "-1" },
+      { description: "Sin referencia", quantity: "1", unitPrice: "10" },
+    ]) expect((await post("/quotes", { ...body, lines: [invalid] })).status).toBe(400);
+    expect((await post("/quotes", { mode: "prints", customerId: customer.body.id, prints: [{ name: "Impresión", quantity: "1", services: [temporary] }] })).status).toBe(409);
+  });
+
   it("establece la vigencia en días, la conserva al editar y renueva el plazo al duplicar", async () => {
     const account = await register(app, "vigencia@cotizaciones.test");
     const onboard = await request(app.getHttpServer()).post("/api/v1/onboarding").set(bearer(account.token)).send(workshop("VIG010101AAA", "Vigencia", false));
@@ -370,7 +449,7 @@ describe("operación — inventario y ventas", () => {
     expect(inventory.body.resale.find((row: { sku: string }) => row.sku === "BOTH")).toEqual(mixed);
     for (const [section, expected] of [["finished", ["BOTH", "MAKE"]], ["resale", ["BOTH", "BUY"]], ["supplies", ["SUP"]]] as const) {
       const ledger = await request(app.getHttpServer()).get(`/api/v1/inventory/ledger?section=${section}`).set(bearer(token));
-      expect(ledger.status).toBe(200);
+      expect(ledger.status, JSON.stringify(ledger.body)).toBe(200);
       expect(ledger.body.data.map((row: { sku: string }) => row.sku).sort()).toEqual(expected);
     }
     const latest = await request(app.getHttpServer()).get("/api/v1/inventory/ledger?section=finished&limit=1").set(bearer(token));

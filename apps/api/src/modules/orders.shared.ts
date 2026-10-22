@@ -140,7 +140,7 @@ export interface PricedLineInput {
   productId?: string | null;
   filamentId?: string | null;
   serviceId?: string | null;
-  lineKind?: "product" | "filament" | "service";
+  lineKind?: "product" | "filament" | "service" | "temporary";
   sku?: string;
   terms?: string | null;
   uom?: string;
@@ -374,7 +374,7 @@ export async function activePrefactura(db: Db, orderId: string) {
 
 function printsOpen(prints: Array<{ resolution: string }>, lines: OrderLineRow[]): boolean {
   const printPending = prints.some((print) => !serviceIsSettled(print.resolution));
-  const looseService = lines.some((line) => line.lineKind === "service" && !line.printId && !serviceIsSettled(line.resolution));
+  const looseService = lines.some((line) => (line.lineKind === "service" || line.lineKind === "temporary") && !line.printId && !serviceIsSettled(line.resolution));
   return printPending || looseService;
 }
 
@@ -464,6 +464,13 @@ async function normalizeCommercialLines(
   const normalized: PricedLineInput[] = [];
   for (const line of lines) {
     const targets = [line.productId, line.filamentId, line.serviceId].filter(Boolean);
+    if (line.lineKind === "temporary") {
+      if (targets.length) throw new AppError("line_target", "Una partida temporal no puede referenciar un catálogo.");
+      if (parseQty(line.quantity) <= 0n) throw new AppError("invalid_quantity", "La cantidad debe ser mayor a cero.");
+      if (Money.fromMajor(line.unitPrice).minor < 0n) throw new AppError("invalid_price", "El precio no puede ser negativo.");
+      normalized.push({ ...line, productId: null, filamentId: null, serviceId: null, sku: "", uom: "pza", terms: null });
+      continue;
+    }
     if (targets.length !== 1) {
       throw new AppError("line_target", "Cada partida es un producto, un filamento o un servicio.");
     }
@@ -845,11 +852,13 @@ export function mapPayment(row: PaymentRow, role: TenantRole) {
 }
 
 /** Preserve each occurrence's tax snapshot when older clients only edit quantities/prices. */
-export function preserveLineTaxes<T extends PricedLineInput>(lines: T[], existing: Array<{ productId?: string | null; filamentId?: string | null; serviceId?: string | null; catalogId?: string | null; vatRate: string; vatExempt: boolean; isrRate: string }>): T[] {
+export function preserveLineTaxes<T extends PricedLineInput>(lines: T[], existing: Array<{ productId?: string | null; filamentId?: string | null; serviceId?: string | null; catalogId?: string | null; lineKind?: string; vatRate: string; vatExempt: boolean; isrRate: string }>): T[] {
   const remaining = [...existing];
   return lines.map((line) => {
     const target = line.productId ?? line.filamentId ?? line.serviceId;
-    const index = remaining.findIndex((old) => (old.catalogId ?? old.productId ?? old.filamentId ?? old.serviceId) === target);
+    const index = remaining.findIndex((old) => line.lineKind === "temporary"
+      ? old.lineKind === "temporary"
+      : Boolean(target) && (old.catalogId ?? old.productId ?? old.filamentId ?? old.serviceId) === target);
     const old = index >= 0 ? remaining.splice(index, 1)[0] : undefined;
     return { ...line, vatRate: line.vatRate ?? old?.vatRate, vatExempt: line.vatExempt ?? old?.vatExempt, isrRate: line.isrRate ?? old?.isrRate };
   });

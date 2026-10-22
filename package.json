@@ -1,7 +1,7 @@
 {
   "name": "3dprintmty-erp",
   "private": true,
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "ERP operativo para granjas de impresi\u00f3n 3D. M\u00e9xico primero.",
   "engines": {
     "node": ">=22"

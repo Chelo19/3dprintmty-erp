@@ -82,6 +82,7 @@ import { allocateFolio, audit, isoDate, one, postStock, reserveStock, unwrap, wi
 
 const lineSchema = z
   .object({
+    lineKind: z.literal("temporary").optional(),
     productId: z.string().uuid().optional(),
     serviceId: z.string().uuid().optional(),
     description: z.string().trim().min(1).max(180),
@@ -93,8 +94,10 @@ const lineSchema = z
     isrRate: taxRateSchema.optional(),
     terms: z.string().trim().max(1000).optional(),
   })
-  .refine((line) => Boolean(line.productId) !== Boolean(line.serviceId), {
-    message: "Cada partida es un producto o un servicio.",
+  .refine((line) => line.lineKind === "temporary"
+    ? !line.productId && !line.serviceId
+    : Boolean(line.productId) !== Boolean(line.serviceId), {
+    message: "Cada partida debe referenciar un producto o servicio, o ser temporal sin referencia de catálogo.",
   });
 
 const shipToSchema = z.object({
@@ -618,7 +621,7 @@ export class OrdersController {
         if (!product || product.productType === "service") {
           throw new AppError("not_a_service", "Solo las impresiones, los servicios y los productos terminados se marcan como prestados.", 409);
         }
-      } else if (line.lineKind !== "service") {
+      } else if (line.lineKind !== "service" && line.lineKind !== "temporary") {
         throw new AppError("not_a_service", "Solo las impresiones, los servicios y los productos terminados se marcan como prestados.", 409);
       }
       const next = transitionServiceResolution(line.resolution as ServiceResolution, input.resolution);

@@ -77,6 +77,14 @@ select {
   padding-top: 12px;
 }
 
+.sidebar-version {
+  margin: auto 0 0;
+  padding-top: 12px;
+  color: var(--color-muted);
+  font-size: 12px;
+  text-align: center;
+}
+
 .session-actions {
   display: grid;
   gap: 8px;

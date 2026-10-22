@@ -37,9 +37,9 @@ export interface QuoteCostingLine {
 
 export interface QuoteCostingTotals {
   label: string;
-  cost: string;
+  cost: string | null;
   revenue: string;
-  profit: string;
+  profit: string | null;
 }
 
 export interface QuoteCosting {
@@ -53,7 +53,7 @@ export interface QuoteCosting {
   missing: number;
 }
 
-const GROUP_ORDER = ["Filamento", "Insumos", "Productos", "Servicios"];
+const GROUP_ORDER = ["Filamento", "Insumos", "Productos", "Servicios", "Piezas temporales"];
 
 interface CatalogCost {
   costMinor: bigint | null;
@@ -114,7 +114,9 @@ export async function quoteCosting(db: Db, lines: CostingLineInput[], prints: Co
     lines: mapped,
     groups: [...groups.entries()]
       .sort(([a], [b]) => GROUP_ORDER.indexOf(a) - GROUP_ORDER.indexOf(b))
-      .map(([label, bucket]) => totals(label, bucket)),
+      .map(([label, bucket]) => label === "Piezas temporales"
+        ? { label, cost: null, revenue: major(bucket.revenue), profit: null }
+        : totals(label, bucket)),
     prints: prints.map((print) => {
       const bucket = byPrint.get(print.id) ?? { cost: 0n, revenue: 0n };
       const pieces = qtyFromDb(print.quantity);
@@ -166,6 +168,7 @@ async function loadCatalogCosts(db: Db, lines: CostingLineInput[]): Promise<Map<
 }
 
 function groupFor(lineKind: string, productType: string | null): string {
+  if (lineKind === "temporary") return "Piezas temporales";
   if (lineKind === "filament") return "Filamento";
   if (lineKind === "service") return "Servicios";
   return productType === "component" ? "Insumos" : "Productos";

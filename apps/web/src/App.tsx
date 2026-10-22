@@ -199,6 +199,7 @@ function Shell() {
           </NavGroup>
         </nav>
         <div className="sidebar-session"><LogoutButton /></div>
+        <p className="sidebar-version">{t("app.version", { version: import.meta.env.VITE_APP_VERSION })}</p>
       </aside>
       <div>
         {auth.user.impersonator ? <SupportBanner /> : null}

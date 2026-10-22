@@ -5,6 +5,7 @@ export const esMX = {
   app: {
     name: "3dprintnow",
     tagline: "Operación para granjas de impresión",
+    version: "Versión {{version}}",
   },
   common: {
     save: "Guardar",
@@ -190,6 +191,7 @@ export const en = {
   app: {
     name: "3dprintnow",
     tagline: "Operations for print farms",
+    version: "Version {{version}}",
   },
   common: {
     save: "Save",

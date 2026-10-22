@@ -60,6 +60,14 @@ describe("equipo — invitaciones, roles y bajas", () => {
     const lines = [{ productId: product.body.id, description: "Pieza", quantity: "1", unitPrice: "100.00" }];
     const quote = await operator.post("/quotes", { mode: "products", customerId: customer.body.id, lines });
     expect(quote.status).toBe(201);
+    const temporary = await operator.post("/quotes", { mode: "products", customerId: customer.body.id, lines: [
+      { lineKind: "temporary", description: "Pieza temporal de mostrador", quantity: "3", unitPrice: "332.42" },
+    ] });
+    expect(temporary.status).toBe(201);
+    const temporaryDetail = await operator.get(`/quotes/${temporary.body.id}`);
+    expect(temporaryDetail.body.costing).toBeNull();
+    expect(temporaryDetail.body.lines[0]).toMatchObject({ lineKind: "temporary", catalogId: null, unitPrice: "332.42" });
+    expect((await operator.patch(`/quotes/${temporary.body.id}`, {})).status).toBe(403);
     expect((await operator.get(`/quotes/${quote.body.id}`)).body.costing).toBeNull();
     expect((await operator.get(`/quotes/${quote.body.id}/pdf`)).status).toBe(200);
     expect((await operator.get(`/quotes/${quote.body.id}/pdf/taller`)).status).toBe(403);
