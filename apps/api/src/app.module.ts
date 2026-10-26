@@ -1,3 +1,4 @@
+import { PosController } from "./modules/pos.controller";
 import { AuditController } from "./modules/audit.controller";
 import { Module } from "@nestjs/common";
 import { APP_GUARD, APP_INTERCEPTOR } from "@nestjs/core";
@@ -29,6 +30,7 @@ import { TeamController } from "./modules/team.controller";
     CatalogController,
     OperationsController,
     OrdersController,
+    PosController,
     SettingsController,
     TeamController,
     PlatformController,

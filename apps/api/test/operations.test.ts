@@ -25,6 +25,39 @@ describe("operación — inventario y ventas", () => {
     await app?.close();
   });
 
+  it("permite varios clientes con RFC de público en general y conserva la unicidad de RFC particulares por taller", async () => {
+    const account = await register(app, "publico@clientes.test");
+    const onboard = await request(app.getHttpServer()).post("/api/v1/onboarding").set(bearer(account.token)).send(workshop("PUB010101AAA", "Público general", false));
+    const token = onboard.body.token as string;
+    const post = (legalName: string, rfc?: string) => request(app.getHttpServer()).post("/api/v1/customers").set(bearer(token))
+      .send({ kind: "b2c", legalName, rfc, fiscal: { state: "Jalisco" } });
+    const first = await post("Cliente mostrador uno", "XAXX010101000");
+    const second = await post("Cliente mostrador dos", " xaxx010101000 ");
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    expect(second.body.id).not.toBe(first.body.id);
+    expect(second.body.rfc).toBe("XAXX010101000");
+    const regular = await post("Cliente con RFC propio", "ABC010101AAA");
+    expect(regular.status).toBe(201);
+    expect((await post("Duplicado con RFC propio", "abc010101aaa")).status).toBe(409);
+    const patch = (id: string, body: object) => request(app.getHttpServer()).patch(`/api/v1/customers/${id}`).set(bearer(token)).send(body);
+    expect((await patch(second.body.id, { rfc: "ABC010101AAA" })).status).toBe(409);
+    expect((await patch(regular.body.id, { rfc: "XAXX010101000" })).status).toBe(200);
+    expect((await patch(first.body.id, { legalName: "Cliente mostrador actualizado" })).status).toBe(200);
+    expect((await post("RFC propio liberado", "ABC010101AAA")).status).toBe(201);
+    expect((await post("Sin RFC uno")).status).toBe(201);
+    expect((await post("Sin RFC dos")).status).toBe(201);
+    const otherAccount = await register(app, "otro@clientes-publico.test");
+    const otherWorkshop = await request(app.getHttpServer()).post("/api/v1/onboarding").set(bearer(otherAccount.token))
+      .send(workshop("OTR010101AAA", "Otro taller", false));
+    const other = await request(app.getHttpServer()).post("/api/v1/customers").set(bearer(otherWorkshop.body.token))
+      .send({ kind: "b2c", legalName: "Cliente otro taller", rfc: "ABC010101AAA", fiscal: { state: "Jalisco" } });
+    expect(other.status).toBe(201);
+    const list = await request(app.getHttpServer()).get("/api/v1/customers").set(bearer(token));
+    expect(list.body.data.filter((row: { rfc: string | null }) => row.rfc === "XAXX010101000")).toHaveLength(3);
+    expect(list.body.data.some((row: { id: string }) => row.id === other.body.id)).toBe(false);
+  });
+
   it("cotiza piezas temporales sin catálogo y conserva edición, copia, PDF y atención en pedido", async () => {
     const account = await register(app, "temporal@cotizaciones.test");
     const onboard = await request(app.getHttpServer()).post("/api/v1/onboarding").set(bearer(account.token)).send(workshop("TMP010101AAA", "Temporales", false));

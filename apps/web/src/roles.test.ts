@@ -3,6 +3,14 @@ import { canAccessPath, TENANT_ROLES } from "@3dprintmty/domain";
 import { canWritePath } from "./roles";
 
 describe("rutas de escritura", () => {
+  it("punto de venta solo permite cobrar a dueño, administrador, ventas y operador", () => {
+    for (const role of TENANT_ROLES) {
+      const allowed = ["owner", "admin", "sales", "operator"].includes(role);
+      expect(canAccessPath(role, "/app/punto-de-venta")).toBe(allowed);
+      expect(canAccessPath(role, "/app/punto-de-venta/ticket/123")).toBe(allowed);
+      expect(canWritePath(role, "/app/punto-de-venta")).toBe(allowed);
+    }
+  });
   it("prefacturas desactivadas para todos los roles, también por URL directa", () => {
     for (const role of TENANT_ROLES) {
       expect(canAccessPath(role, "/app/prefacturas")).toBe(false);

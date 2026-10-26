@@ -1,8 +1,9 @@
-import { canAccessPath, roleHome, canWriteLocations, canWriteCatalog, canWriteInventory, canWriteSales, isTenantRole, type TenantRole } from "@3dprintmty/domain";
+import { canCreateSales, canAccessPath, roleHome, canWriteLocations, canWriteCatalog, canWriteInventory, canWriteSales, isTenantRole, type TenantRole } from "@3dprintmty/domain";
 import { useAuth } from "./auth";
 
 /** Quién puede crear o editar en cada sección; espeja los `assertRole` del API para no mostrar botones que darían 403. */
 const WRITERS: Array<[string, (role: TenantRole) => boolean]> = [
+  ["/app/punto-de-venta", canCreateSales],
   ["/app/productos", canWriteCatalog],
   ["/app/insumos", canWriteCatalog],
   ["/app/filamentos", canWriteCatalog],
@@ -27,6 +28,7 @@ export function useRole(): TenantRole | null {
 
 export function canWritePath(role: TenantRole | null, path: string): boolean {
   if (!role || !canAccessPath(role, path)) return false;
+  if (path.startsWith("/app/punto-de-venta")) return canCreateSales(role);
   if (role === "operator" && /^\/app\/(inventario|produccion|prefacturas)(\/|$)/.test(path)) return true;
   if (role === "operator") return /^\/app\/(clientes|cotizaciones|pedidos|cobranza)\/(nuevo|nueva)\/?$/.test(path);
   const rule = WRITERS.find(([prefix]) => path.startsWith(prefix));

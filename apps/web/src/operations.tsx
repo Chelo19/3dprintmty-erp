@@ -2498,6 +2498,7 @@ function DocumentForm({
   pending?: boolean;
   onSubmit: (body: unknown) => void;
 }) {
+  const [customerId, setCustomerId] = useState("");
   const [lines, setLines] = useState<DraftLine[]>([]);
   const [localError, setLocalError] = useState<string | null>(null);
   const seeded = useRef({ product: false, filament: false, service: false });
@@ -2543,6 +2544,10 @@ function DocumentForm({
       onSubmit={(event: FormEvent<HTMLFormElement>) => {
         event.preventDefault();
         const data = new FormData(event.currentTarget);
+        if (!customers.some((customer) => customer.id === customerId)) {
+          setLocalError("Selecciona un cliente desde las sugerencias.");
+          return;
+        }
         if (!lines.length) {
           setLocalError("Agrega al menos un filamento, un producto o un servicio.");
           return;
@@ -2566,12 +2571,12 @@ function DocumentForm({
         });
       }}
     >
-      <label>
-        Cliente
-        <select name="customerId" required>
-          {customers.map((customer) => <option key={customer.id} value={customer.id}>{customer.legalName}</option>)}
-        </select>
-      </label>
+      <EntityAutocomplete label="Cliente" name="customerId" value={customerId} disabled={pending}
+        options={customers.map((customer) => ({ id: customer.id,
+          label: [customer.legalName, customer.rfc, customer.phone].filter(Boolean).join(" · "),
+        }))}
+        placeholder="Buscar por nombre, RFC o teléfono"
+        onChange={setCustomerId} />
       {lines.map((line, index) => (
         <div key={line.key} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10 }}>
           <label>

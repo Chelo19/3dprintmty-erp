@@ -1,3 +1,4 @@
+import { PosPage, PosTicketPage } from "./pos";
 import { AuditPage } from "./audit";
 import { AuthPage } from "./auth-page";
 import { OnboardingPage } from "./onboarding";
@@ -75,6 +76,8 @@ export function App() {
         <Route path="cotizaciones/nueva" element={<QuoteNewPage />} />
         <Route path="cotizaciones/:id/editar" element={<QuoteEditPage />} />
         <Route path="cotizaciones/:id" element={<QuoteDetailPage />} />
+        <Route path="punto-de-venta" element={<PosPage />} />
+        <Route path="punto-de-venta/ticket/:id" element={<PosTicketPage />} />
         <Route path="pedidos" element={<OrdersPage />} />
         <Route path="pedidos/nuevo" element={<OrderNewPage />} />
         <Route path="pedidos/:id" element={<OrderDetailPage />} />
@@ -151,7 +154,7 @@ function Shell() {
   if (!auth.token || !auth.user) return <Navigate to="/entrar" replace />;
   if (!auth.user.tenantId && !auth.user.platformAdmin) return <Navigate to={homeFor(auth.user)} replace />;
   return (
-    <div className={formCanvas ? "shell form-canvas" : "shell"}>
+    <div className={`${formCanvas ? "shell form-canvas" : "shell"}${location.pathname.startsWith("/app/punto-de-venta") ? " pos-shell" : ""}`}>
       <aside className="sidebar">
         <div>
           <p className="brand">{t("app.name")}</p>
@@ -160,7 +163,8 @@ function Shell() {
         </div>
         <nav className="side-nav">
           <Nav to="/app">{t("nav.home")}</Nav>
-          <NavGroup label="Ventas" open={at("/app/clientes", "/app/cotizaciones", "/app/pedidos")}>
+          <NavGroup label="Ventas" open={at("/app/clientes", "/app/cotizaciones", "/app/pedidos", "/app/punto-de-venta")}>
+            {canAccessModule(role, "pos") ? <Nav to="/app/punto-de-venta">Punto de venta</Nav> : null}
             <Nav to="/app/clientes">{t("nav.customers")}</Nav>
             <Nav to="/app/cotizaciones">{t("nav.quotes")}</Nav>
             <Nav to="/app/pedidos">{t("nav.orders")}</Nav>

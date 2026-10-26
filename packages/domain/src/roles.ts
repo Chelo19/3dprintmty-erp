@@ -119,6 +119,7 @@ export function canManageMember(actor: TenantRole, target: TenantRole): boolean 
 /** Acceso a módulos; las consultas auxiliares de catálogo se autorizan aparte. */
 export const MODULE_ROLES = {
   dashboard: ["owner", "admin", "viewer"],
+  pos: ["owner", "admin", "sales", "operator"],
   sales: ["owner", "admin", "sales", "operator", "viewer"],
   orders: ["owner", "admin", "sales", "operator", "warehouse", "viewer"],
   production: ["owner", "admin", "production", "operator", "viewer"],
@@ -140,7 +141,7 @@ export function moduleForPath(path: string): AppModule | null {
   const section = path.split("/")[2];
   if (!section) return path === "/app" || path === "/app/" ? "dashboard" : null;
   const modules: Record<string, AppModule> = {
-    clientes: "sales", cotizaciones: "sales", servicios: "sales", cobranza: "sales", prefacturas: "sales",
+    "punto-de-venta": "pos", clientes: "sales", cotizaciones: "sales", servicios: "sales", cobranza: "sales", prefacturas: "sales",
     pedidos: "orders", productos: "catalog", insumos: "catalog", filamentos: "catalog", costeo: "sales",
     inventario: "inventory", rollos: "inventory", produccion: "production", recetas: "production",
     manufactura: "production", calidad: "production", compras: "purchasing", sucursales: "locations",

@@ -524,7 +524,10 @@ function RecipeEditor({ product, onClose }: { product: ProductOption; onClose: (
                 {(services.data?.data ?? []).filter((entry) => entry.status !== "inactive").map((entry) => <option key={entry.id} value={entry.id}>{entry.code} · {entry.name}</option>)}
               </select></label>
               <label>Cantidad por pieza<input name="quantity" required inputMode="decimal" placeholder="1" /></label>
-              <button className="primary new-link form-inline-submit" type="submit" disabled={recipePending !== null || !recipeLines.length || !services.data?.data.length}><PlusIcon />Agregar servicio</button>
+              <button className="primary new-link form-inline-submit" type="submit" disabled={recipePending !== null || !recipeLines.length || !services.data?.data.length} aria-busy={recipePending === "add-service"}>
+                <PlusIcon />
+                Agregar servicio
+              </button>
             </form>
             {services.isError ? <Notice tone="error" title="No se pudieron cargar los servicios" action={<button className="ghost" type="button" onClick={() => void services.refetch()}>Reintentar</button>}>Intenta nuevamente para consultar el catálogo.</Notice> : !services.isPending && !services.data?.data.length ? <EmptyState title="Sin servicios en el catálogo" to="/app/servicios/nuevo" actionLabel="Crear servicio">Registra un servicio para asociarlo a la receta.</EmptyState> : null}
             <CostOnly><article className="card" style={{ display: "grid", gap: 8 }}>

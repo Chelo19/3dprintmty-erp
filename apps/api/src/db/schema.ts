@@ -394,6 +394,8 @@ export const quoteLines = pgTable("quote_lines", {
 ]);
 
 export const salesOrders = pgTable("sales_orders", {
+  salesChannel: text("sales_channel").notNull().default("order"),
+  cashTenderedMinor: bigint("cash_tendered_minor", { mode: "bigint" }),
   id: uuid("id").primaryKey().defaultRandom(),
   tenantId: uuid("tenant_id").notNull().references(() => tenants.id),
   folio: text("folio").notNull(),
