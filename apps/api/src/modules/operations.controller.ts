@@ -1,3 +1,4 @@
+import { paymentDateSchema } from "./payment-date";
 import { preserveLineTaxes } from "./orders.shared";
 import { taxRateSchema } from "./tax-rates";
 import { loadCompanyProfile } from "./company-profile";
@@ -168,6 +169,7 @@ const filamentAdjustSchema = z.object({
 });
 
 const paymentSchema = z.object({
+  paidOn: paymentDateSchema.optional(),
   orderId: z.string().uuid(),
   method: z.enum(["efectivo", "spei", "tarjeta", "cod"]),
   kind: z.enum(["payment", "refund"]).default("payment"),
@@ -585,7 +587,7 @@ export class OperationsController {
       const orderRows = await db.select().from(salesOrders).where(eq(salesOrders.customerId, customer.id));
       const orderIds = orderRows.map((order: { id: string }) => order.id);
       const ledger = orderIds.length
-        ? await db.select().from(payments).where(inArray(payments.salesOrderId, orderIds)).orderBy(desc(payments.createdAt))
+        ? await db.select().from(payments).where(inArray(payments.salesOrderId, orderIds)).orderBy(desc(sql`coalesce(${payments.paidOn}, (${payments.createdAt} at time zone 'America/Mexico_City')::date)`), desc(payments.createdAt))
         : [];
       const balance = orderRows.reduce((sum: bigint, order: { id: string; status: string; totalMinor: bigint }) => {
         if (order.status === "cancelled" || order.status === "draft") return sum;
@@ -609,7 +611,7 @@ export class OperationsController {
             total: money(BigInt(order.totalMinor), tenant.role),
           })),
         quotes: quoteRows.map((row: QuoteRow) => mapQuote(row, tenant.role)),
-        payments: ledger.slice(0, 5).map((row: { id: string; salesOrderId: string; method: string; kind: string; status: string; amountMinor: bigint; reference: string | null; note: string | null; createdAt: Date }) =>
+        payments: ledger.slice(0, 5).map((row: { id: string; salesOrderId: string; method: string; kind: string; status: string; amountMinor: bigint; reference: string | null; note: string | null; paidOn: string | null; createdAt: Date }) =>
           mapPayment(
             {
               id: row.id,
@@ -621,6 +623,7 @@ export class OperationsController {
               amountMinor: BigInt(row.amountMinor),
               reference: row.reference,
               note: row.note,
+              paidOn: row.paidOn,
               createdAt: row.createdAt,
             },
             tenant.role,
@@ -899,11 +902,12 @@ export class OperationsController {
           amountMinor: payments.amountMinor,
           reference: payments.reference,
           note: payments.note,
+          paidOn: payments.paidOn,
           createdAt: payments.createdAt,
         })
         .from(payments)
         .innerJoin(salesOrders, eq(salesOrders.id, payments.salesOrderId))
-        .orderBy(desc(payments.createdAt))
+        .orderBy(desc(sql`coalesce(${payments.paidOn}, (${payments.createdAt} at time zone 'America/Mexico_City')::date)`), desc(payments.createdAt))
         .limit(100),
     );
     return { data: rows.map((row: PaymentRow) => mapPayment(row, tenant.role)) };
@@ -970,6 +974,7 @@ export class OperationsController {
           method: input.method,
           kind: input.kind,
           status,
+          paidOn: status === "completed" ? input.paidOn ?? null : null,
           amountMinor: amount.minor,
           reference: input.reference || null,
           note: input.note || null,
@@ -991,7 +996,8 @@ export class OperationsController {
   }
 
   @Post("payments/:id/complete")
-  async completePayment(@CurrentUser() actor: Actor, @Param("id") id: string) {
+  async completePayment(@CurrentUser() actor: Actor, @Param("id") id: string, @Body() body: unknown) {
+    const input = z.object({ paidOn: paymentDateSchema.optional() }).parse(body ?? {});
     const tenant = assertRole(actor, ["owner", "admin", "sales"]);
     const updated = await this.database.asUser(tenant, async (db) => {
       const payment = await one(db, payments, payments.id, id, "No encontramos ese cobro.");
@@ -1002,7 +1008,7 @@ export class OperationsController {
       if (order.status === "cancelled") throw new AppError("order_not_billable", "Ese pedido está cancelado.", 409);
       const ledger = await db.select().from(payments).where(eq(payments.salesOrderId, order.id));
       assertPendingPaymentsFit(BigInt(order.totalMinor), ledger, [payment]);
-      const [row] = await db.update(payments).set({ status: "completed" }).where(eq(payments.id, payment.id)).returning();
+      const [row] = await db.update(payments).set({ status: "completed", paidOn: input.paidOn ?? null }).where(eq(payments.id, payment.id)).returning();
       await audit(db, tenant, "payment.completed", "payment", payment.id, { orderId: order.id });
       await refreshPaymentStatus(db, order.id, order.totalMinor);
       return row;

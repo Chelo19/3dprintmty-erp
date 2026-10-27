@@ -26,5 +26,6 @@ describe("clasificación de compras", () => {
     expect(expenseTypeLabel({ kind: "product", itemClass: "finished_good", supplyMode: "both" })).toBe("Producto fabricado / reventa");
     expect(expenseTypeLabel({ kind: "product", itemClass: "finished_good", supplyMode: "buy" })).toBe("Producto");
     expect(expenseTypeLabel({ kind: "product" })).toBe("Producto");
+    expect(expenseTypeLabel({ kind: "mixed" })).toBe("Compra con varias partidas");
   });
 });

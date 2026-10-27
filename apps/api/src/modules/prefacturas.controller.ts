@@ -5,7 +5,7 @@ import { canIssuePrefactura, formatQty, isValidRfc, Money, qtyFromDb, type Sales
 import { mxCountryPolicy, PREFACTURA_TITLE, type CommercialDraft } from "@3dprintmty/fiscal";
 import { amountDue, resolveSatPaymentTiming, type LedgerEntry } from "@3dprintmty/payments";
 import { AppError } from "@3dprintmty/shared";
-import { and, asc, desc, eq, gte, lt } from "drizzle-orm";
+import { and, asc, desc, eq, gte, lt, lte, sql } from "drizzle-orm";
 import { z } from "zod";
 import { services } from "../container";
 import {
@@ -163,12 +163,13 @@ export class PrefacturasController {
         .from(commercialDocuments)
         .where(and(gte(commercialDocuments.issuedAt, start), lt(commercialDocuments.issuedAt, end)))
         .orderBy(commercialDocuments.series, commercialDocuments.folio);
+      const paymentDay = sql<string>`coalesce(${payments.paidOn}, (${payments.createdAt} at time zone ${company?.timezone ?? "America/Mexico_City"})::date)`;
       const received = await db
         .select({ payment: payments, folio: salesOrders.folio })
         .from(payments)
         .innerJoin(salesOrders, eq(salesOrders.id, payments.salesOrderId))
-        .where(and(gte(payments.createdAt, start), lt(payments.createdAt, end)))
-        .orderBy(payments.createdAt);
+        .where(and(gte(paymentDay, input.from), lte(paymentDay, input.to)))
+        .orderBy(paymentDay, payments.createdAt);
       await audit(db, tenant, "accountant_package.exported", "export", null, {
         from: input.from,
         to: input.to,
@@ -183,7 +184,7 @@ export class PrefacturasController {
       receiver: row.receiver,
     }));
     const paymentRows = data.received.map(({ payment, folio }: { payment: PaymentRow; folio: string }) => ({
-      date: payment.createdAt,
+      date: payment.paidOn ?? payment.createdAt.toISOString(),
       order: folio,
       method: payment.method,
       satPaymentForm: SAT_FORM_BY_METHOD[payment.method] ?? "99",
@@ -240,8 +241,8 @@ export class PrefacturasController {
     }
     const paymentsCsv = toCsv(
       ["fecha", "pedido", "metodo", "forma_pago_sat", "tipo", "estado", "importe", "referencia"],
-      paymentRows.map((row: { date: Date; order: string; method: string; satPaymentForm: string; kind: string; status: string; amount: string; reference: string | null }) => [
-        row.date.toISOString(), row.order, row.method, row.satPaymentForm, row.kind, row.status, row.amount, row.reference ?? "",
+      paymentRows.map((row: { date: string; order: string; method: string; satPaymentForm: string; kind: string; status: string; amount: string; reference: string | null }) => [
+        row.date, row.order, row.method, row.satPaymentForm, row.kind, row.status, row.amount, row.reference ?? "",
       ]),
     );
     const readme = [
@@ -495,6 +496,7 @@ interface SalesLineRow {
 }
 
 interface PaymentRow {
+  paidOn?: string | null;
   id: string;
   method: string;
   kind: string;

@@ -154,7 +154,7 @@ function Shell() {
   if (!auth.token || !auth.user) return <Navigate to="/entrar" replace />;
   if (!auth.user.tenantId && !auth.user.platformAdmin) return <Navigate to={homeFor(auth.user)} replace />;
   return (
-    <div className={`${formCanvas ? "shell form-canvas" : "shell"}${location.pathname.startsWith("/app/punto-de-venta") ? " pos-shell" : ""}`}>
+    <div className={`${formCanvas ? "shell form-canvas" : "shell"}${(location.pathname.startsWith("/app/punto-de-venta") || location.pathname === "/app/compras/nuevo") ? " pos-shell" : ""}`}>
       <aside className="sidebar">
         <div>
           <p className="brand">{t("app.name")}</p>

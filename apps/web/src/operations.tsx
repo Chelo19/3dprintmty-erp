@@ -1,6 +1,6 @@
 import { EntityAutocomplete } from "./entity-autocomplete";
 import { Modal } from "./modal";
-import { CollectionStatusBadge, COLLECTION_METHODS, COLLECTION_STATES, collectionMethodLabel, collectionDateLabel } from "./collection-ui";
+import { CollectionStatusBadge, COLLECTION_METHODS, COLLECTION_STATES, collectionMethodLabel, collectionDateLabel, paymentToday } from "./collection-ui";
 import { EmptyState } from "./empty-state";
 import { Notice } from "./notice";
 import { BackLink, BackButton } from "./back-control";
@@ -454,7 +454,7 @@ export function CustomerDetailPage() {
             <ActivityRow
               key={payment.id}
               title={payment.folio || "Pago"}
-              detail={money(payment.amount)}
+              detail={`${money(payment.amount)} · ${collectionDateLabel(payment.paidOn)}`}
               to={payment.orderId ? `/app/pedidos/${payment.orderId}` : "/app/cobranza"}
             />
           ))}
@@ -1254,6 +1254,8 @@ export function CollectionsPage() {
   const canManage = ["owner", "admin", "sales"].includes(useRole() ?? "");
   const { error, pendingKey, run } = useError();
   const [voidId, setVoidId] = useState<string | null>(null);
+  const [completeId, setCompleteId] = useState<string | null>(null);
+  const [completedOn, setCompletedOn] = useState(paymentToday);
   const [reason, setReason] = useState("");
   const payments = useQuery({ queryKey: ["payments"], queryFn: () => api<{ data: Payment[] }>("/payments") });
   const { values, set, reset, dirty } = useFilters({ q: "", estado: "", metodo: "", tipo: "" });
@@ -1284,7 +1286,7 @@ export function CollectionsPage() {
           {(pagePayments) => <table>
             <thead><tr><th>Fecha</th><th>Pedido</th><th>Tipo</th><th>Método</th><th>Estado</th><th>Importe</th><th>Referencia</th>{canManage ? <th>Acciones</th> : null}</tr></thead>
             <tbody>{pagePayments.map((payment) => <tr key={payment.id}>
-              <td className="collection-date">{collectionDateLabel(payment.createdAt)}</td>
+              <td className="collection-date">{payment.paidOn ? collectionDateLabel(payment.paidOn) : payment.status === "pending" ? "Por recibir" : "—"}<div className="costing-hint">Registrado: {collectionDateLabel(payment.createdAt)}</div></td>
               <td>{payment.orderId ? <Link to={`/app/pedidos/${payment.orderId}`}>{payment.folio}</Link> : payment.folio}</td>
               <td>{payment.kind === "refund" ? "Reembolso" : "Cobro"}</td>
               <td>{collectionMethodLabel(payment.method)}</td>
@@ -1293,13 +1295,33 @@ export function CollectionsPage() {
               <td>{payment.reference ?? "—"}</td>
               {canManage ? <td><div className="record-actions">
                 {payment.orderId ? <ViewLink to={`/app/pedidos/${payment.orderId}`} /> : null}
-                {payment.status === "pending" ? <IconAction label="Anular pendiente" tone="delete" disabled={pendingKey !== null} onClick={() => { setVoidId(payment.id); setReason(""); }}><TrashIcon /></IconAction> : null}
+                {payment.status === "pending" ? <>
+                  <IconAction label="Confirmar cobro" tone="accept" disabled={pendingKey !== null} onClick={() => { setVoidId(null); setCompletedOn(paymentToday()); setCompleteId(payment.id); }}><CheckIcon /></IconAction>
+                  <IconAction label="Anular pendiente" tone="delete" disabled={pendingKey !== null} onClick={() => { setCompleteId(null); setVoidId(payment.id); setReason(""); }}><TrashIcon /></IconAction>
+                </> : null}
               </div></td> : null}
             </tr>)}</tbody>
           </table>}
         </Paged></div>}
       </>}
-      {error && !voidId ? <Notice title="No se pudo completar la acción" tone="error">{error}</Notice> : null}
+      {error && !voidId && !completeId ? <Notice title="No se pudo completar la acción" tone="error">{error}</Notice> : null}
+      {canManage && completeId ? <Modal title="Confirmar recepción del cobro" closeDisabled={pendingKey !== null} onClose={() => setCompleteId(null)}>
+        <form className="form-vertical" onSubmit={(event) => {
+          event.preventDefault();
+          void run(async () => {
+            await api(`/payments/${completeId}/complete`, { method: "POST", body: JSON.stringify({ paidOn: completedOn }) });
+            const orderId = all.find((payment) => payment.id === completeId)?.orderId;
+            setCompleteId(null);
+            for (const key of [["payments"], ["orders"], ["dashboard"], ["order", orderId]]) void client.invalidateQueries({ queryKey: key });
+          }, "complete");
+        }}>
+          <p>{all.find((payment) => payment.id === completeId)?.folio} · {money(all.find((payment) => payment.id === completeId)?.amount)}</p>
+          <label>Fecha del pago<input type="date" required disabled={pendingKey !== null} value={completedOn} onChange={(event) => setCompletedOn(event.target.value)} /></label>
+          <p className="costing-hint">Indica el día en que recibiste el dinero.</p>
+          {error ? <Notice title="No se pudo confirmar el cobro" tone="error">{error}</Notice> : null}
+          <FormActions><button className="primary" type="submit" disabled={pendingKey !== null} aria-busy={pendingKey === "complete"}><CheckIcon />Confirmar cobro</button><BackButton onClick={() => setCompleteId(null)} disabled={pendingKey !== null} /></FormActions>
+        </form>
+      </Modal> : null}
       {canManage && voidId ? <Modal title="Anular cobro pendiente" closeDisabled={pendingKey !== null} onClose={() => setVoidId(null)}>
         <form className="form-vertical" onSubmit={(event) => {
           event.preventDefault();
@@ -1331,6 +1353,7 @@ export function PaymentNewPage() {
   const [params] = useSearchParams();
   const preset = params.get("pedido") ?? "";
   const [orderId, setOrderId] = useState(preset);
+  const [method, setMethod] = useState("efectivo");
   const { error, pendingKey, run } = useError();
   const orders = useQuery({ queryKey: ["orders"], queryFn: () => api<{ data: Order[] }>("/orders") });
   const eligible = (orders.data?.data ?? []).filter((order) => order.status !== "draft" && order.status !== "cancelled");
@@ -1349,6 +1372,7 @@ export function PaymentNewPage() {
           void run(async () => {
             const payload = {
               orderId: data.get("orderId"), method: data.get("method"), amount: data.get("amount"),
+              paidOn: String(data.get("paidOn") || "") || undefined,
               reference: String(data.get("reference") || "") || undefined,
               note: String(data.get("note") || "") || undefined,
             };
@@ -1377,7 +1401,7 @@ export function PaymentNewPage() {
         </label>
         <label>
           Método
-          <select name="method" defaultValue="efectivo">
+          <select name="method" value={method} onChange={(event) => setMethod(event.target.value)}>
             <option value="efectivo">Efectivo</option>
             <option value="spei">SPEI</option>
             <option value="tarjeta">Tarjeta</option>
@@ -1385,6 +1409,7 @@ export function PaymentNewPage() {
           </select>
         </label>
         <label>Importe recibido<input key={selected?.id} name="amount" required inputMode="decimal" placeholder="100.00" defaultValue={selected?.id === preset ? selected.amountDue ?? undefined : undefined} /></label>
+        {method !== "cod" ? <label>Fecha del pago<input name="paidOn" type="date" required defaultValue={paymentToday()} /></label> : null}
         <label>Referencia<input name="reference" placeholder="Folio bancario" /></label>
         <label className="collection-field-wide">Nota<textarea name="note" rows={2} placeholder="Información adicional del cobro" /></label>
         </fieldset>
@@ -2831,7 +2856,7 @@ interface CustomerDetail extends Customer {
   fiscal: { line1: string; neighborhood: string; postalCode: string; state: string } | null;
   orders: Array<{ id: string; folio: string; status: string; paymentStatus: string; total: string | null }>;
   quotes: Array<{ id: string; folio: string; status: string; total: string | null }>;
-  payments: Array<{ id: string; orderId: string; folio: string; method: string; status: string; amount: string | null; reference: string | null }>;
+  payments: Array<{ id: string; paidOn?: string | null; orderId: string; folio: string; method: string; status: string; amount: string | null; reference: string | null }>;
 }
 
 function ActivityColumn({ title, empty, children, to, actionLabel }: { title: string; empty: string; children: ReactNode; to: string; actionLabel: string }) {
@@ -3085,6 +3110,7 @@ interface OrderDetail extends Order, PaymentConditionsData {
 }
 
 interface Payment {
+  paidOn?: string | null;
   id: string;
   createdAt?: string;
   orderId?: string;

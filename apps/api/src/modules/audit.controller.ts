@@ -7,7 +7,7 @@ import { assertRole, CurrentUser, type Actor } from "../http/actor";
 
 const ENTITY_GROUPS: Record<string, string[]> = {
   company_profiles: ["company_profiles", "company"], products: ["products", "product"],
-  boms: ["boms", "bom"], expenses: ["expenses", "expense"], payments: ["payments", "payment"],
+  boms: ["boms", "bom"], expenses: ["expenses", "expense", "expense_lines"], payments: ["payments", "payment"],
   tenant_memberships: ["tenant_memberships", "membership"], invitations: ["invitations", "invitation"],
   sales_orders: ["sales_orders", "sales_order"], receipts: ["receipts", "receipt"],
   production_orders: ["production_orders", "production_order"],

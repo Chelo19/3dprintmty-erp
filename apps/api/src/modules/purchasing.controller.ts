@@ -16,11 +16,12 @@ import {
 } from "@3dprintmty/domain";
 import { AppError } from "@3dprintmty/shared";
 import Decimal from "decimal.js";
-import { desc, eq, inArray } from "drizzle-orm";
+import { asc, desc, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 import { services } from "../container";
 import {
   expensePayments,
+  expenseLines,
   expenses,
   filaments,
   locations,
@@ -60,12 +61,16 @@ const vendorPatchSchema = vendorSchema.partial().extend({ active: z.boolean().op
 
 const daySchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 
-const expenseSchema = z.object({
+const purchaseLineSchema = z.object({
   kind: z.enum(["product", "filament", "service", "other"]),
   itemId: z.string().uuid().optional(),
   description: z.string().trim().min(1).max(180).optional(),
   quantity: z.string().default("1"),
   amount: z.string(),
+  lotNumber: z.string().trim().max(60).optional(),
+  vendorLot: z.string().trim().max(60).optional(),
+});
+const purchaseConditions = {
   occurredOn: daySchema,
   paid: z.boolean().optional(),
   paidAmount: z.string().default("0"),
@@ -73,9 +78,11 @@ const expenseSchema = z.object({
   note: z.string().trim().max(240).optional(),
   vendorId: z.string().uuid().optional(),
   locationId: z.string().uuid().optional(),
-  lotNumber: z.string().trim().max(60).optional(),
-  vendorLot: z.string().trim().max(60).optional(),
-});
+};
+const expenseSchema = z.union([
+  z.object({ ...purchaseConditions, lines: z.array(purchaseLineSchema).min(1).max(100) }).strict(),
+  purchaseLineSchema.extend(purchaseConditions).strict(),
+]);
 
 const expensePaymentSchema = z.object({
   amount: z.string(),
@@ -170,7 +177,7 @@ export class PurchasingController {
       const [classification] = expense.productId
         ? await db.select({ itemClass: products.itemClass, supplyMode: products.supplyMode }).from(products).where(eq(products.id, expense.productId)).limit(1)
         : [];
-      return { ...presentExpense(expense, payments.get(expense.id) ?? [], seeMoney, classification), payments: presentPayments(payments.get(expense.id) ?? [], seeMoney) };
+      return { ...presentExpense(expense, payments.get(expense.id) ?? [], seeMoney, classification), payments: presentPayments(payments.get(expense.id) ?? [], seeMoney), lines: await purchaseLines(db, expense.id, seeMoney) };
     });
   }
 
@@ -178,47 +185,67 @@ export class PurchasingController {
   async createExpense(@CurrentUser() actor: Actor, @Body() body: unknown, @Headers("Idempotency-Key") idempotencyKey?: string) {
     const tenant = assertRole(actor, [...BUYERS]);
     const input = expenseSchema.parse(body);
-    const quantity = parseQty(input.quantity);
-    if (quantity <= 0n) throw new AppError("invalid_quantity", "La cantidad debe ser mayor a cero.");
-    const amount = Money.fromMajor(input.amount).minor;
-    if (amount < 0n) throw new AppError("invalid_money", "El importe no puede ser negativo.");
+    const lines = ("lines" in input ? input.lines : [input]).map((line) => {
+      const quantity = parseQty(line.quantity);
+      if (quantity <= 0n) throw new AppError("invalid_quantity", "La cantidad debe ser mayor a cero.");
+      const amount = Money.fromMajor(line.amount).minor;
+      if (amount < 0n) throw new AppError("invalid_money", "El importe no puede ser negativo.");
+      if ((line.kind === "product" || line.kind === "filament") && !line.itemId) throw new AppError("item_required", "Elige el artículo de cada partida.");
+      if ((line.kind === "service" || line.kind === "other") && !line.description) throw new AppError("description_required", "Describe cada partida de gasto.");
+      return { ...line, quantity, amount };
+    });
+    const amount = lines.reduce((total, line) => total + line.amount, 0n);
     const paid = input.paid === undefined ? Money.fromMajor(input.paidAmount).minor : input.paid ? amount : 0n;
     if (paid < 0n) throw new AppError("invalid_money", "La cantidad pagada no puede ser negativa.");
     if (paid > amount) throw new AppError("payment_exceeds_expense", "La cantidad pagada no puede ser mayor que el importe.");
-    if (input.paid && !input.paidOn) input.paidOn = input.occurredOn;
-    if (paid > 0n && !input.paidOn) throw new AppError("paid_on_required", "Indica la fecha del pago.");
-    if ((input.kind === "product" || input.kind === "filament") && !input.itemId) {
-      throw new AppError("item_required", "Elige el artículo del gasto.");
-    }
-    if ((input.kind === "service" || input.kind === "other") && !input.description) {
-      throw new AppError("description_required", "Describe el gasto.");
-    }
+    const paidOn = input.paid && !input.paidOn ? input.occurredOn : input.paidOn;
+    if (paid > 0n && !paidOn) throw new AppError("paid_on_required", "Indica la fecha del pago.");
 
     return withIdempotency(this.database, tenant, idempotencyKey, { route: "expenses.create", input }, async () => {
       const folio = await allocateFolio(this.database, tenant.tenantId, "expense", "GAS");
-      const inventoryItem = input.kind === "product" || input.kind === "filament";
-      const receiptFolio = inventoryItem ? await allocateFolio(this.database, tenant.tenantId, "receipt", "REC") : null;
+      const hasInventory = lines.some((line) => line.kind === "product" || line.kind === "filament");
+      const receiptFolio = hasInventory ? await allocateFolio(this.database, tenant.tenantId, "receipt", "REC") : null;
       return this.database.asUser(tenant, async (db) => {
-        const product = inventoryItem ? await purchasedItem(db, input.itemId as string) : null;
-        if (product && product.kind !== input.kind) throw new AppError("invalid_product", "El artículo no corresponde al tipo de compra.");
-        const description = inventoryItem ? await itemDescription(db, input.kind as "product" | "filament", input.itemId as string) : input.description as string;
+        const resolved = [];
+        for (const line of lines) {
+          const product = line.kind === "product" || line.kind === "filament" ? await purchasedItem(db, line.itemId!) : null;
+          if (product && product.kind !== line.kind) throw new AppError("invalid_product", "El artículo no corresponde al tipo de compra.");
+          resolved.push({ ...line, product, description: product ? `${product.sku} ${product.name}` : line.description! });
+        }
+        const first = resolved[0]!;
         const expense = await insertExpense(db, tenant, {
-          folio: `GAS-${folio}`, kind: input.kind, itemId: inventoryItem ? input.itemId as string : null,
-          description, quantity, amount, occurredOn: input.occurredOn, paid, paidOn: input.paidOn ?? null, note: input.note ?? null,
+          folio: `GAS-${folio}`, kind: resolved.length > 1 ? "mixed" : first.kind,
+          itemId: resolved.length === 1 && first.product ? first.product.id : null,
+          description: resolved.length === 1 ? first.description : `Compra de ${resolved.length} partidas: ${resolved.map((line) => line.description).join(" · ")}`.slice(0, 180),
+          quantity: resolved.length === 1 ? first.quantity : parseQty("1"),
+          amount, occurredOn: input.occurredOn, paid, paidOn: paidOn ?? null, note: input.note ?? null,
         });
-        if (product && receiptFolio !== null) {
+        await db.insert(expenseLines).values(resolved.map((line, position) => ({
+          tenantId: tenant.tenantId, expenseId: expense.id, position, kind: line.kind,
+          productId: line.kind === "product" ? line.itemId : null, filamentId: line.kind === "filament" ? line.itemId : null,
+          description: line.description, quantity: formatQty(line.quantity), amountMinor: line.amount,
+          purchaseUom: line.product?.purchaseUom ?? "PZA", uomFactor: line.product?.uomFactor ?? "1", createdBy: tenant.userId,
+        })));
+        if (receiptFolio !== null) {
           const vendor = input.vendorId ? await one(db, vendors, vendors.id, input.vendorId, "No encontramos ese proveedor.") : await directVendor(db, tenant);
           if (!vendor.active) throw new AppError("vendor_inactive", "Ese proveedor está inactivo.", 409);
           const locationId = input.locationId ? (await one(db, locations, locations.id, input.locationId, "No encontramos esa sucursal.")).id : await defaultLocationId(db);
-          const stockQty = mulQty(quantity, parseQty(product.uomFactor));
           const [receipt] = await db.insert(receipts).values({ tenantId: tenant.tenantId, folio: `REC-${receiptFolio}`, expenseId: expense.id, vendorId: vendor.id, locationId, notes: input.note ?? null, createdBy: tenant.userId }).returning();
-          await updateAverageCost(db, product, stockQty, amount);
-          const lotId = await ensureLot(db, tenant, product.kind === "filament" ? { filamentId: product.id } : { productId: product.id }, input.lotNumber || `${receipt.folio}-1`, stockQty, { source: "purchase", vendorId: vendor.id, vendorLot: input.vendorLot ?? null, expenseId: expense.id, receiptId: receipt.id });
-          await postStock(db, tenant, { ...(product.kind === "filament" ? { filamentId: product.id } : { productId: product.id }), locationId, kind: "receipt", delta: stockQty, valueMinor: amount, reason: `Recepción ${receipt.folio} de ${expense.folio}`, reference: { type: "receipt", id: receipt.id }, lotId });
-          await db.insert(receiptLines).values({ tenantId: tenant.tenantId, receiptId: receipt.id, ...(product.kind === "filament" ? { filamentId: product.id } : { productId: product.id }), description, purchaseUom: product.purchaseUom, uomFactor: product.uomFactor, unitCostMinor: roundDiv(amount * 10_000n, quantity), quantity: formatQty(quantity), stockQuantity: formatQty(stockQty), lotId, valueMinor: amount });
+          for (const [position, line] of resolved.entries()) {
+            if (!line.product) continue;
+            // Volver a leer el costo tras cada recepción permite repetir un artículo en lotes distintos.
+            const product = await purchasedItem(db, line.product.id);
+            const stockQty = mulQty(line.quantity, parseQty(product.uomFactor));
+            if (stockQty <= 0n) throw new AppError("invalid_quantity", "La cantidad recibida debe generar una entrada mayor a cero.");
+            await updateAverageCost(db, product, stockQty, line.amount);
+            const target = product.kind === "filament" ? { filamentId: product.id } : { productId: product.id };
+            const lotId = await ensureLot(db, tenant, target, line.lotNumber || `${receipt.folio}-${position + 1}`, stockQty, { source: "purchase", vendorId: vendor.id, vendorLot: line.vendorLot ?? null, expenseId: expense.id, receiptId: receipt.id });
+            await postStock(db, tenant, { ...target, locationId, kind: "receipt", delta: stockQty, valueMinor: line.amount, reason: `Recepción ${receipt.folio} de ${expense.folio}`, reference: { type: "receipt", id: receipt.id }, lotId });
+            await db.insert(receiptLines).values({ tenantId: tenant.tenantId, receiptId: receipt.id, ...target, description: line.description, purchaseUom: product.purchaseUom, uomFactor: product.uomFactor, unitCostMinor: roundDiv(line.amount * 10_000n, line.quantity), quantity: formatQty(line.quantity), stockQuantity: formatQty(stockQty), lotId, valueMinor: line.amount });
+          }
           await audit(db, tenant, "purchase.received", "receipt", receipt.id, { expenseId: expense.id, expenseFolio: expense.folio });
         }
-        return expense;
+        return { ...expense, lines: await purchaseLines(db, expense.id, true) };
       });
     }, { required: false });
   }
@@ -430,13 +457,14 @@ function presentExpense(row: ExpenseRow, payments: ExpensePaymentRow[], seeMoney
   };
 }
 
-async function itemDescription(db: Db, kind: "product" | "filament", id: string) {
-  if (kind === "filament") {
-    const filament = await one(db, filaments, filaments.id, id, "No encontramos ese filamento.");
-    return `${filament.sku} ${filament.name}`;
-  }
-  const product = await one(db, products, products.id, id, "No encontramos ese producto.");
-  return `${product.sku} ${product.name}`;
+async function purchaseLines(db: Db, expenseId: string, seeMoney: boolean) {
+  const rows = await db.select({ line: expenseLines, itemClass: products.itemClass, supplyMode: products.supplyMode }).from(expenseLines)
+    .leftJoin(products, eq(products.id, expenseLines.productId)).where(eq(expenseLines.expenseId, expenseId)).orderBy(asc(expenseLines.position));
+  return rows.map(({ line, itemClass, supplyMode }: { line: typeof expenseLines.$inferSelect; itemClass: string | null; supplyMode: string | null }) => ({
+    id: line.id, kind: line.kind, itemId: line.productId ?? line.filamentId, itemClass, supplyMode,
+    description: line.description, quantity: formatQty(qtyFromDb(line.quantity)), purchaseUom: line.purchaseUom,
+    amount: seeMoney ? Money.fromMinor(BigInt(line.amountMinor)).toMajor() : null,
+  }));
 }
 
 async function insertExpense(
@@ -444,7 +472,7 @@ async function insertExpense(
   tenant: TenantActor,
   input: {
     folio: string;
-    kind: "product" | "filament" | "service" | "other";
+    kind: "product" | "filament" | "service" | "other" | "mixed";
     itemId: string | null;
     description: string;
     quantity: bigint;
@@ -493,6 +521,7 @@ async function insertExpense(
 async function purchasedItem(db: Db, id: string, requirePurchasable = true) {
   const [filament] = await db.select().from(filaments).where(eq(filaments.id, id)).limit(1);
   if (filament) {
+    if (filament.status !== "active") throw new AppError("item_inactive", "Ese filamento está inactivo.", 409);
     return {
       id: filament.id,
       kind: "filament" as const,
@@ -506,6 +535,7 @@ async function purchasedItem(db: Db, id: string, requirePurchasable = true) {
     };
   }
   const product = await one(db, products, products.id, id, "No encontramos ese producto.");
+  if (product.status !== "active") throw new AppError("item_inactive", "Ese producto está inactivo.", 409);
   if (requirePurchasable && !canPurchase(product)) throw new AppError("not_purchasable", "No se pueden comprar productos con fabricación habilitada. Compra un producto de reventa o un insumo con compra habilitada.", 409);
   return {
     id: product.id as string,

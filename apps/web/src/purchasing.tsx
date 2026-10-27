@@ -1,17 +1,19 @@
 import { Modal } from "./modal";
 import { Notice } from "./notice";
 import { BackButton, BackLink } from "./back-control";
-import { FilterAutocomplete } from "./filters";
+import { matchesText } from "./filters";
+import { addPurchaseItem, purchaseCartSummary, type PurchaseCartLine, type PurchaseCatalogItem } from "./purchase-cart";
+import { uomShort } from "@3dprintmty/domain";
 import { EmptyState } from "./empty-state";
-import { PURCHASE_TYPES, expenseKindForType, expenseTypeLabel, matchesPurchaseType } from "./purchase-types";
+import { PURCHASE_TYPES, expenseTypeLabel, matchesPurchaseType } from "./purchase-types";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { api, download, postJson } from "./api";
 import { useIdempotencyAttempt } from "./idempotency";
-import { useFilaments, useProducts } from "./factory";
-import { BanIcon, DownloadIcon, FormActions, NewLink, PayIcon, PlusIcon, QuoteButton, SaveButton, ViewLink, money, useError } from "./operations";
-import { DetailSkeleton, FormSkeleton, TableSkeleton } from "./skeleton";
+import { useFilaments, type ProductOption } from "./factory";
+import { BanIcon, DownloadIcon, FormActions, NewLink, PayIcon, PlusIcon, QuoteButton, SaveButton, TrashIcon, IconAction, ViewLink, money, useError } from "./operations";
+import { DetailSkeleton, TableSkeleton } from "./skeleton";
 import { useRole, useCanWrite } from "./roles";
 import { Paged } from "./pager";
 
@@ -105,110 +107,109 @@ export function PurchasingPage() {
   );
 }
 
+async function purchaseProducts() {
+  const first = await api<{ data: ProductOption[]; total: number }>("/products?limit=100");
+  const data = [...first.data];
+  for (let page = 2; data.length < first.total; page++) {
+    const next = await api<{ data: ProductOption[] }>(`/products?limit=100&page=${page}`);
+    if (!next.data.length) break;
+    data.push(...next.data);
+  }
+  return { data };
+}
+
 export function ExpenseNewPage() {
   const attempt = useIdempotencyAttempt();
   const client = useQueryClient();
   const navigate = useNavigate();
   const { error, pendingKey, run } = useError();
-  const [kind, setKind] = useState("filament");
+  const [lines, setLines] = useState<PurchaseCartLine[]>([]);
   const [paid, setPaid] = useState(true);
-  const [itemQuery, setItemQuery] = useState("");
-  const products = useProducts();
+  const [search, setSearch] = useState("");
+  const [type, setType] = useState("all");
+  const products = useQuery({ queryKey: ["products", "purchase-options"], queryFn: purchaseProducts });
   const filaments = useFilaments();
-  const isGoods = ["product", "supply"].includes(kind);
-  const goods = (products.data?.data ?? []).filter((item) => matchesPurchaseType(item, kind));
-  const isCatalogItem = isGoods || kind === "filament";
-  const items = kind === "filament" ? (filaments.data?.data ?? []).filter((item) => item.status !== "inactive") : goods;
-  const itemLabel = kind === "filament" ? "Filamento" : kind === "supply" ? "Insumo" : "Producto";
-  const selectedItem = items.find((item) => `${item.sku} · ${item.name}` === itemQuery);
   const today = todayInMexico();
-  return (
-    <section style={{ display: "grid", gap: 16 }}>
-      <BackLink to="/app/compras">Compras</BackLink>
-      <h1>Registrar gasto</h1>
-      <p>La fecha del gasto es el día en que aplica. Si ya lo pagaste, se registra el abono por el importe completo; si no, queda por pagar y lo abonas después desde el gasto.</p>
-      {products.isPending || filaments.isPending ? <FormSkeleton fields={6} /> : (
-      <form
-        className="card form-vertical"
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (isCatalogItem && !selectedItem) return;
-          const form = event.currentTarget;
-          const data = new FormData(form);
-          void run(async () => {
-            const payload = {
-              kind: expenseKindForType(String(data.get("kind"))),
-              itemId: String(data.get("itemId") || "") || undefined,
-              description: String(data.get("description") || "") || undefined,
-              quantity: String(data.get("quantity") || "1"),
-              amount: data.get("amount"),
-              occurredOn: data.get("occurredOn"),
-              paid,
-              paidOn: paid ? data.get("paidOn") : undefined,
-              note: String(data.get("note") || "") || undefined,
-            };
-            const created = await postJson<{ id: string }>("/expenses", payload, attempt.headers(payload));
-            attempt.complete();
-            await client.invalidateQueries({ queryKey: ["expenses"] });
-            await client.invalidateQueries({ queryKey: ["filaments"] });
-            await client.invalidateQueries({ queryKey: ["products"] });
-            await client.invalidateQueries({ queryKey: ["inventory-catalog"] });
-            navigate(`/app/compras/gastos/${created.id}`);
-          });
-        }}
-      >
-        <label>
-          Tipo
-          <select name="kind" value={kind} disabled={pendingKey !== null} onChange={(event) => { setKind(event.target.value); setItemQuery(""); }}>
-            {Object.entries(PURCHASE_TYPES).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-          </select>
-        </label>
-        {isCatalogItem ? (
-          <>
-            <FilterAutocomplete key={kind} label={itemLabel} value={itemQuery} onChange={setItemQuery}
-              options={items.map((item) => `${item.sku} · ${item.name}`)} placeholder="Buscar por SKU o nombre"
-              required disabled={pendingKey !== null} />
-            <input type="hidden" name="itemId" value={selectedItem?.id ?? ""} />
-            <p className="costing-hint" style={{ margin: 0 }}>Selecciona un artículo de las sugerencias para registrar el gasto.</p>
-          </>
-        ) : null}
-        {kind === "filament" && !items.length ? (
-          <EmptyState title="Sin filamentos disponibles" to="/app/filamentos/nuevo" actionLabel="Crear filamento">Agrega un filamento activo al catálogo para registrar su compra.</EmptyState>
-        ) : null}
-        {isGoods && !goods.length ? (
-          <EmptyState title="Sin artículos disponibles para comprar" to={kind === "supply" ? "/app/insumos/nuevo" : "/app/productos/nuevo?abastecimiento=buy"} actionLabel={kind === "supply" ? "Crear insumo" : "Crear producto"}>
-            No hay artículos activos de este tipo con compra habilitada. Agrega uno al catálogo.
-          </EmptyState>
-        ) : null}
-        {kind === "service" || kind === "other" ? (
-          <label>
-            Descripción
-            <input name="description" required placeholder={kind === "service" ? "Maquila, luz, mensajería…" : "Renta, refacciones…"} />
-          </label>
-        ) : null}
-        {kind === "filament" ? <label>Kilogramos<input name="quantity" required placeholder="1" /></label> : null}
-        {isGoods ? <label>Cantidad<input name="quantity" required placeholder="1" /></label> : null}
-        <label>Fecha del gasto<input name="occurredOn" type="date" required defaultValue={today} /></label>
-        <label>Importe<input name="amount" required inputMode="decimal" placeholder="250.00" /></label>
-        <label className="check-field">
-          <input type="checkbox" checked={paid} onChange={(event) => setPaid(event.target.checked)} />
-          Pagado
-        </label>
-        {paid ? (
-          <label>Fecha del pago<input name="paidOn" type="date" required defaultValue={today} /></label>
-        ) : null}
-        <p className="costing-hint">
-          {paid ? "Se registra un abono por el importe completo." : "Queda por pagar. Abónalo después desde el gasto."}
-        </p>
-        <label>Nota<input name="note" placeholder="Factura o proveedor" /></label>
-        <FormActions>
-          <SaveButton label="Guardar gasto" pending={pendingKey !== null} disabled={isCatalogItem && !selectedItem} />
-          {error ? <p className="error">{error}</p> : null}
-        </FormActions>
+  const pending = pendingKey !== null;
+  const catalog: PurchaseCatalogItem[] = [
+    ...(filaments.data?.data ?? []).filter((item) => item.status !== "inactive").map((item) => ({ id: item.id, sku: item.sku, name: item.name, type: "filament" as const, cost: item.cost, purchaseUom: "KG" })),
+    ...(products.data?.data ?? []).flatMap<PurchaseCatalogItem>((item) => {
+      const itemType = matchesPurchaseType(item, "product") ? "product" : matchesPurchaseType(item, "supply") ? "supply" : null;
+      return itemType ? [{ id: item.id, sku: item.sku, name: item.name, type: itemType, cost: item.cost, purchaseUom: item.purchaseUom }] : [];
+    }),
+  ];
+  const visible = catalog.filter((item) => (type === "all" || item.type === type) && matchesText(search, item.sku, item.name));
+  let summary: ReturnType<typeof purchaseCartSummary> | null = null;
+  let captureError: string | null = null;
+  try { summary = purchaseCartSummary(lines); } catch (cause) { captureError = cause instanceof Error ? cause.message : "Revisa cantidades y costos."; }
+  function patch(key: string, value: Partial<PurchaseCartLine>) { setLines((current) => current.map((line) => line.key === key ? { ...line, ...value } : line)); }
+  function addManual(kind: "service" | "other") {
+    setLines((current) => [...current, { key: crypto.randomUUID(), type: kind, name: "", sku: "", purchaseUom: "PZA", quantity: "1", unitCost: "" }]);
+  }
+  return <section className="pos-page purchase-page">
+    <BackLink to="/app/compras">Compras</BackLink>
+    <header><h1>Registrar compra o gasto</h1><p className="muted-note">Selecciona artículos, ajusta cantidades y guarda. El costo del catálogo se carga automáticamente.</p></header>
+    <div className="pos-layout">
+      <section className="card pos-catalog" aria-label="Artículos para comprar">
+        <h2>Artículos</h2>
+        <div className="pos-catalog-tools">
+          <label>Buscar artículos<input type="search" placeholder="Nombre o SKU" value={search} disabled={pending} onChange={(event) => setSearch(event.target.value)} /></label>
+          <label>Tipo<select value={type} disabled={pending} onChange={(event) => setType(event.target.value)}><option value="all">Todos los artículos</option>{Object.entries(PURCHASE_TYPES).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
+        </div>
+        {products.isPending || filaments.isPending ? <TableSkeleton columns={3} /> : products.isError || filaments.isError ? <Notice title="No se pudieron cargar los artículos" tone="error" action={<button type="button" className="ghost" onClick={() => { void products.refetch(); void filaments.refetch(); }}>Reintentar</button>}>Vuelve a intentar para seleccionar artículos del catálogo.</Notice> : type === "service" || type === "other" ?
+          <Notice title={type === "service" ? "Servicio comprado" : "Otro gasto"} action={<button className="ghost new-link" type="button" disabled={pending || lines.length >= 100} onClick={() => addManual(type as "service" | "other")}><PlusIcon />Agregar {type === "service" ? "servicio" : "gasto"}</button>}>Captura la descripción y el costo en la compra actual.</Notice> : !visible.length ?
+          <EmptyState title={search || type !== "all" ? "Sin coincidencias" : "Sin artículos para comprar"} to={type === "filament" ? "/app/filamentos/nuevo" : type === "supply" ? "/app/insumos/nuevo" : "/app/productos/nuevo?abastecimiento=buy"} actionLabel="Crear artículo">{search || type !== "all" ? "Busca otro nombre, SKU o tipo de artículo." : "Agrega filamentos, productos de reventa o insumos al catálogo."}</EmptyState> : <>
+            <p className="costing-hint">Costo por unidad de compra. Puedes ajustarlo antes de guardar.</p>
+            <Paged rows={visible}>{(items) => <div className="pos-items">{items.map((item) => <button type="button" className="pos-item" key={`${item.type}:${item.id}`} disabled={pending || lines.length >= 100} onClick={() => setLines((current) => addPurchaseItem(current, item))}>
+              <span className="pos-item-code">{item.sku} · {PURCHASE_TYPES[item.type]}</span><strong>{item.name}</strong>
+              <span>{item.cost === null ? "Capturar costo" : money(item.cost)}</span><small>Por {uomShort(item.purchaseUom)}</small>
+            </button>)}</div>}</Paged>
+          </>}
+        <div className="purchase-manual-actions"><button type="button" className="ghost new-link" disabled={pending || lines.length >= 100} onClick={() => addManual("service")}><PlusIcon />Agregar servicio</button><button type="button" className="ghost new-link" disabled={pending || lines.length >= 100} onClick={() => addManual("other")}><PlusIcon />Otro gasto</button></div>
+      </section>
+      <form className="card pos-checkout" onSubmit={(event) => {
+        event.preventDefault();
+        if (!summary || !lines.length) return;
+        const data = new FormData(event.currentTarget);
+        void run(async () => {
+          const payload = { lines: summary.lines, occurredOn: data.get("occurredOn"), paid, paidOn: paid ? data.get("paidOn") : undefined, note: String(data.get("note") || "") || undefined };
+          const created = await postJson<{ id: string }>("/expenses", payload, attempt.headers(payload));
+          attempt.complete();
+          for (const key of ["expenses", "filaments", "products", "product", "inventory-catalog", "inventory", "balances", "lots", "pos-catalog", "dashboard"]) void client.invalidateQueries({ queryKey: [key] });
+          navigate(`/app/compras/gastos/${created.id}`);
+        });
+      }}>
+        <h2>Compra actual <span className="costing-hint">{lines.length} partidas</span></h2>
+        <fieldset disabled={pending}>
+          <div className="pos-cart">{!lines.length ? <Notice title="Compra vacía">Selecciona un artículo o agrega un servicio u otro gasto para empezar.</Notice> : lines.map((line) => {
+            let amount: string | null = null;
+            try { amount = purchaseCartSummary([line]).total; } catch { /* Captura incompleta. */ }
+            return <article className="pos-cart-line" key={line.key}>
+              <div className="pos-cart-heading"><strong>{line.itemId ? line.name : line.type === "service" ? "Servicio comprado" : "Otro gasto"}</strong><IconAction label={`Quitar ${line.name || "partida"}`} tone="delete" disabled={pending} onClick={() => setLines((current) => current.filter((item) => item.key !== line.key))}><TrashIcon /></IconAction></div>
+              {line.itemId ? <p className="costing-hint">{line.sku} · {PURCHASE_TYPES[line.type]}</p> : <label>Descripción<input required maxLength={180} value={line.name} placeholder={line.type === "service" ? "Maquila, mensajería…" : "Renta, refacciones…"} onChange={(event) => patch(line.key, { name: event.target.value })} /></label>}
+              <div className="pos-line-inputs">
+                <label>{line.type === "filament" ? "Kilogramos" : `Cantidad (${uomShort(line.purchaseUom)})`}<input type="number" min="0.0001" step="0.0001" required value={line.quantity} onChange={(event) => patch(line.key, { quantity: event.target.value })} /></label>
+                <label>Costo unitario MXN<input type="number" min="0" step="0.01" inputMode="decimal" required placeholder="0.00" value={line.unitCost} onChange={(event) => patch(line.key, { unitCost: event.target.value })} /></label>
+                <div className="purchase-line-amount"><span>Importe</span><strong>{money(amount)}</strong></div>
+              </div>
+            </article>;
+          })}</div>
+          {lines.length ? <button type="button" className="ghost" onClick={() => setLines([])}>Vaciar compra</button> : null}
+          <dl className="pos-totals"><div className="pos-total"><dt>Total MXN</dt><dd>{money(summary?.total)}</dd></div></dl>
+          <label className="pos-checkbox"><input type="checkbox" checked={paid} onChange={(event) => setPaid(event.target.checked)} />Compra pagada</label>
+          <p className="costing-hint">{paid ? "Se registra el pago completo al guardar." : "Queda por pagar; puedes registrar abonos después."}</p>
+          {paid ? <label>Fecha del pago<input name="paidOn" type="date" required defaultValue={today} /></label> : null}
+          <details className="purchase-extra"><summary>Fecha de compra y nota</summary><div>
+            <label>Fecha de la compra<input name="occurredOn" type="date" required defaultValue={today} /></label>
+            <label>Nota<input name="note" maxLength={240} placeholder="Factura o proveedor" /></label>
+          </div></details>
+          <p className="costing-hint">Los artículos entran al inventario al guardar. El filamento se captura en kg y se recibe en gramos.</p>
+        </fieldset>
+        {captureError ? <Notice title="Completa la compra">{captureError}</Notice> : null}
+        <FormActions><SaveButton label={`Guardar compra ${money(summary?.total)}`} pending={pending} disabled={!lines.length || summary === null} />{error ? <Notice title="No se pudo guardar la compra" tone="error">{error}</Notice> : null}</FormActions>
       </form>
-      )}
-    </section>
-  );
+    </div>
+  </section>;
 }
 
 export function ExpensePage() {
@@ -239,6 +240,13 @@ export function ExpensePage() {
         <div><span>Pagado</span><strong>{money(data.paid)}</strong></div>
         <div><span>Saldo</span><strong className={data.balance && Number(data.balance) > 0 ? "profit-negative" : undefined}>{money(data.balance)}</strong></div>
       </div>
+      {data.lines?.length ? <section>
+        <h2>Partidas de la compra</h2>
+        <Paged rows={data.lines}>{(pageLines) => <div className="scroll-x"><table>
+          <thead><tr><th>Tipo</th><th>Descripción</th><th>Cantidad</th><th>Unidad de compra</th><th>Importe</th></tr></thead>
+          <tbody>{pageLines.map((line) => <tr key={line.id}><td>{expenseTypeLabel(line)}</td><td>{line.description}</td><td>{line.quantity}</td><td>{line.purchaseUom}</td><td>{money(line.amount)}</td></tr>)}</tbody>
+        </table></div>}</Paged>
+      </section> : null}
       <div className="inventory-heading">
         <h2 style={{ margin: 0 }}>Abonos</h2>
         {open && canPay && (data.payments ?? []).length > 0 ? <button className="primary new-link" type="button" onClick={showAbono}><PlusIcon />Registrar abono</button> : null}
@@ -502,6 +510,7 @@ interface ExpensePayment {
 }
 
 interface ExpenseDetail extends Expense {
+  lines: Array<{ id: string; kind: string; description: string; quantity: string; purchaseUom: string; amount: string | null; itemClass: string | null; supplyMode: string | null }>;
   payments: ExpensePayment[];
 }
 

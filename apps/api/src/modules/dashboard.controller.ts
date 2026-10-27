@@ -35,6 +35,7 @@ type OrderRow = {
 };
 
 type LedgerRow = {
+  paidOn: string | null;
   salesOrderId: string;
   status: string;
   kind: string;
@@ -83,6 +84,7 @@ export class DashboardController {
           status: payments.status,
           kind: payments.kind,
           amountMinor: payments.amountMinor,
+          paidOn: payments.paidOn,
           createdAt: payments.createdAt,
         })
         .from(payments),
@@ -143,7 +145,7 @@ export class DashboardController {
     for (const entry of ledger) {
       if (entry.status !== "completed") continue;
       const signed = entry.kind === "refund" ? -entry.amountMinor : entry.amountMinor;
-      add(collectedByMonth, monthOf(entry.createdAt), signed);
+      add(collectedByMonth, entry.paidOn?.slice(0, 7) ?? monthOf(entry.createdAt), signed);
     }
     const expensesByMonth = new Map<string, bigint>();
     for (const expense of expenseRows) {

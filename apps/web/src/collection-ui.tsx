@@ -6,12 +6,15 @@ export const COLLECTION_STATES: Record<string, string> = {
   pending: "Pendiente", completed: "Completado", failed: "Fallido", voided: "Anulado",
 };
 export function collectionMethodLabel(method: string) { return COLLECTION_METHODS[method] ?? method; }
-export function collectionDateLabel(value?: string): string {
+export function collectionDateLabel(value?: string | null): string {
   if (!value) return "—";
-  const date = new Date(value);
+  const civilDate = /^\d{4}-\d{2}-\d{2}$/.test(value);
+  const date = new Date(civilDate ? `${value}T12:00:00-06:00` : value);
   if (Number.isNaN(date.getTime())) return "—";
-  return date.toLocaleString("es-MX", { timeZone: "America/Monterrey", dateStyle: "short", timeStyle: "short" });
+  return civilDate ? date.toLocaleDateString("es-MX", { timeZone: "America/Monterrey", dateStyle: "short" }) : date.toLocaleString("es-MX", { timeZone: "America/Monterrey", dateStyle: "short", timeStyle: "short" });
 }
 export function CollectionStatusBadge({ status }: { status: string }) {
   return <span className={`res res-badge collection-status-${status}`}>{COLLECTION_STATES[status] ?? status}</span>;
 }
+
+export const paymentToday = () => new Date().toLocaleDateString("en-CA", { timeZone: "America/Mexico_City" });

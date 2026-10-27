@@ -24,5 +24,5 @@ export function expenseTypeLabel(expense: { kind: string; itemClass?: string | n
     if (expense.supplyMode === "make") return "Producto fabricado";
     return "Producto";
   }
-  return ({ filament: "Filamento", service: "Servicio", other: "Otro" } as Record<string, string>)[expense.kind] ?? expense.kind;
+  return ({ mixed: "Compra con varias partidas", filament: "Filamento", service: "Servicio", other: "Otro" } as Record<string, string>)[expense.kind] ?? expense.kind;
 }

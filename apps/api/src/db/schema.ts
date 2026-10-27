@@ -507,6 +507,7 @@ export const salesOrderEvents = pgTable("sales_order_events", {
 ]);
 
 export const payments = pgTable("payments", {
+  paidOn: date("paid_on"),
   id: uuid("id").primaryKey().defaultRandom(),
   tenantId: uuid("tenant_id").notNull().references(() => tenants.id),
   salesOrderId: uuid("sales_order_id").notNull(),
@@ -893,6 +894,28 @@ export const expenses = pgTable("expenses", {
   foreignKey({ name: "erp_expenses_product_id_fk", columns: [table.tenantId, table.productId], foreignColumns: [products.tenantId, products.id] }),
   foreignKey({ name: "erp_expenses_service_id_fk", columns: [table.tenantId, table.serviceId], foreignColumns: [serviceOfferings.tenantId, serviceOfferings.id] }),
   uniqueIndex("erp_expenses_tenant_id_key").on(table.tenantId, table.id),
+]);
+
+export const expenseLines = pgTable("expense_lines", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  tenantId: tenantId(),
+  expenseId: uuid("expense_id").notNull(),
+  position: integer("position").notNull(),
+  kind: text("kind").notNull(),
+  productId: uuid("product_id"),
+  filamentId: uuid("filament_id"),
+  description: text("description").notNull(),
+  quantity: qty("quantity").notNull(),
+  purchaseUom: text("purchase_uom").notNull(),
+  uomFactor: numeric("uom_factor", { precision: 12, scale: 4 }).notNull(),
+  amountMinor: bigint("amount_minor", { mode: "bigint" }).notNull(),
+  createdBy: uuid("created_by").notNull(),
+  createdAt: createdAt(),
+}, (table) => [
+  foreignKey({ columns: [table.tenantId, table.expenseId], foreignColumns: [expenses.tenantId, expenses.id] }),
+  foreignKey({ columns: [table.tenantId, table.productId], foreignColumns: [products.tenantId, products.id] }),
+  foreignKey({ columns: [table.tenantId, table.filamentId], foreignColumns: [filaments.tenantId, filaments.id] }),
+  uniqueIndex("expense_lines_tenant_id_expense_id_position_key").on(table.tenantId, table.expenseId, table.position),
 ]);
 
 export const expensePayments = pgTable("expense_payments", {

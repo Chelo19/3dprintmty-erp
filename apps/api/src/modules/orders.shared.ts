@@ -120,6 +120,7 @@ export interface OrderLineRow {
 }
 
 export interface PaymentRow {
+  paidOn?: string | null;
   id: string;
   salesOrderId?: string;
   orderId?: string;
@@ -847,6 +848,7 @@ export function mapPayment(row: PaymentRow, role: TenantRole) {
     amount: money(row.amountMinor, role),
     reference: row.reference,
     note: row.note,
+    paidOn: row.paidOn ?? null,
     createdAt: row.createdAt,
   };
 }
