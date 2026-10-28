@@ -1,3 +1,4 @@
+import { isNull } from "drizzle-orm";
 import { loadCompanyProfile } from "./company-profile";
 import { Controller, Get } from "@nestjs/common";
 import {
@@ -93,10 +94,10 @@ export class DashboardController {
       db.select({ status: quotes.status, totalMinor: quotes.totalMinor }).from(quotes),
     );
     const expenseRows: ExpenseRow[] = await this.database.asUser(tenant, (db) =>
-      db.select({ id: expenses.id, amountMinor: expenses.amountMinor, occurredOn: expenses.occurredOn }).from(expenses),
+      db.select({ id: expenses.id, amountMinor: expenses.amountMinor, occurredOn: expenses.occurredOn }).from(expenses).where(isNull(expenses.canceledAt)),
     );
     const expensePaid: ExpensePaymentRow[] = await this.database.asUser(tenant, (db) =>
-      db.select({ expenseId: expensePayments.expenseId, amountMinor: expensePayments.amountMinor }).from(expensePayments),
+      db.select({ expenseId: expensePayments.expenseId, amountMinor: expensePayments.amountMinor }).from(expensePayments).where(isNull(expensePayments.canceledAt)),
     );
     const production: ProductionRow[] = await this.database.asUser(tenant, (db) =>
       db.select({ status: productionOrders.status, dueDate: productionOrders.dueDate }).from(productionOrders),

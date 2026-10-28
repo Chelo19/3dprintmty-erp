@@ -412,6 +412,10 @@ export class OperationsController {
         ? await db.select({ id: receipts.id, folio: receipts.folio, expenseId: receipts.expenseId, expenseFolio: expenses.folio, sourceFolio: receipts.sourceFolio }).from(receipts)
           .leftJoin(expenses, eq(expenses.id, receipts.expenseId)).where(inArray(receipts.id, receiptIds)) : [];
       const receiptById = new Map(receiptRows.map((row) => [row.id, row]));
+      const canceledExpenseIds = idsOf("expense_cancellation");
+      const canceledExpenses: Array<{ id: string; folio: string }> = canceledExpenseIds.length
+        ? await db.select({ id: expenses.id, folio: expenses.folio }).from(expenses).where(inArray(expenses.id, canceledExpenseIds)) : [];
+      const canceledExpenseById = new Map(canceledExpenses.map((row) => [row.id, row]));
 
       return {
         data: rows.map((row) => {
@@ -419,6 +423,7 @@ export class OperationsController {
           const made = row.referenceType === "production_order" && row.referenceId ? productionById.get(row.referenceId) : undefined;
           const salesId = row.referenceType === "sales_order" ? row.referenceId : made?.salesOrderId ?? null;
           const sale = salesId ? salesById.get(salesId) : undefined;
+          const canceledExpense = row.referenceType === "expense_cancellation" && row.referenceId ? canceledExpenseById.get(row.referenceId) : undefined;
           const receipt = row.referenceType === "receipt" && row.referenceId ? receiptById.get(row.referenceId) : undefined;
 
           return {
@@ -438,7 +443,7 @@ export class OperationsController {
             locationName: row.locationName,
             production: made ? { id: made.id, folio: made.folio } : null,
             salesOrder: sale ? { id: sale.id, folio: sale.folio, customerName: sale.customerName } : null,
-            purchase: receipt
+            purchase: canceledExpense ? { kind: "expense", id: canceledExpense.id, folio: canceledExpense.folio } : receipt
               ? receipt.expenseId && receipt.expenseFolio
                 ? { kind: "expense", id: receipt.expenseId, folio: receipt.expenseFolio, receiptFolio: receipt.folio }
                 : { kind: "receipt", id: receipt.id, folio: receipt.sourceFolio ?? receipt.folio, receiptFolio: receipt.folio }

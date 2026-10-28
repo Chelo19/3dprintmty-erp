@@ -1,3 +1,4 @@
+import { reverseExpenseInventory } from "./expense-cancellation";
 import { syncDependentProductCosts } from "./product-cost-sync";
 import { loadCompanyProfile } from "./company-profile";
 import { canPurchase } from "@3dprintmty/domain";
@@ -83,6 +84,8 @@ const expenseSchema = z.union([
   z.object({ ...purchaseConditions, lines: z.array(purchaseLineSchema).min(1).max(100) }).strict(),
   purchaseLineSchema.extend(purchaseConditions).strict(),
 ]);
+
+const cancelExpenseSchema = z.object({ reason: z.string().trim().min(3).max(240) }).strict();
 
 const expensePaymentSchema = z.object({
   amount: z.string(),
@@ -258,8 +261,9 @@ export class PurchasingController {
     if (amount <= 0n) throw new AppError("invalid_money", "El pago debe ser mayor a cero.");
     return this.database.asUser(tenant, async (db) => {
       const expense = await one(db, expenses, expenses.id, id, "No encontramos ese gasto.");
+      if (expense.canceledAt) throw new AppError("expense_canceled", "No puedes abonar a un gasto cancelado.", 409);
       const payments = (await paymentsByExpense(db, [expense.id])).get(expense.id) ?? [];
-      const paid = payments.reduce((sum, payment) => sum + BigInt(payment.amountMinor), 0n);
+      const paid = payments.reduce((sum, payment) => sum + (payment.canceledAt ? 0n : BigInt(payment.amountMinor)), 0n);
       const due = BigInt(expense.amountMinor) - paid;
       if (due <= 0n) throw new AppError("expense_settled", "Este gasto ya está pagado.");
       if (amount > due) throw new AppError("payment_exceeds_expense", "El pago rebasa el saldo del gasto.");
@@ -282,6 +286,27 @@ export class PurchasingController {
         note: row.note,
       };
     });
+  }
+
+  @Post("expenses/:id/cancel")
+  async cancelExpense(@CurrentUser() actor: Actor, @Param("id") id: string, @Body() body: unknown, @Headers("Idempotency-Key") key?: string) {
+    const tenant = assertRole(actor, [...BUYERS]);
+    const input = cancelExpenseSchema.parse(body);
+    return withIdempotency(this.database, tenant, key, { route: `expenses.${id}.cancel`, input }, () =>
+      this.database.asUser(tenant, async (db) => {
+        const expense = await one(db, expenses, expenses.id, id, "No encontramos ese gasto.");
+        if (!expense.canceledAt) {
+          await reverseExpenseInventory(db, tenant, expense, input.reason);
+          const cancellation = { canceledAt: new Date(), canceledBy: tenant.userId, cancellationReason: input.reason };
+          await db.update(expensePayments).set(cancellation).where(eq(expensePayments.expenseId, id));
+          await db.update(expenses).set(cancellation).where(eq(expenses.id, id));
+          await audit(db, tenant, "expense.canceled", "expense", id, { reason: input.reason, paymentsCanceled: true });
+        }
+        const updated = await one(db, expenses, expenses.id, id, "No encontramos ese gasto.");
+        const payments = (await paymentsByExpense(db, [id])).get(id) ?? [];
+        return { ...presentExpense(updated, payments, true), payments: presentPayments(payments, true) };
+      }),
+    );
   }
 
   @Get("lots")
@@ -430,6 +455,7 @@ async function paymentsByExpense(db: Db, ids: string[]) {
 function presentPayments(rows: ExpensePaymentRow[], seeMoney: boolean) {
   return rows.map((row) => ({
     id: row.id,
+    canceledAt: row.canceledAt,
     paidOn: row.paidOn,
     amount: seeMoney ? Money.fromMinor(BigInt(row.amountMinor)).toMajor() : null,
     note: row.note,
@@ -438,7 +464,7 @@ function presentPayments(rows: ExpensePaymentRow[], seeMoney: boolean) {
 
 function presentExpense(row: ExpenseRow, payments: ExpensePaymentRow[], seeMoney: boolean, classification?: { itemClass: string | null; supplyMode: string | null }) {
   const amountMinor = BigInt(row.amountMinor);
-  const paidMinor = payments.reduce((sum, payment) => sum + BigInt(payment.amountMinor), 0n);
+  const paidMinor = payments.reduce((sum, payment) => sum + (payment.canceledAt ? 0n : BigInt(payment.amountMinor)), 0n);
   return {
     id: row.id,
     folio: row.folio,
@@ -450,8 +476,11 @@ function presentExpense(row: ExpenseRow, payments: ExpensePaymentRow[], seeMoney
     occurredOn: row.occurredOn,
     amount: seeMoney ? Money.fromMinor(amountMinor).toMajor() : null,
     paid: seeMoney ? Money.fromMinor(paidMinor).toMajor() : null,
-    balance: seeMoney ? Money.fromMinor(amountMinor - paidMinor).toMajor() : null,
-    paymentStatus: expensePaymentStatus(amountMinor, paidMinor),
+    balance: seeMoney ? Money.fromMinor(row.canceledAt ? 0n : amountMinor - paidMinor).toMajor() : null,
+    canceledAt: row.canceledAt,
+    canceledBy: row.canceledBy,
+    cancellationReason: row.cancellationReason,
+    paymentStatus: row.canceledAt ? "canceled" : expensePaymentStatus(amountMinor, paidMinor),
     note: row.note,
     createdAt: row.createdAt.toISOString(),
   };

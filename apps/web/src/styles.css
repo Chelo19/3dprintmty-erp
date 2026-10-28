@@ -1849,3 +1849,5 @@ td {
 .purchase-line-amount strong { font-variant-numeric: tabular-nums; }
 .purchase-extra summary { cursor: pointer; color: var(--color-muted); }
 .purchase-extra > div { display: grid; gap: 12px; padding-top: 12px; }
+
+.pay-canceled { color: var(--color-danger); background: #fef2f2; border-color: #fecaca; }

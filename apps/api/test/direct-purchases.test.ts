@@ -50,7 +50,13 @@ it("retira tablas de OC conservando gastos, abonos, recepciones, lotes y kardex 
     expect(archived.metadata.before.folio).toBe("OC-1"); expect(archived.metadata.lines).toHaveLength(1);
     for (const file of migrationFiles(root).filter((file) => file > migration)) await db.exec(readFileSync(join(root, "supabase/migrations", file), "utf8"));
     expect((await db.query("select id,amount_minor,quantity,created_by,created_at from expenses")).rows).toEqual(oldExpense);
-    for (const table of ["expense_payments","stock_ledgers","stock_balances"]) expect((await db.query(`select * from ${table}`)).rows).toEqual(before[table]);
+    for (const table of ["expense_payments","stock_ledgers","stock_balances"]) {
+      const rows = (await db.query(`select * from ${table}`)).rows.map((row) => {
+        const { canceled_at, canceled_by, cancellation_reason, ...historic } = row as Record<string, unknown>;
+        return historic;
+      });
+      expect(rows).toEqual(before[table]);
+    }
     expect((await db.query("select expense_id,position,kind,product_id,quantity,purchase_uom,uom_factor,amount_minor,created_by from expense_lines")).rows[0]).toMatchObject({ expense_id: expense, position: 0, kind: "product", product_id: product, quantity: "2.0000", purchase_uom: "PZA", uom_factor: "1.0000", amount_minor: 10000, created_by: user });
   } finally { await db.close(); }
 });
@@ -190,10 +196,92 @@ describe("compras directas sin OC", () => {
     expect(onboard.status).toBe(201);
     const header = { Authorization: `Bearer ${onboard.body.token}` };
     expect((await request(app.getHttpServer()).get(`/api/v1/expenses/${created.body.id}`).set(header)).status).toBe(404);
+    expect((await request(app.getHttpServer()).post(`/api/v1/expenses/${created.body.id}/cancel`).set(header).set("Idempotency-Key", crypto.randomUUID()).send({ reason: "Intento desde otro taller" })).status).toBe(404);
     const other = await services().auth.verify(onboard.body.token);
     const visible = await services().database.asUser(other, (db) => db.execute(sql`select id from public.expense_lines where expense_id = ${created.body.id}::uuid`));
     expect(visible.rows).toEqual([]);
     expect((await request(app.getHttpServer()).post("/api/v1/expenses").set(header).send({ occurredOn: "2026-10-27", lines: [{ kind: "product", itemId: product.body.id, quantity: "1", amount: "10" }] })).status).toBe(404);
+  });
+
+  it("cancela un gasto y todos sus abonos conservando importes y auditoría, sin admitir nuevos pagos", async () => {
+    const created = await post("/expenses", { kind: "other", description: "Gasto cancelable", amount: "100", occurredOn: "2026-10-27", paidAmount: "40", paidOn: "2026-10-27" });
+    await post(`/expenses/${created.body.id}/payments`, { amount: "60", paidOn: "2026-10-27" });
+    const body = { reason: "Captura duplicada del comprobante" }; const key = crypto.randomUUID();
+    const result = await post(`/expenses/${created.body.id}/cancel`, body, key);
+    expect(result.status, JSON.stringify(result.body)).toBe(201);
+    expect(result.body).toMatchObject({ amount: "100.00", paid: "0.00", balance: "0.00", paymentStatus: "canceled", cancellationReason: body.reason });
+    expect(result.body.payments).toHaveLength(2);
+    expect(result.body.payments.every((payment: { canceledAt: string }) => Boolean(payment.canceledAt))).toBe(true);
+    expect(result.body.payments.map((payment: { amount: string }) => payment.amount)).toEqual(["40.00", "60.00"]);
+    expect((await post(`/expenses/${created.body.id}/cancel`, body, key)).body).toEqual(result.body);
+    expect((await post(`/expenses/${created.body.id}/payments`, { amount: "1", paidOn: "2026-10-27" })).status).toBe(409);
+    const audit = await services().database.asAdmin(db => db.execute(sql`select actor_user_id, metadata from audit_events where action='expense.canceled' and entity_id=${created.body.id}::uuid`));
+    expect(audit.rows).toHaveLength(1);
+    expect(audit.rows[0].actor_user_id).toBe(result.body.canceledBy);
+  });
+
+  it("revierte existencias y valores de varias partidas una sola vez, y recupera el costo ponderado restante", async () => {
+    const item = await post("/products", { sku: "CANCEL-MULTI", name: "Insumo cancelable", itemClass: "component", supplyMode: "buy", cost: "10" });
+    const filament = await post("/filaments", { sku: "CANCEL-F", name: "PLA cancelable", material: "PLA", color: "Rojo", diameterMm: "1.75", cost: "200" });
+    await post("/expenses", { kind: "product", itemId: item.body.id, quantity: "2", amount: "20", occurredOn: "2026-10-27" });
+    const created = await post("/expenses", { occurredOn: "2026-10-27", paid: true, lines: [
+      { kind: "product", itemId: item.body.id, quantity: "1", amount: "20" },
+      { kind: "product", itemId: item.body.id, quantity: "1", amount: "40" },
+      { kind: "filament", itemId: filament.body.id, quantity: "2", amount: "500" },
+    ] });
+    const key = crypto.randomUUID(); const body = { reason: "Compra capturada por error" };
+    const results = await Promise.all([post(`/expenses/${created.body.id}/cancel`, body, key), post(`/expenses/${created.body.id}/cancel`, body, key)]);
+    expect(results.map(result => result.status)).toEqual([201, 201]);
+    expect((await get(`/products/${item.body.id}`)).body.cost).toBe("10.00");
+    const ledger = (await get(`/inventory/ledger?section=supplies&productId=${item.body.id}`)).body.data;
+    expect(ledger.filter((row: { quantity: string }) => Number(row.quantity) < 0)).toHaveLength(2);
+    expect(ledger.filter((row: { quantity: string }) => Number(row.quantity) < 0).every((row: { purchase: { id: string } }) => row.purchase.id === created.body.id)).toBe(true);
+    const quantities = await services().database.asAdmin(db => db.execute(sql`select product_id,filament_id,on_hand from stock_balances where product_id=${item.body.id}::uuid or filament_id=${filament.body.id}::uuid`));
+    expect(quantities.rows).toEqual(expect.arrayContaining([expect.objectContaining({ product_id: item.body.id, on_hand: "2.0000" }), expect.objectContaining({ filament_id: filament.body.id, on_hand: "0.0000" })]));
+    const movements = await services().database.asAdmin(db => db.execute(sql`select sum(value_minor)::text as value from stock_ledgers where reference_type='expense_cancellation' and reference_id=${created.body.id}::uuid`));
+    expect(movements.rows[0]).toMatchObject({ value: "-56000" });
+    expect((await post(`/expenses/${created.body.id}/cancel`, body, crypto.randomUUID())).status).toBe(201);
+  });
+
+  it("bloquea cancelar inventario consumido aunque se haya repuesto y conserva gasto y pagos activos", async () => {
+    const item = await post("/products", { sku: "CANCEL-USED", name: "Consumido", itemClass: "component", supplyMode: "buy", cost: "10" });
+    const created = await post("/expenses", { kind: "product", itemId: item.body.id, quantity: "3", amount: "30", paid: true, occurredOn: "2026-10-27" });
+    const location = await services().database.asAdmin(db => db.execute(sql`select location_id from stock_balances where product_id=${item.body.id}::uuid`));
+    for (const kind of ["issue", "receipt"]) expect((await post("/inventory/movements", { productId: item.body.id, locationId: location.rows[0].location_id, kind, quantity: "1", reason: "Prueba consumo y reposición" })).status).toBe(201);
+    const result = await post(`/expenses/${created.body.id}/cancel`, { reason: "No debe cancelar existencias usadas" }, crypto.randomUUID());
+    expect(result.status).toBe(409); expect(result.body.code).toBe("purchase_stock_used");
+    expect((await get(`/expenses/${created.body.id}`)).body).toMatchObject({ canceledAt: null, paid: "30.00", paymentStatus: "paid" });
+  });
+
+  it("revierte toda la transacción si otra partida está apartada y exige motivo", async () => {
+    const items: Array<{ id: string }> = [];
+    for (const sku of ["CANCEL-FREE", "CANCEL-HELD"]) items.push((await post("/products", { sku, name: sku, itemClass: "component", supplyMode: "buy", cost: "10" })).body);
+    const created = await post("/expenses", { occurredOn: "2026-10-27", paid: true, lines: items.map(item => ({ kind: "product", itemId: item.id, quantity: "2", amount: "20" })) });
+    await services().database.asAdmin(db => db.execute(sql`update stock_balances set allocated=1 where product_id=${items[1]!.id}::uuid`));
+    expect((await post(`/expenses/${created.body.id}/cancel`, { reason: " " }, crypto.randomUUID())).status).toBe(400);
+    const result = await post(`/expenses/${created.body.id}/cancel`, { reason: "Existencias reservadas" }, crypto.randomUUID());
+    expect(result.status).toBe(409);
+    const ledger = await services().database.asAdmin(db => db.execute(sql`select id from stock_ledgers where reference_type='expense_cancellation' and reference_id=${created.body.id}::uuid`));
+    expect(ledger.rows).toHaveLength(0);
+    const expense = (await get(`/expenses/${created.body.id}`)).body;
+    expect(expense).toMatchObject({ canceledAt: null, paymentStatus: "paid", paid: "40.00" });
+    expect(expense.payments[0].canceledAt).toBeNull();
+  });
+
+  it("excluye gastos cancelados de pendientes y del dashboard, y limita la cancelación a compradores", async () => {
+    const before = (await get("/dashboard")).body;
+    const created = await post("/expenses", { kind: "other", description: "Pendiente a cancelar", amount: "123", paidAmount: "23", paidOn: "2026-10-27", occurredOn: "2026-10-27" });
+    const active = (await get("/dashboard")).body;
+    expect(Number(active.kpis.payables) - Number(before.kpis.payables)).toBe(100);
+    const invite = await post("/invitations", { email: "operator@cancel.test", role: "operator" });
+    const joined = await request(app.getHttpServer()).post("/api/v1/invitations/accept").send({ token: invite.body.acceptPath.split("/").at(-1), password: "purchase-test-123" });
+    expect(joined.status).toBe(201);
+    expect((await request(app.getHttpServer()).post(`/api/v1/expenses/${created.body.id}/cancel`).set("Authorization", `Bearer ${joined.body.token}`).set("Idempotency-Key", crypto.randomUUID()).send({ reason: "Sin permiso de compras" })).status).toBe(403);
+    expect((await post(`/expenses/${created.body.id}/cancel`, { reason: "Duplicado en registro" }, crypto.randomUUID())).status).toBe(201);
+    const after = (await get("/dashboard")).body;
+    expect(after.kpis.payables).toBe(before.kpis.payables);
+    expect(after.months).toEqual(before.months);
+    expect((await get("/expenses")).body.data.find((row: { id: string }) => row.id === created.body.id)).toMatchObject({ paymentStatus: "canceled", balance: "0.00" });
   });
 
 });

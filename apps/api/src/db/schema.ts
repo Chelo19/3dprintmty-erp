@@ -887,6 +887,9 @@ export const expenses = pgTable("expenses", {
   amountMinor: bigint("amount_minor", { mode: "bigint" }).notNull(),
   occurredOn: date("occurred_on").notNull(),
   note: text("note"),
+  canceledAt: timestamp("canceled_at", { withTimezone: true }),
+  canceledBy: uuid("canceled_by").references(() => userAccounts.id),
+  cancellationReason: text("cancellation_reason"),
   createdBy: uuid("created_by").notNull(),
   createdAt: createdAt(),
 }, (table) => [
@@ -925,6 +928,9 @@ export const expensePayments = pgTable("expense_payments", {
   paidOn: date("paid_on").notNull(),
   amountMinor: bigint("amount_minor", { mode: "bigint" }).notNull(),
   note: text("note"),
+  canceledAt: timestamp("canceled_at", { withTimezone: true }),
+  canceledBy: uuid("canceled_by").references(() => userAccounts.id),
+  cancellationReason: text("cancellation_reason"),
   createdBy: uuid("created_by").notNull(),
   createdAt: createdAt(),
 }, (table) => [

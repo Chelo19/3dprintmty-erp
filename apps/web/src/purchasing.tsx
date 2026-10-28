@@ -23,6 +23,7 @@ const EXPENSE_PAYMENT: Record<string, string> = {
   pending: "Por pagar",
   partial: "Parcial",
   paid: "Pagado",
+  canceled: "Cancelado",
 };
 
 function todayInMexico() {
@@ -92,7 +93,7 @@ export function PurchasingPage() {
               <td>
                 <div className="record-actions">
                   <ViewLink to={`/app/compras/gastos/${expense.id}`} />
-                  {expense.paymentStatus !== "paid" ? <PayLink to={`/app/compras/gastos/${expense.id}#abono`} /> : null}
+                  {expense.paymentStatus !== "paid" && !expense.canceledAt ? <PayLink to={`/app/compras/gastos/${expense.id}#abono`} /> : null}
                 </div>
               </td>
             </tr>
@@ -213,6 +214,8 @@ export function ExpenseNewPage() {
 }
 
 export function ExpensePage() {
+  const attempt = useIdempotencyAttempt();
+  const [cancelOpen, setCancelOpen] = useState(false);
   const canPay = useCanWrite("/app/compras");
   const { id } = useParams();
   const location = useLocation();
@@ -227,11 +230,14 @@ export function ExpensePage() {
   if (expense.isPending) return <DetailSkeleton />;
   if (!expense.data) return <p className="error">No se pudo cargar el gasto.</p>;
   const data = expense.data;
-  const open = data.paymentStatus !== "paid";
+  const open = !data.canceledAt && data.paymentStatus !== "paid";
   return (
     <section style={{ display: "grid", gap: 16 }}>
       <BackLink to="/app/compras">Compras</BackLink>
-      <h1>{data.folio}</h1>
+      <div className="inventory-heading"><h1 style={{ margin: 0 }}>{data.folio}</h1>
+        {canPay && !data.canceledAt ? <button className="quote-btn danger" type="button" onClick={() => setCancelOpen(true)}><BanIcon />Cancelar gasto y pagos</button> : null}
+      </div>
+      {data.canceledAt ? <Notice title="Gasto cancelado">{data.cancellationReason} · {new Date(data.canceledAt).toLocaleString("es-MX")} · Los pagos quedaron cancelados y el saldo es cero.</Notice> : null}
       <p>
         {expenseTypeLabel(data)} · {data.description} · aplica el {showDay(data.occurredOn)} · <ExpensePaymentBadge status={data.paymentStatus} />
       </p>
@@ -255,12 +261,13 @@ export function ExpensePage() {
       <Paged rows={data.payments ?? []}>
       {(payments) => (
       <table>
-        <thead><tr><th>Fecha de pago</th><th>Cantidad</th><th>Nota</th></tr></thead>
+        <thead><tr><th>Fecha de pago</th><th>Cantidad</th><th>Estado</th><th>Nota</th></tr></thead>
         <tbody>
           {payments.map((payment) => (
             <tr key={payment.id}>
               <td>{showDay(payment.paidOn)}</td>
               <td>{money(payment.amount)}</td>
+              <td><ExpensePaymentBadge status={payment.canceledAt ? "canceled" : "paid"} /></td>
               <td>{payment.note ?? "—"}</td>
             </tr>
           ))}
@@ -303,7 +310,25 @@ export function ExpensePage() {
         </form>
         </Modal>
       ) : null}
-      {!open ? <p className="muted-note">Este gasto ya está pagado.</p> : null}
+      {cancelOpen && !data.canceledAt ? <Modal title="Cancelar gasto y pagos" onClose={() => setCancelOpen(false)} closeDisabled={pendingKey !== null}>
+        <p>Se cancelarán {data.folio} y todos sus abonos. Si la compra generó inventario, sus entradas se revertirán. El historial se conservará. Esta acción no realiza devoluciones bancarias.</p>
+        <form className="form-vertical" onSubmit={(event) => {
+          event.preventDefault();
+          const payload = { reason: String(new FormData(event.currentTarget).get("reason") || "").trim() };
+          void run(async () => {
+            await postJson(`/expenses/${id}/cancel`, payload, attempt.headers(payload));
+            attempt.complete();
+            setCancelOpen(false);
+            const affected = new Set(["expense", "expenses", "dashboard", "products", "product", "filaments", "inventory-catalog", "inventory", "inventory-ledger", "balances", "lots", "pos-catalog", "boms", "bom"]);
+            await client.invalidateQueries({ predicate: query => affected.has(String(query.queryKey[0])) });
+          });
+        }}>
+          <label>Motivo de cancelación<textarea name="reason" required minLength={3} maxLength={240} disabled={pendingKey !== null} /></label>
+          <FormActions><SaveButton label="Cancelar gasto y pagos" pending={pendingKey !== null} /><BackButton onClick={() => setCancelOpen(false)} disabled={pendingKey !== null} /></FormActions>
+          {error ? <Notice tone="error" title="No se pudo cancelar el gasto">{error}</Notice> : null}
+        </form>
+      </Modal> : null}
+      {!open && !data.canceledAt ? <p className="muted-note">Este gasto ya está pagado.</p> : null}
     </section>
   );
 }
@@ -488,6 +513,8 @@ export function PrefacturaPage() {
 }
 
 interface Expense {
+  canceledAt: string | null;
+  cancellationReason: string | null;
   id: string;
   folio: string;
   kind: string;
@@ -503,6 +530,7 @@ interface Expense {
 }
 
 interface ExpensePayment {
+  canceledAt: string | null;
   id: string;
   paidOn: string;
   amount: string | null;
