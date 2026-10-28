@@ -10,9 +10,9 @@ La compra tiene un folio, una fecha, un importe total y un saldo. El pago inicia
 
 Una compra con artículos físicos genera una recepción. Cada partida física conserva su cantidad, factor de conversión, lote, valor y movimiento de entrada. Los kilogramos de filamento se convierten a gramos. Servicios y otros gastos forman parte del importe, sin generar existencias.
 
-El costo promedio ponderado se actualiza con cada entrada y se propaga a los productos dependientes. Si el mismo artículo aparece en varias partidas, cada una puede tener su propio lote y el promedio incorpora las entradas previas de esa misma compra.
+El costo de catálogo es el valor por defecto para capturar una compra. Cambiar el costo en la compra no modifica el catálogo ni las recetas dependientes. El importe real queda registrado en las partidas, recepciones y movimientos de inventario. Si el mismo artículo aparece en varias partidas, cada una puede tener su propio costo y lote.
 
-Compra, partidas, pago inicial, recepción, lotes, costos, entradas, auditoría y respuesta idempotente se confirman en una sola transacción. Un error revierte todos los efectos. El frontend conserva la llave de idempotencia para reintentar una misma captura sin duplicar entradas.
+Compra, partidas, pago inicial, recepción, lotes, importes reales, entradas, auditoría y respuesta idempotente se confirman en una sola transacción. Un error revierte todos los efectos. El frontend conserva la llave de idempotencia para reintentar una misma captura sin duplicar entradas.
 
 ## Contrato de API
 

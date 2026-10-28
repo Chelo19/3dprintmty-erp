@@ -77,7 +77,7 @@ describe("compras directas sin OC", () => {
     const payload={kind:"filament",itemId:filament.body.id,quantity:"2",amount:"500",paidAmount:"100",paidOn:"2026-10-14",occurredOn:"2026-10-14",vendorLot:"LOT-1"};
     const key=crypto.randomUUID();const created=await post("/expenses",payload,key);expect(created.status).toBe(201);expect(created.body).toMatchObject({amount:"500.00",paid:"100.00",balance:"400.00"});
     expect((await post("/expenses",payload,key)).body.id).toBe(created.body.id);
-    expect((await get(`/filaments/${filament.body.id}`)).body.cost).toBe("250.00");
+    expect((await get(`/filaments/${filament.body.id}`)).body.cost).toBe("200.00");
     const ledger=(await get(`/inventory/ledger?section=filaments&productId=${filament.body.id}`)).body.data;expect(ledger).toHaveLength(1);expect(ledger[0]).toMatchObject({quantity:"2000",purchase:{kind:"expense",id:created.body.id,folio:created.body.folio}});
     expect((await get(`/lots?productId=${filament.body.id}`)).body.data[0]).toMatchObject({expenseId:created.body.id,vendorLot:"LOT-1",receivedQty:"2000"});
     expect((await post(`/expenses/${created.body.id}/payments`,{amount:"400",paidOn:"2026-10-15"})).status).toBe(201);expect((await get(`/expenses/${created.body.id}`)).body.paymentStatus).toBe("paid");
@@ -109,6 +109,13 @@ describe("compras directas sin OC", () => {
     expect(detail.body.lines).toHaveLength(4);
     expect(detail.body.lines[0]).toMatchObject({ itemId: product.body.id, itemClass: "component", quantity: "3", amount: "120.00" });
     expect(detail.body.lines[1]).toMatchObject({ itemId: filament.body.id, purchaseUom: "KG", quantity: "2", amount: "500.00" });
+    const actualCosts = await services().database.asAdmin(db => db.execute(sql`
+      select l.product_id,l.filament_id,l.unit_cost_minor::text,l.value_minor::text
+      from receipt_lines l join receipts r on r.id=l.receipt_id where r.expense_id=${created.body.id}::uuid`));
+    expect(actualCosts.rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({ product_id: product.body.id, unit_cost_minor: "4000", value_minor: "12000" }),
+      expect.objectContaining({ filament_id: filament.body.id, unit_cost_minor: "25000", value_minor: "50000" }),
+    ]));
     const productLedger = (await get(`/inventory/ledger?section=supplies&productId=${product.body.id}`)).body.data;
     const filamentLedger = (await get(`/inventory/ledger?section=filaments&productId=${filament.body.id}`)).body.data;
     expect(productLedger).toHaveLength(1);
@@ -116,14 +123,14 @@ describe("compras directas sin OC", () => {
     expect(productLedger[0]).toMatchObject({ quantity: "3", purchase: { id: created.body.id, folio: created.body.folio } });
     expect(filamentLedger[0]).toMatchObject({ quantity: "2000", purchase: { id: created.body.id, folio: created.body.folio } });
     expect(productLedger[0].referenceId).toBe(filamentLedger[0].referenceId);
-    expect((await get(`/products/${product.body.id}`)).body.cost).toBe("40.00");
-    expect((await get(`/filaments/${filament.body.id}`)).body.cost).toBe("250.00");
+    expect((await get(`/products/${product.body.id}`)).body.cost).toBe("10.00");
+    expect((await get(`/filaments/${filament.body.id}`)).body.cost).toBe("200.00");
     expect((await get(`/lots?productId=${filament.body.id}`)).body.data[0]).toMatchObject({ expenseId: created.body.id, vendorLot: "PROVEEDOR-MULTI", receivedQty: "2000" });
     expect((await post(`/expenses/${created.body.id}/payments`, { amount: "533", paidOn: "2026-10-28" })).status).toBe(201);
     expect((await get(`/expenses/${created.body.id}`)).body).toMatchObject({ paymentStatus: "paid", balance: "0.00" });
   });
 
-  it("permite dos lotes del mismo artículo y reintentos sin duplicar existencias ni alterar el costo promedio", async () => {
+  it("permite dos lotes del mismo artículo y reintentos sin duplicar existencias ni alterar el costo de catálogo", async () => {
     const product = await post("/products", { sku: "MULTI-REPEAT", name: "Reventa por lotes", itemClass: "finished_good", supplyMode: "buy", cost: "20" });
     const payload = { occurredOn: "2026-10-27", paid: true, lines: [
       { kind: "product", itemId: product.body.id, quantity: "1", amount: "100" },
@@ -135,7 +142,7 @@ describe("compras directas sin OC", () => {
     expect(second.status).toBe(201);
     expect(second.body.id).toBe(first.body.id);
     expect(first.body).toMatchObject({ amount: "1000.00", paid: "1000.00", balance: "0.00" });
-    expect((await get(`/products/${product.body.id}`)).body.cost).toBe("250.00");
+    expect((await get(`/products/${product.body.id}`)).body.cost).toBe("20.00");
     const ledger = (await get(`/inventory/ledger?section=resale&productId=${product.body.id}`)).body.data;
     expect(ledger).toHaveLength(2);
     expect(ledger.map((row: { quantity: string }) => row.quantity).sort()).toEqual(["1", "3"]);
@@ -220,7 +227,7 @@ describe("compras directas sin OC", () => {
     expect(audit.rows[0].actor_user_id).toBe(result.body.canceledBy);
   });
 
-  it("revierte existencias y valores de varias partidas una sola vez, y recupera el costo ponderado restante", async () => {
+  it("revierte existencias y valores de varias partidas una sola vez, y conserva los costos de catálogo", async () => {
     const item = await post("/products", { sku: "CANCEL-MULTI", name: "Insumo cancelable", itemClass: "component", supplyMode: "buy", cost: "10" });
     const filament = await post("/filaments", { sku: "CANCEL-F", name: "PLA cancelable", material: "PLA", color: "Rojo", diameterMm: "1.75", cost: "200" });
     await post("/expenses", { kind: "product", itemId: item.body.id, quantity: "2", amount: "20", occurredOn: "2026-10-27" });
@@ -229,10 +236,15 @@ describe("compras directas sin OC", () => {
       { kind: "product", itemId: item.body.id, quantity: "1", amount: "40" },
       { kind: "filament", itemId: filament.body.id, quantity: "2", amount: "500" },
     ] });
+    expect((await get(`/products/${item.body.id}`)).body.cost).toBe("10.00");
+    expect((await get(`/filaments/${filament.body.id}`)).body.cost).toBe("200.00");
+    const edited = await request(app.getHttpServer()).patch(`/api/v1/products/${item.body.id}`).set("Authorization", `Bearer ${token}`).send({ cost: "17" });
+    expect(edited.status).toBe(200);
     const key = crypto.randomUUID(); const body = { reason: "Compra capturada por error" };
     const results = await Promise.all([post(`/expenses/${created.body.id}/cancel`, body, key), post(`/expenses/${created.body.id}/cancel`, body, key)]);
     expect(results.map(result => result.status)).toEqual([201, 201]);
-    expect((await get(`/products/${item.body.id}`)).body.cost).toBe("10.00");
+    expect((await get(`/products/${item.body.id}`)).body.cost).toBe("17.00");
+    expect((await get(`/filaments/${filament.body.id}`)).body.cost).toBe("200.00");
     const ledger = (await get(`/inventory/ledger?section=supplies&productId=${item.body.id}`)).body.data;
     expect(ledger.filter((row: { quantity: string }) => Number(row.quantity) < 0)).toHaveLength(2);
     expect(ledger.filter((row: { quantity: string }) => Number(row.quantity) < 0).every((row: { purchase: { id: string } }) => row.purchase.id === created.body.id)).toBe(true);

@@ -10,9 +10,9 @@ Cada partida física genera una salida de reversa por la cantidad y valor exacto
 
 Se impide cancelar si las existencias están reservadas, son insuficientes, existen salidas posteriores del artículo (aunque se haya repuesto) o un lote está asociado a una bobina. La comprobación de salidas es conservadora, por artículo y en todas las ubicaciones, porque las existencias no se gestionan como capas individuales de costo. Las reversas de otras cancelaciones no cuentan como consumo.
 
-Si quedan existencias, se descuenta el valor de esta compra del costo promedio ponderado actual y se recalculan los costos de las recetas dependientes. Si las existencias llegan a cero, se conserva el último costo de catálogo como referencia para próximas compras. El promedio conserva el redondeo monetario del catálogo.
+La cancelación revierte el valor real de la recepción y sus existencias, sin modificar los costos por defecto de productos, insumos o filamentos en el catálogo ni los costos de las recetas.
 
-Toda la operación —reversa, costo, cancelación de abonos y gasto, auditoría— es transaccional y utiliza el bloqueo de escritura del taller. Si falla una partida, nada queda cancelado ni descontado. Los reintentos no duplican salidas.
+Toda la operación —reversa, cancelación de abonos y gasto, auditoría— es transaccional y utiliza el bloqueo de escritura del taller. Si falla una partida, nada queda cancelado ni descontado. Los reintentos no duplican salidas.
 
 ## API y base de datos
 

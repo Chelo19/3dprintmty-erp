@@ -1,22 +1,18 @@
 import { reverseExpenseInventory } from "./expense-cancellation";
-import { syncDependentProductCosts } from "./product-cost-sync";
 import { loadCompanyProfile } from "./company-profile";
 import { canPurchase } from "@3dprintmty/domain";
 import { All, Body, Controller, Get, Headers, Param, Patch, Post, Query } from "@nestjs/common";
 import {
   assertRfc,
   canReadSalePrice,
-  extendCostMinor,
   formatQty,
   Money,
   mulQty,
   parseQty,
   qtyFromDb,
   roundDiv,
-  stockUnitCostMinor,
 } from "@3dprintmty/domain";
 import { AppError } from "@3dprintmty/shared";
-import Decimal from "decimal.js";
 import { asc, desc, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 import { services } from "../container";
@@ -30,11 +26,9 @@ import {
   products,
   receiptLines,
   receipts,
-  stockBalances,
   vendors,
 } from "../db/schema";
 import { assertRole, CurrentUser, requireTenant, type Actor, type TenantActor } from "../http/actor";
-import { roundMinor } from "./manufacturing.shared";
 import {
   allocateFolio,
   audit,
@@ -236,11 +230,9 @@ export class PurchasingController {
           const [receipt] = await db.insert(receipts).values({ tenantId: tenant.tenantId, folio: `REC-${receiptFolio}`, expenseId: expense.id, vendorId: vendor.id, locationId, notes: input.note ?? null, createdBy: tenant.userId }).returning();
           for (const [position, line] of resolved.entries()) {
             if (!line.product) continue;
-            // Volver a leer el costo tras cada recepción permite repetir un artículo en lotes distintos.
-            const product = await purchasedItem(db, line.product.id);
+            const product = line.product;
             const stockQty = mulQty(line.quantity, parseQty(product.uomFactor));
             if (stockQty <= 0n) throw new AppError("invalid_quantity", "La cantidad recibida debe generar una entrada mayor a cero.");
-            await updateAverageCost(db, product, stockQty, line.amount);
             const target = product.kind === "filament" ? { filamentId: product.id } : { productId: product.id };
             const lotId = await ensureLot(db, tenant, target, line.lotNumber || `${receipt.folio}-${position + 1}`, stockQty, { source: "purchase", vendorId: vendor.id, vendorLot: line.vendorLot ?? null, expenseId: expense.id, receiptId: receipt.id });
             await postStock(db, tenant, { ...target, locationId, kind: "receipt", delta: stockQty, valueMinor: line.amount, reason: `Recepción ${receipt.folio} de ${expense.folio}`, reference: { type: "receipt", id: receipt.id }, lotId });
@@ -352,38 +344,6 @@ export class PurchasingController {
     };
   }
 
-}
-
-/** Costo promedio ponderado por unidad de compra (lo que el catálogo guarda: MXN/kg, MXN/pieza). */
-async function updateAverageCost(
-  db: Db,
-  product: { id: string; kind: "product" | "filament"; costMinor: bigint | string | null; uomFactor: string },
-  receivedStockQty: bigint,
-  receivedValueMinor: bigint,
-) {
-  const balances = await db
-    .select({ onHand: stockBalances.onHand })
-    .from(stockBalances)
-    .where(product.kind === "filament" ? eq(stockBalances.filamentId, product.id) : eq(stockBalances.productId, product.id));
-  const onHand = balances.reduce((sum: bigint, row: { onHand: string }) => sum + qtyFromDb(row.onHand), 0n);
-  const factor = new Decimal(String(product.uomFactor));
-  const currentCost = product.costMinor === null ? null : BigInt(product.costMinor);
-  let perStock: Decimal;
-  if (onHand <= 0n || currentCost === null) {
-    perStock = new Decimal(receivedValueMinor.toString()).div(new Decimal(formatQty(receivedStockQty)));
-  } else {
-    const existingValue = new Decimal(formatQty(onHand)).mul(stockUnitCostMinor(currentCost, String(product.uomFactor)));
-    perStock = existingValue
-      .add(receivedValueMinor.toString())
-      .div(new Decimal(formatQty(onHand + receivedStockQty)));
-  }
-  const costMinor = roundMinor(perStock.mul(factor));
-  if (product.kind === "filament") {
-    await db.update(filaments).set({ costMinor, updatedAt: new Date() }).where(eq(filaments.id, product.id));
-  } else {
-    await db.update(products).set({ costMinor, updatedAt: new Date() }).where(eq(products.id, product.id));
-  }
-  await syncDependentProductCosts(db, product.id);
 }
 
 function mapVendor(row: {

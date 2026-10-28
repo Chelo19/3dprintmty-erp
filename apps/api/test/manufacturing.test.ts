@@ -63,8 +63,18 @@ describe("operación — compras, manufactura, calidad y prefacturas", () => {
     expect(vendor.status).toBe(201);
     const purchase = await api.post(owner, "/expenses", { kind: "filament", itemId: filament.body.id, vendorId: vendor.body.id, quantity: "1", amount: "400.00", occurredOn: "2026-10-14" });
     expect(purchase.status).toBe(201);
-    expect((await api.get(owner, `/products/${piece.body.id}`)).body.cost).toBe("56.40");
-    expect((await api.get(owner, `/products/${assembly.body.id}`)).body.cost).toBe("112.80");
+    const supplyPurchase = await api.post(owner, "/expenses", { kind: "product", itemId: supply.body.id, quantity: "2", amount: "50.00", occurredOn: "2026-10-14" });
+    expect(supplyPurchase.status).toBe(201);
+    for (const purchaseToCancel of [purchase, supplyPurchase]) {
+      expect((await api.get(owner, `/filaments/${filament.body.id}`)).body.cost).toBe("200.00");
+      expect((await api.get(owner, `/products/${supply.body.id}`)).body.cost).toBe("3.00");
+      expect((await api.get(owner, `/products/${piece.body.id}`)).body.cost).toBe("31.20");
+      expect((await api.get(owner, `/products/${assembly.body.id}`)).body.cost).toBe("62.40");
+      expect((await api.post(owner, `/expenses/${purchaseToCancel.body.id}/cancel`, { reason: "Prueba de costos independientes" })).status).toBe(201);
+    }
+    expect((await api.get(owner, `/products/${piece.body.id}`)).body.cost).toBe("31.20");
+    expect((await api.get(owner, `/products/${assembly.body.id}`)).body.cost).toBe("62.40");
+    expect((await api.get(owner, `/production-orders/${order.body.id}`)).body).toEqual(originalOrder);
 
   });
 
