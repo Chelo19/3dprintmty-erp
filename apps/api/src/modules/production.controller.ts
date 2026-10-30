@@ -1,3 +1,4 @@
+import { productionMaterialReview } from "./production-material-review";
 import { Body, Controller, Get, Param, Patch, Post, Query } from "@nestjs/common";
 import {
   assertOrderAction,
@@ -38,7 +39,7 @@ import {
   workCenters,
 } from "../db/schema";
 import { assertRole, CurrentUser, requireTenant, type Actor, type TenantActor } from "../http/actor";
-import { assertManufacturable, createProductionOrder, laborMinor } from "./manufacturing.shared";
+import { assertManufacturable, createProductionOrder, laborMinor, loadBomIndex, loadProducts } from "./manufacturing.shared";
 import {
   fulfillLinkedOrder,
   loadOrder as loadSalesOrder,
@@ -167,6 +168,18 @@ export class ProductionController {
       return demand;
     });
     return { data };
+  }
+
+  @Post("production-orders/material-review")
+  async materialReview(@CurrentUser() actor: Actor, @Body() body: unknown) {
+    const tenant = requireTenant(actor);
+    const { orderIds } = z.object({ orderIds: z.array(z.string().uuid()).min(1).max(1000) }).strict().parse(body);
+    const ids = [...new Set(orderIds)];
+    return this.database.asReadUser(tenant, async db => {
+      const orders: OrderRow[] = await db.select().from(productionOrders).where(inArray(productionOrders.id, ids));
+      if (orders.length !== ids.length) throw new AppError("not_found", "No encontramos todas las órdenes seleccionadas en este taller.", 404);
+      return productionMaterialReview(orders, await loadBomIndex(db), await loadProducts(db));
+    });
   }
 
   @Get("production-orders/:id")

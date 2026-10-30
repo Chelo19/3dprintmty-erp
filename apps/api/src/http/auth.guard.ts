@@ -43,7 +43,7 @@ export class AuthGuard implements CanActivate {
     if (request.user.role === "operator") {
       const path = route.replace(/^\/api\/v1\//i, "").replace(/\/$/, "").toLowerCase();
       const read = request.method === "GET" && (/^pos\/(catalog|sales(?:\/[^/]+)?)$/.test(path) || /^(auth\/me|customers(?:\/[^/]+)?|quotes(?:\/[^/]+(?:\/pdf)?)?|orders(?:\/[^/]+(?:\/pdf)?)?|payments|products(?:\/[^/]+)?|filaments(?:\/[^/]+)?|services(?:\/[^/]+)?|company|locations|payment-methods|prefacturas(?:\/[^/]+)?|inventory(?:\/(balances|ledger))?|spools|production-orders(?:\/[^/]+)?|boms(?:\/[^/]+)?|routings\/[^/]+|work-centers|quality\/(queue|inspections|defect-types|settings))$/.test(path));
-      const create = request.method === "POST" && ["pos/sales", "customers", "quotes", "orders", "payments", "prefacturas", "production-orders", "spools", "spools/empty", "inventory/movements"].includes(path);
+      const create = request.method === "POST" && ["pos/sales", "customers", "quotes", "orders", "payments", "prefacturas", "production-orders", "production-orders/material-review", "spools", "spools/empty", "inventory/movements"].includes(path);
       const operate = request.method === "POST" && /^(inventory\/filaments\/[^/]+\/adjust|spools\/[^/]+\/(weigh|scrap)|production-orders\/(from-sales-order\/[^/]+|[^/]+\/(release|transition|consume|complete|inspections|close|operations\/[^/]+)))$/.test(path);
       if (!read && !create && !operate) throw new AppError("forbidden", "El operador no tiene permiso para esta acción.", 403);
     }

@@ -1,3 +1,4 @@
+import { ProductionMaterialReview } from "./production-material-review";
 import { useRecordActions } from "./use-record-actions";
 import { finishProduction } from "./production-actions";
 import { Modal } from "./modal";
@@ -49,10 +50,18 @@ export function ProductionPage() {
   const client = useQueryClient();
   const { error, pendingKey, run } = useError();
   const rowActions = useRecordActions();
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [reviewIds, setReviewIds] = useState<string[] | null>(null);
   const [status, setStatus] = useState("draft,released,scheduled,in_progress,qc_hold,on_hold");
   const orders = useQuery({
     queryKey: ["production-orders", status],
     queryFn: () => api<{ data: ProductionOrder[] }>(`/production-orders${status ? `?status=${status}` : ""}`),
+  });
+  const selectedIds = (orders.data?.data ?? []).filter(order => selected.has(order.id)).map(order => order.id);
+  const toggleSelection = (ids: string[], checked: boolean) => setSelected(previous => {
+    const next = new Set(previous);
+    for (const id of ids) { if (checked && next.size < 1000) next.add(id); else if (!checked) next.delete(id); }
+    return next;
   });
   const products = useProducts();
   const recipes = useRecipes();
@@ -158,28 +167,38 @@ export function ProductionPage() {
       </div>
       <label style={{ maxWidth: 260 }}>
         Mostrar
-        <select value={status} onChange={(event) => setStatus(event.target.value)}>
+        <select value={status} onChange={(event) => { setStatus(event.target.value); setSelected(new Set()); }}>
           <option value="draft,released,scheduled,in_progress,qc_hold,on_hold">Abiertas</option>
           <option value="completed,closed">Terminadas</option>
           <option value="">Todas</option>
         </select>
       </label>
+      <div className="inventory-heading">
+        <span aria-live="polite">{selectedIds.length ? `${selectedIds.length} órdenes seleccionadas` : "Selecciona órdenes para revisar los materiales y servicios requeridos."}</span>
+        <div className="record-actions">
+          {selectedIds.length ? <button className="ghost" type="button" onClick={() => setSelected(new Set())}>Limpiar selección</button> : null}
+          <button className="primary" type="button" disabled={!selectedIds.length} onClick={() => setReviewIds(selectedIds)}>Revisar gasto de material</button>
+        </div>
+      </div>
+      {selectedIds.length >= 1000 ? <Notice title="Límite de selección">Puedes revisar hasta 1,000 órdenes por consulta.</Notice> : null}
+      {reviewIds ? <ProductionMaterialReview orderIds={reviewIds} onClose={() => setReviewIds(null)} /> : null}
       {rowActions.pendingCount > 0 ? (
         <p className="costing-hint" role="status" aria-live="polite">
           Procesando {rowActions.pendingCount} {rowActions.pendingCount === 1 ? "orden" : "órdenes"}. Puedes continuar con las demás.
         </p>
       ) : null}
-      {orders.isPending ? <TableSkeleton columns={5} /> : (
+      {orders.isPending ? <TableSkeleton columns={6} /> : (
       <Paged rows={orders.data?.data ?? []}>
       {(pageOrders) => (
       <table>
-        <thead><tr><th>Folio</th><th>Producto</th><th>Piezas</th><th>Estado</th><th></th></tr></thead>
+        <thead><tr><th><input type="checkbox" aria-label="Seleccionar órdenes de esta página" ref={input => { if (input) input.indeterminate = pageOrders.some(order => selected.has(order.id)) && !pageOrders.every(order => selected.has(order.id)); }} checked={pageOrders.length > 0 && pageOrders.every(order => selected.has(order.id))} onChange={event => toggleSelection(pageOrders.map(order => order.id), event.target.checked)} /></th><th>Folio</th><th>Producto</th><th>Piezas</th><th>Estado</th><th></th></tr></thead>
         <tbody>
           {pageOrders.map((order) => {
             const step = nextStep(order.status);
             const state = rowActions.records[order.id];
             return (
               <tr key={order.id}>
+                <td><input type="checkbox" aria-label={`Seleccionar ${order.folio}`} checked={selected.has(order.id)} disabled={!selected.has(order.id) && selectedIds.length >= 1000} onChange={event => toggleSelection([order.id], event.target.checked)} /></td>
                 <td>{order.folio}</td>
                 <td>{order.sku} · {order.name}</td>
                 <td>{order.quantityCompleted}/{order.quantityOrdered}</td>
