@@ -1,3 +1,4 @@
+import { HelpButton } from "./help";
 import { Modal } from "./modal";
 import { Notice } from "./notice";
 import { BackButton, BackLink } from "./back-control";
@@ -180,7 +181,8 @@ export function ExpenseNewPage() {
           navigate(`/app/compras/gastos/${created.id}`);
         });
       }}>
-        <h2>Compra actual <span className="costing-hint">{lines.length} partidas</span></h2>
+        <h2>Compra actual <HelpButton topic="compras" /> <span className="costing-hint">{lines.length} partidas</span></h2>
+        <p className="costing-hint">El costo de esta compra puede diferir del catálogo. <HelpButton topic="costos-catalogo" /></p>
         <fieldset disabled={pending}>
           <div className="pos-cart">{!lines.length ? <Notice title="Compra vacía">Selecciona un artículo o agrega un servicio u otro gasto para empezar.</Notice> : lines.map((line) => {
             let amount: string | null = null;
@@ -235,7 +237,7 @@ export function ExpensePage() {
     <section style={{ display: "grid", gap: 16 }}>
       <BackLink to="/app/compras">Compras</BackLink>
       <div className="inventory-heading"><h1 style={{ margin: 0 }}>{data.folio}</h1>
-        {canPay && !data.canceledAt ? <button className="quote-btn danger" type="button" onClick={() => setCancelOpen(true)}><BanIcon />Cancelar gasto y pagos</button> : null}
+        {canPay && !data.canceledAt ? <div className="record-actions"><button className="quote-btn danger" type="button" onClick={() => setCancelOpen(true)}><BanIcon />Cancelar gasto y pagos</button><HelpButton topic="cancelar-gasto" /></div> : null}
       </div>
       {data.canceledAt ? <Notice title="Gasto cancelado">{data.cancellationReason} · {new Date(data.canceledAt).toLocaleString("es-MX")} · Los pagos quedaron cancelados y el saldo es cero.</Notice> : null}
       <p>
@@ -254,7 +256,7 @@ export function ExpensePage() {
         </table></div>}</Paged>
       </section> : null}
       <div className="inventory-heading">
-        <h2 style={{ margin: 0 }}>Abonos</h2>
+        <h2 style={{ margin: 0 }}>Abonos <HelpButton topic="compras" /></h2>
         {open && canPay && (data.payments ?? []).length > 0 ? <button className="primary new-link" type="button" onClick={showAbono}><PlusIcon />Registrar abono</button> : null}
       </div>
       {!(data.payments ?? []).length ? <Notice title="Sin abonos registrados" action={open && canPay ? <button className="primary new-link" type="button" onClick={showAbono}><PlusIcon />Registrar abono</button> : undefined}>Todavía no hay pagos registrados para este gasto.</Notice> : (

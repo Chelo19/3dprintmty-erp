@@ -151,6 +151,7 @@ export function moduleForPath(path: string): AppModule | null {
 }
 
 export function canAccessPath(role: TenantRole | null, path: string): boolean {
+  if (path === "/app/ayuda" || path === "/app/ayuda/") return role !== null;
   if (!FEATURES.prefacturas && path.split("/")[2] === "prefacturas") return false;
   if (role === "operator" && ["costeo"].includes(path.split("/")[2] ?? "")) return false;
   const module = moduleForPath(path);

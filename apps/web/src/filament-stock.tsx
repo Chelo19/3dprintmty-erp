@@ -1,3 +1,4 @@
+import { HelpButton } from "./help";
 import { BackLink } from "./back-control";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type FormEvent } from "react";
@@ -125,6 +126,7 @@ export function FilamentAdjustPage() {
         </div>
       </div>
       <form className="card form-vertical" onSubmit={submit}>
+        <div className="help-field-heading"><strong>Consumo o conteo físico</strong><HelpButton topic="ajuste-filamento" /></div>
         <label>
           Tipo de ajuste
           <select value={mode} onChange={(event) => setMode(event.target.value)}>

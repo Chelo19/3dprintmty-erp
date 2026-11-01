@@ -1,3 +1,4 @@
+import { HelpButton } from "./help";
 import { EntityAutocomplete } from "./entity-autocomplete";
 import { Modal } from "./modal";
 import { CollectionStatusBadge, COLLECTION_METHODS, COLLECTION_STATES, collectionMethodLabel, collectionDateLabel, paymentToday } from "./collection-ui";
@@ -1128,6 +1129,7 @@ function OrderGuidance({
     <div className="order-guidance">
       {notes.map((note) => <p key={note} style={{ margin: 0 }}>{note}</p>)}
       <div className="order-guidance-actions">
+        <HelpButton topic="apartar-inventario" label="Sobre inventario y fabricación" />
         {allocate?.allowed && canAllocate ? (
           <QuoteButton
             label={pendingKey === "allocate" ? "Apartando inventario…" : "Apartar inventario"}
@@ -1361,7 +1363,7 @@ export function PaymentNewPage() {
   return (
     <section style={{ display: "grid", gap: 16 }}>
       <BackLink to="/app/cobranza">Cobranza</BackLink>
-      <h1>Registrar cobro</h1>
+      <h1>Registrar cobro <HelpButton topic="cobranza" /></h1>
       <p>Selecciona el pedido y registra el importe recibido con su método y referencia.</p>
       {orders.isPending ? <FormSkeleton fields={5} /> : orders.isError ? <Notice title="No se pudieron cargar los pedidos" tone="error" action={<button className="ghost" type="button" onClick={() => void orders.refetch()}>Reintentar</button>}>Intenta nuevamente antes de registrar el cobro.</Notice> : !eligible.length ? <EmptyState title="Sin pedidos disponibles para cobrar" to="/app/pedidos/nuevo" actionLabel="Crear pedido">Crea y confirma un pedido para registrar su cobro.</EmptyState> : (
       <form
@@ -1586,7 +1588,7 @@ export function QuoteDetailPage() {
           </article>
           <div className="card quote-actions">
             {canModify ? <div className="quote-actions-group">
-              <span className="quote-actions-label">Siguiente paso</span>
+              <div className="help-field-heading"><span className="quote-actions-label">Siguiente paso</span><HelpButton topic="cotizaciones" /></div>
               <p className="quote-actions-hint">{QUOTE_NEXT_HINT[data.status] ?? ""}</p>
               <div className="quote-actions-row">
                 {data.status === "draft" ? (
@@ -1931,7 +1933,7 @@ function PaymentConditions({
     : 0;
   return (
     <div className="payment-conditions">
-      <strong>Condiciones de pago</strong>
+      <strong>Condiciones de pago</strong> <HelpButton topic="cobranza" />
       <dl>
         {rows.map(([label, value]) => (
           <Fragment key={label}>
@@ -2312,7 +2314,7 @@ function QuoteBuilder({
           <option value="products">Productos</option>
         </select>
       </label>
-      <p className="costing-hint">Los descuentos se capturan en MXN y se aplican al total de cada partida{showVat || showIsr ? " antes de impuestos" : ""}.</p>
+      <p className="costing-hint">Los descuentos se capturan en MXN y se aplican al total de cada partida{showVat || showIsr ? " antes de impuestos" : ""}. <HelpButton topic="impuestos-descuentos" /></p>
       {mode === "prints" ? (
         <div className="scroll-x">
         <Paged rows={prints}>
@@ -2450,7 +2452,7 @@ function QuoteBuilder({
           <button className="ghost" type="button" disabled={pending || !services.length} onClick={() => setProductLines((current) => [...current, freshPart(services, defaults)])}>Agregar servicio</button>
           <button className="ghost" type="button" disabled={pending} onClick={() => setProductLines((current) => [...current, {
             ...freshPart([], defaults), temporary: true, description: `PIEZA TEMPORAL ${current.filter((line) => line.temporary).length + 1}`,
-          }])}>Agregar pieza temporal</button>
+          }])}>Agregar pieza temporal</button> <HelpButton topic="partidas-temporales" />
         </div>
       )}
       {showVat || showIsr ? <p className="costing-hint">Los impuestos se calculan por partida después de descuentos.{showVat ? " Usa IVA 0 % cuando no corresponda cobrarlo." : ""}{showIsr ? " El ISR se resta del total por cobrar." : ""}</p> : null}
@@ -2725,7 +2727,7 @@ function useOrderTransition(client: ReturnType<typeof useQueryClient>, currentOr
   }
   const creditAuthorization = blockedId ? (
     <section className="card" aria-label="Autorización de crédito">
-      <h2>El pedido supera el crédito disponible</h2>
+      <h2>El pedido supera el crédito disponible <HelpButton topic="credito" /></h2>
       <p>Puedes autorizar una excepción. El motivo quedará guardado en el pedido.</p>
       <form onSubmit={async (event) => {
         event.preventDefault();
@@ -2784,7 +2786,7 @@ function OrderNextStep({
     <div className="card quote-actions">
       {next || canPay || canCancel ? (
         <div className="quote-actions-group">
-          <span className="quote-actions-label">Siguiente paso</span>
+          <div className="help-field-heading"><span className="quote-actions-label">Siguiente paso</span><HelpButton topic="pedidos" /></div>
           {blocked && gate?.reason ? <p className="quote-actions-hint">{gate.reason}</p> : null}
           {canCancel && cancel && !cancel.allowed ? <p className="quote-actions-hint">{cancel.reason}</p> : null}
           <div className="quote-actions-row">

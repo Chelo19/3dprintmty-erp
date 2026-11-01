@@ -71,3 +71,7 @@ TEST_DATABASE_URL=postgresql://postgres:password@127.0.0.1:55439/postgres npm ru
 ```
 
 Sin esa variable se ejecutan los escenarios PGlite y se omiten los de PostgreSQL. Se prueban permisos directos, FK entre talleres, reintentos, rollback de folios/efectos, COD y cobros/stock/recepciones simultáneos.
+
+## Guía de uso
+
+La aplicación incluye **Guía de uso** en la barra lateral (`/app/ayuda`), búsqueda por tarea y ayudas contextuales mediante botones de información. El contenido se filtra según los permisos del rol. La versión en texto está en [docs/guia-de-uso.md](docs/guia-de-uso.md); la fuente de los temas es `apps/web/src/help-content.ts`.

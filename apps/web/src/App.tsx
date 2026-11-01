@@ -1,3 +1,4 @@
+import { PageHelp, UserGuidePage } from "./help";
 import { PosPage, PosTicketPage } from "./pos";
 import { AuthPage } from "./auth-page";
 import { OnboardingPage } from "./onboarding";
@@ -40,6 +41,7 @@ export function App() {
       <Route path="/aviso-de-privacidad" element={<PrivacyPage />} />
       <Route path="/app" element={<Shell />}>
         <Route index element={<DashboardPage />} />
+        <Route path="ayuda" element={<UserGuidePage />} />
         <Route path="productos" element={<Navigate to="/app/productos/fabricados" replace />} />
         <Route path="productos/fabricados" element={<ProductsPage />} />
         <Route path="productos/reventa" element={<ProductsPage category="buy" />} />
@@ -199,6 +201,7 @@ function Shell() {
             {auth.user.platformAdmin && !auth.user.impersonator ? <Nav to="/app/plataforma">{t("nav.platform")}</Nav> : null}
           </NavGroup>
         </nav>
+        <Nav to="/app/ayuda">Guía de uso</Nav>
         <div className="sidebar-session"><LogoutButton /></div>
         <p className="sidebar-version">{t("app.version", { version: import.meta.env.VITE_APP_VERSION })}</p>
       </aside>
@@ -209,7 +212,7 @@ function Shell() {
             ? auth.user.platformAdmin && !auth.user.impersonator ? <Outlet /> : <Navigate to={roleHome(role)} replace />
             : !canAccessPath(role, location.pathname) || (/\/(nuevo|nueva|editar|ajustar)(\/|$)/.test(location.pathname) && !canWritePath(role, location.pathname))
               ? role ? <Navigate to={roleHome(role)} replace /> : <p className="error">No tienes un rol válido para acceder al taller.</p>
-              : <Outlet />}
+              : <><PageHelp /><Outlet /></>}
         </main>
       </div>
     </div>

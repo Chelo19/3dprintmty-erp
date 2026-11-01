@@ -1,3 +1,4 @@
+import { HelpButton } from "./help";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router-dom";
@@ -127,7 +128,7 @@ export function PosPage() {
           </>}
       </section>
       <form className="card pos-checkout" onSubmit={(event) => void checkout(event)}>
-        <h2>Venta actual <span className="costing-hint">{cart.length} partidas</span></h2>
+        <h2>Venta actual <HelpButton topic="punto-venta" /> <span className="costing-hint">{cart.length} partidas</span></h2>
         <fieldset disabled={locked}>
           <label className="pos-checkbox"><input type="checkbox" checked={general} onChange={(event) => setGeneral(event.target.checked)} />Público en general</label>
           {!general ? <EntityAutocomplete label="Cliente" value={customerId} disabled={locked || customers.isPending || customers.isError}

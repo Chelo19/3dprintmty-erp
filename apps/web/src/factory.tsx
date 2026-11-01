@@ -1,3 +1,4 @@
+import { HelpButton } from "./help";
 import { ProductionMaterialReview } from "./production-material-review";
 import { useRecordActions } from "./use-record-actions";
 import { finishProduction } from "./production-actions";
@@ -178,6 +179,7 @@ export function ProductionPage() {
         <div className="record-actions">
           {selectedIds.length ? <button className="ghost" type="button" onClick={() => setSelected(new Set())}>Limpiar selección</button> : null}
           <button className="primary" type="button" disabled={!selectedIds.length} onClick={() => setReviewIds(selectedIds)}>Revisar gasto de material</button>
+          <HelpButton topic="revisar-material" />
         </div>
       </div>
       {selectedIds.length >= 1000 ? <Notice title="Límite de selección">Puedes revisar hasta 1,000 órdenes por consulta.</Notice> : null}
@@ -373,7 +375,7 @@ function RecipeEditor({ product, onClose }: { product: ProductOption; onClose: (
       <thead><tr><th>Componente</th><th>Cantidad por pieza</th><th>Merma</th></tr></thead>
       <tbody>{recipeLines.map((line) => <tr key={line.componentProductId}><td>{line.sku} · {line.name}</td><td>{line.quantity}</td><td>{line.scrapPct}%</td></tr>)}</tbody>
     </table>}
-    <h2>Servicios por pieza</h2>
+    <h2>Servicios por pieza <HelpButton topic="recetas" /></h2>
     <table><thead><tr><th>Servicio</th><th>Cantidad</th></tr></thead>
       <tbody>{(bom.data?.services ?? []).map((line) => <tr key={line.serviceId}><td>{line.name}</td><td>{line.quantity} {line.unit}</td></tr>)}</tbody></table>
   </Modal>;
@@ -383,7 +385,7 @@ function RecipeEditor({ product, onClose }: { product: ProductOption; onClose: (
         {product.status === "inactive" ? <p style={{ margin: 0 }}><StatusBadge status={product.status} /></p> : null}
         {bom.isPending ? <TableSkeleton columns={4} /> : bom.data ? (
           <>
-            <h2 style={{ margin: 0 }}>Filamentos e insumos</h2>
+            <h2 style={{ margin: 0 }}>Filamentos e insumos <HelpButton topic="recetas" /></h2>
             {recipeLines.length === 0 ? <p style={{ margin: 0 }}>Este producto todavía no tiene receta. Agrega su primer componente.</p> : (
             <Paged rows={recipeLines}>
             {(pageLines) => (
@@ -490,7 +492,7 @@ function RecipeEditor({ product, onClose }: { product: ProductOption; onClose: (
               </button>
             </form>
             <p className="costing-hint" style={{ margin: 0 }}>Si agregas un componente que ya está en la receta, se reemplaza su cantidad.</p>
-            <h2 style={{ margin: "12px 0 0" }}>Servicios por pieza</h2>
+            <h2 style={{ margin: "12px 0 0" }}>Servicios por pieza <HelpButton topic="recetas" /></h2>
             <p className="costing-hint">Agrega impresión, acabado, diseño u otros servicios del catálogo. Se suman al costo, sin afectar existencias.</p>
             {(bom.data.services ?? []).length ? <table>
               <thead><tr><th>Servicio</th><th>Cantidad por pieza</th><th>Costo por pieza</th><th></th></tr></thead>
@@ -550,7 +552,7 @@ function RecipeEditor({ product, onClose }: { product: ProductOption; onClose: (
             </form>
             {services.isError ? <Notice tone="error" title="No se pudieron cargar los servicios" action={<button className="ghost" type="button" onClick={() => void services.refetch()}>Reintentar</button>}>Intenta nuevamente para consultar el catálogo.</Notice> : !services.isPending && !services.data?.data.length ? <EmptyState title="Sin servicios en el catálogo" to="/app/servicios/nuevo" actionLabel="Crear servicio">Registra un servicio para asociarlo a la receta.</EmptyState> : null}
             <CostOnly><article className="card" style={{ display: "grid", gap: 8 }}>
-              <h2 style={{ margin: 0 }}>Costo por pieza</h2>
+              <h2 style={{ margin: 0 }}>Costo por pieza <HelpButton topic="costos-catalogo" /></h2>
               {bom.data.missingCosts ? <Notice title="Costo incompleto">Hay materiales o servicios sin costo en su catálogo. Captura sus costos para calcular el total del producto.</Notice> : null}
               <div style={grid}>
                 <span>Filamento <strong>{money(bom.data.filamentCost)}</strong></span>
@@ -659,7 +661,7 @@ export function ProductionDetailPage() {
       {step || CANCELLABLE.has(data.status) ? (
         <div className="card quote-actions">
           <div className="quote-actions-group">
-            <span className="quote-actions-label">Siguiente paso</span>
+            <div className="help-field-heading"><span className="quote-actions-label">Siguiente paso</span><HelpButton topic="produccion" /></div>
             <p className="quote-actions-hint">{PRODUCTION_HINT[data.status] ?? ""}</p>
             <div className="quote-actions-row">
               {step ? (
