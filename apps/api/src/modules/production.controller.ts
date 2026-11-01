@@ -56,7 +56,6 @@ import {
 import {
   allocateFolio,
   allocateFolios,
-  audit,
   availableAt,
   defaultLocationId,
   minorToMajor,
@@ -211,7 +210,6 @@ export class ProductionController {
         source: "manual",
         kind: "make_to_stock",
       });
-      await audit(db, tenant, "production_order.created", "production_order", order.id, { folio: order.folio });
       return loadDetail(db, order.id);
     });
   }
@@ -262,9 +260,6 @@ export class ProductionController {
         await orderEvent(db, tenant, salesOrder.id, "production_created", {
           note: created.map((order: { folio: string }) => order.folio).join(", "),
         });
-        await audit(db, tenant, "production_order.created_from_sales_order", "sales_order", salesOrder.id, {
-          productionOrders: created.map((order: { folio: string }) => order.folio),
-        });
         return { data: created.map((order: OrderRow) => mapOrder(order)) };
       });
     });
@@ -281,7 +276,6 @@ export class ProductionController {
         .update(productionOrders)
         .set({ status: next, updatedAt: new Date() })
         .where(eq(productionOrders.id, order.id));
-      await audit(db, tenant, "production_order.released", "production_order", order.id, { shortages: shortages.length });
       return { ...(await loadDetail(db, order.id)), shortages };
     });
   }
@@ -314,7 +308,6 @@ export class ProductionController {
         })
         .where(eq(productionOrders.id, order.id));
       if (next === "cancelled") await fulfillLinkedOrder(db, tenant, order.salesOrderId);
-      await audit(db, tenant, `production_order.${next}`, "production_order", order.id, { reason: input.reason ?? null });
       return loadDetail(db, order.id);
     });
   }
@@ -446,11 +439,6 @@ export class ProductionController {
         })
         .where(eq(productionOrders.id, order.id));
       if (!needsQc) await receiveFinishedGoods(db, tenant, order, good, actualCost);
-      await audit(db, tenant, `production_order.${next}`, "production_order", order.id, {
-        good: formatQty(good),
-        scrapped: formatQty(scrapped),
-        actualCostMinor: actualCost.toString(),
-      });
       return loadDetail(db, order.id);
     });
   }
@@ -520,11 +508,6 @@ export class ProductionController {
           .where(eq(productionOrders.id, order.id));
         await receiveFinishedGoods(db, tenant, order, good, BigInt(order.actualCostMinor ?? 0n));
       }
-      await audit(db, tenant, "production_order.inspected", "production_order", order.id, {
-        result: input.result,
-        outcome,
-        gate,
-      });
       return loadDetail(db, order.id);
     });
   }
@@ -541,7 +524,6 @@ export class ProductionController {
         .set({ status: "completed", qcStatus: "waived", updatedAt: new Date() })
         .where(eq(productionOrders.id, order.id));
       await receiveFinishedGoods(db, tenant, order, qtyFromDb(order.quantityCompleted), BigInt(order.actualCostMinor ?? 0n));
-      await audit(db, tenant, "production_order.qc_waived", "production_order", order.id, { reason });
       return loadDetail(db, order.id);
     });
   }
@@ -557,7 +539,6 @@ export class ProductionController {
         .set({ status: next, closedAt: new Date(), updatedAt: new Date() })
         .where(eq(productionOrders.id, order.id));
       await fulfillLinkedOrder(db, tenant, order.salesOrderId);
-      await audit(db, tenant, "production_order.closed", "production_order", order.id, {});
       return loadDetail(db, order.id);
     });
   }
@@ -639,7 +620,6 @@ export class ProductionController {
     const input = qcSettingsSchema.parse(body);
     await this.database.asUser(tenant, async (db) => {
       await db.update(companyProfiles).set({ qcGate: input.qcGate, updatedAt: new Date() });
-      await audit(db, tenant, "quality.gate_changed", "company_profile", null, { qcGate: input.qcGate });
     });
     return { qcGate: input.qcGate };
   }

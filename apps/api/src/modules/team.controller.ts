@@ -5,7 +5,7 @@ import { and, asc, eq, isNull } from "drizzle-orm";
 import type { Request } from "express";
 import { z } from "zod";
 import { services } from "../container";
-import { auditEvents, companyProfiles, invitations, tenantMemberships, userAccounts } from "../db/schema";
+import { companyProfiles, invitations, tenantMemberships, userAccounts } from "../db/schema";
 import { assertRole, CurrentUser, requireTenant, type Actor, type TenantActor } from "../http/actor";
 import { Public } from "../http/auth.guard";
 import { isSupabaseAuth } from "./auth.service";
@@ -124,13 +124,6 @@ export class TeamController {
         expiresAt: expiresAt(),
         createdBy: tenant.userId,
       });
-      await db.insert(auditEvents).values({
-        tenantId: tenant.tenantId,
-        actorUserId: tenant.userId,
-        action: "team.invited",
-        entityType: "invitation",
-        metadata: { email, role: input.role },
-      });
     });
     return { email, role: input.role, acceptPath: `/invitacion/${token}` };
   }
@@ -155,13 +148,6 @@ export class TeamController {
     const invite = await this.pendingInvite(tenant, id);
     await this.database.asUser(tenant, async (db) => {
       await db.delete(invitations).where(eq(invitations.id, invite.id));
-      await db.insert(auditEvents).values({
-        tenantId: tenant.tenantId,
-        actorUserId: tenant.userId,
-        action: "team.invitation_revoked",
-        entityType: "invitation",
-        metadata: { email: invite.email, role: invite.role },
-      });
     });
     return { ok: true };
   }
@@ -177,13 +163,6 @@ export class TeamController {
         .update(tenantMemberships)
         .set({ role: input.role })
         .where(and(eq(tenantMemberships.tenantId, tenant.tenantId), eq(tenantMemberships.userId, userId)));
-      await db.insert(auditEvents).values({
-        tenantId: tenant.tenantId,
-        actorUserId: tenant.userId,
-        action: "team.role_changed",
-        entityType: "membership",
-        metadata: { email: member.email, from: member.role, to: input.role },
-      });
     });
     return { userId, role: input.role };
   }
@@ -196,13 +175,6 @@ export class TeamController {
       await db
         .delete(tenantMemberships)
         .where(and(eq(tenantMemberships.tenantId, tenant.tenantId), eq(tenantMemberships.userId, userId)));
-      await db.insert(auditEvents).values({
-        tenantId: tenant.tenantId,
-        actorUserId: tenant.userId,
-        action: "team.member_removed",
-        entityType: "membership",
-        metadata: { email: member.email, role: member.role },
-      });
     });
     return { ok: true };
   }
@@ -281,13 +253,6 @@ export class TeamController {
         email,
       });
       await db.update(invitations).set({ acceptedAt: new Date() }).where(eq(invitations.id, invite.id));
-      await db.insert(auditEvents).values({
-        tenantId: invite.tenantId,
-        actorUserId: userId,
-        action: "team.joined",
-        entityType: "membership",
-        metadata: { email, role: invite.role },
-      });
     });
     const actor = await this.auth.sessionFor(userId, email);
     return {

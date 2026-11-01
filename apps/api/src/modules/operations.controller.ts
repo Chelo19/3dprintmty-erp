@@ -63,7 +63,7 @@ import {
 } from "./orders.shared";
 import { quoteCosting } from "./quote-costing";
 import { renderQuotePdf, type QuotePdfInput } from "./quote-pdf";
-import { allocateFolio, audit, defaultLocationId, one, postStock, withIdempotency, type Db } from "./support";
+import { allocateFolio, defaultLocationId, one, postStock, withIdempotency, type Db } from "./support";
 
 const addressSchema = z.object({
   line1: z.string().trim().max(160).default(""),
@@ -987,7 +987,6 @@ export class OperationsController {
         })
         .returning();
       await refreshPaymentStatus(db, order.id, order.totalMinor);
-      await audit(db, tenant, "payment.recorded", "payment", created.id, { orderId: order.id, kind: input.kind, amountMinor: amount.minor.toString(), method: input.method, status });
       return created;
     });
     return mapPayment(
@@ -1014,7 +1013,6 @@ export class OperationsController {
       const ledger = await db.select().from(payments).where(eq(payments.salesOrderId, order.id));
       assertPendingPaymentsFit(BigInt(order.totalMinor), ledger, [payment]);
       const [row] = await db.update(payments).set({ status: "completed", paidOn: input.paidOn ?? null }).where(eq(payments.id, payment.id)).returning();
-      await audit(db, tenant, "payment.completed", "payment", payment.id, { orderId: order.id });
       await refreshPaymentStatus(db, order.id, order.totalMinor);
       return row;
     });
@@ -1028,7 +1026,6 @@ export class OperationsController {
       const payment = await one(db, payments, payments.id, id, "No encontramos ese cobro.");
       if (payment.status !== "pending") throw new AppError("invalid_transition", "Solo se anulan cobros pendientes. Para dinero recibido registra un reembolso.", 409);
       const [row] = await db.update(payments).set({ status: "voided" }).where(eq(payments.id, id)).returning();
-      await audit(db, tenant, "payment.voided", "payment", id, { reason, orderId: payment.salesOrderId });
       return mapPayment({ ...row, orderId: payment.salesOrderId, folio: "" }, tenant.role);
     });
   }

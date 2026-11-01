@@ -9,8 +9,8 @@ import { applyMigrations, verifyMigrations } from "../src/db/migrations";
 import { repoRoot } from "../src/db/database.service";
 import { requireTenant, type TenantActor } from "../src/http/actor";
 import { AppError } from "@3dprintmty/shared";
-import { allocateFolio, audit, postStock, withIdempotency } from "../src/modules/support";
-import { auditEvents, companyProfiles, customerAddresses, customers, idempotencyRequests, locations, numberSequences, payments, products, salesOrders, stockBalances, stockLedgers, taxRates, tenants } from "../src/db/schema";
+import { allocateFolio, postStock, withIdempotency } from "../src/modules/support";
+import { companyProfiles, customerAddresses, customers, idempotencyRequests, locations, numberSequences, payments, products, salesOrders, stockBalances, stockLedgers, taxRates, tenants } from "../src/db/schema";
 
 // Conserva cobertura del módulo para cuando se reactive.
 vi.mock("@3dprintmty/domain", async (importOriginal) => {
@@ -195,18 +195,17 @@ for (const driver of ["pglite", "postgres"] as const) {
       expect(Number(balance.onHand)).toBe(6);
     });
 
-    it("revierte llave, auditoría y folio cuando la operación falla", async () => {
+    it("revierte llave, datos y folio cuando la operación falla", async () => {
       const key = crypto.randomUUID();
       const effect = () => withIdempotency(services().database, actor, key, { route: "test.rollback" }, async () => {
         await allocateFolio(services().database, actor.tenantId, "test_rollback", key);
-        await services().database.asUser(actor, (db) => audit(db, actor, "test.rollback", "test", null, { key }));
+        await services().database.asUser(actor, (db) => db.insert(products).values({ tenantId: actor.tenantId, sku: key, name: "Rollback", itemClass: "finished_good", supplyMode: "buy", createdBy: actor.userId }));
         throw new AppError("test_failure", "Failure after writing");
       });
       await expect(effect()).rejects.toThrow("Failure after writing");
       expect(await services().database.asAdmin((db) => db.select().from(idempotencyRequests).where(eq(idempotencyRequests.key, key)))).toHaveLength(0);
       expect(await services().database.asAdmin((db) => db.select().from(numberSequences).where(eq(numberSequences.series, key)))).toHaveLength(0);
-      const history = await services().database.asUser(actor, (db) => db.select().from(auditEvents).where(and(eq(auditEvents.action, "test.rollback"), eq(auditEvents.tenantId, actor.tenantId))));
-      expect(history).toHaveLength(0);
+      expect(await services().database.asUser(actor, (db) => db.select().from(products).where(eq(products.sku, key)))).toHaveLength(0);
       const replay = await withIdempotency(services().database, actor, key, { route: "test.rollback" }, async () => ({ recovered: true }));
       expect(replay).toEqual({ recovered: true });
     });

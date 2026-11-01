@@ -12,7 +12,7 @@ Una compra con artículos físicos genera una recepción. Cada partida física c
 
 El costo de catálogo es el valor por defecto para capturar una compra. Cambiar el costo en la compra no modifica el catálogo ni las recetas dependientes. El importe real queda registrado en las partidas, recepciones y movimientos de inventario. Si el mismo artículo aparece en varias partidas, cada una puede tener su propio costo y lote.
 
-Compra, partidas, pago inicial, recepción, lotes, importes reales, entradas, auditoría y respuesta idempotente se confirman en una sola transacción. Un error revierte todos los efectos. El frontend conserva la llave de idempotencia para reintentar una misma captura sin duplicar entradas.
+Compra, partidas, pago inicial, recepción, lotes, importes reales, entradas y respuesta idempotente se confirman en una sola transacción. Un error revierte todos los efectos. El frontend conserva la llave de idempotencia para reintentar una misma captura sin duplicar entradas.
 
 ## Contrato de API
 
@@ -20,4 +20,4 @@ Compra, partidas, pago inicial, recepción, lotes, importes reales, entradas, au
 
 Se conserva el formato anterior de una sola partida. Una compra múltiple usa `expenses.kind = 'mixed'` y sus partidas financieras se guardan en `expense_lines`. El detalle devuelve `lines`; los movimientos físicos siguen en `receipts`, `receipt_lines`, `material_lots` y `stock_ledgers`.
 
-La migración incorpora las compras históricas a `expense_lines` conservando sus importes, cantidades, autores y fechas. Usa las unidades y conversiones de las recepciones históricas cuando existen. No modifica sus abonos ni inventarios. La nueva tabla tiene RLS, referencias compuestas por taller y auditoría de movimientos.
+La migración incorpora las compras históricas a `expense_lines` conservando sus importes, cantidades, autores y fechas. Usa las unidades y conversiones de las recepciones históricas cuando existen. No modifica sus abonos ni inventarios. La nueva tabla tiene RLS, referencias compuestas por taller y protección del autor original.

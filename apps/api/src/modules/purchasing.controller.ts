@@ -31,7 +31,6 @@ import {
 import { assertRole, CurrentUser, requireTenant, type Actor, type TenantActor } from "../http/actor";
 import {
   allocateFolio,
-  audit,
   defaultLocationId,
   ensureLot,
   one,
@@ -238,7 +237,6 @@ export class PurchasingController {
             await postStock(db, tenant, { ...target, locationId, kind: "receipt", delta: stockQty, valueMinor: line.amount, reason: `Recepción ${receipt.folio} de ${expense.folio}`, reference: { type: "receipt", id: receipt.id }, lotId });
             await db.insert(receiptLines).values({ tenantId: tenant.tenantId, receiptId: receipt.id, ...target, description: line.description, purchaseUom: product.purchaseUom, uomFactor: product.uomFactor, unitCostMinor: roundDiv(line.amount * 10_000n, line.quantity), quantity: formatQty(line.quantity), stockQuantity: formatQty(stockQty), lotId, valueMinor: line.amount });
           }
-          await audit(db, tenant, "purchase.received", "receipt", receipt.id, { expenseId: expense.id, expenseFolio: expense.folio });
         }
         return { ...expense, lines: await purchaseLines(db, expense.id, true) };
       });
@@ -270,7 +268,6 @@ export class PurchasingController {
           createdBy: tenant.userId,
         })
         .returning();
-      await audit(db, tenant, "expense.payment_recorded", "expense", expense.id, { amountMinor: amount.toString(), paidOn: input.paidOn });
       return {
         id: row.id,
         paidOn: row.paidOn,
@@ -292,7 +289,6 @@ export class PurchasingController {
           const cancellation = { canceledAt: new Date(), canceledBy: tenant.userId, cancellationReason: input.reason };
           await db.update(expensePayments).set(cancellation).where(eq(expensePayments.expenseId, id));
           await db.update(expenses).set(cancellation).where(eq(expenses.id, id));
-          await audit(db, tenant, "expense.canceled", "expense", id, { reason: input.reason, paymentsCanceled: true });
         }
         const updated = await one(db, expenses, expenses.id, id, "No encontramos ese gasto.");
         const payments = (await paymentsByExpense(db, [id])).get(id) ?? [];
@@ -503,7 +499,6 @@ async function insertExpense(
       .returning();
     if (payment) payments.push(payment);
   }
-  await audit(db, tenant, "expense.created", "expense", row.id, { folio: row.folio, kind: row.kind });
   return { ...presentExpense(row, payments, true), payments: presentPayments(payments, true) };
 }
 

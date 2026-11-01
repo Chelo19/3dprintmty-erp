@@ -1,25 +1,21 @@
-# Trazabilidad de operaciones
+# Autores de movimientos y retiro de la bitácora
 
-Los movimientos nuevos se atribuyen al usuario autenticado, sin aceptar identidad ni fecha de auditoría enviadas por el cliente. La bitácora se consulta en Configuración → Bitácora de actividad, únicamente con los roles dueño o administrador. Cada taller solo puede consultar su historial.
+La bitácora de actividad del taller fue retirada por decisión del producto. Se eliminan su pantalla, navegación, endpoint y las escrituras explícitas y automáticas a `audit_events`. La migración `20261101053558_remove_activity_audit.sql` elimina la tabla, sus índices, los triggers que la alimentaban y sus funciones auxiliares. El historial acumulado en esa tabla deja de estar disponible, incluidos snapshots anteriores y nuevos de los registros y eventos históricos archivados allí.
 
-## Implementación
+Se conservan los datos de negocio y sus historiales específicos: `stock_ledgers`, `sales_order_events`, pagos, gastos, cancelaciones, consumos, recepciones e inspecciones. Los campos `created_by`, `created_at`, `canceled_by` y `canceled_at` existentes no se eliminan. Esto permite seguir identificando autores en los registros originales, pero no reconstruir todas las ediciones o bajas como hacía la bitácora.
 
-`audit_events` conserva eventos de negocio existentes y registros automáticos de altas, cambios y bajas mediante triggers PostgreSQL. Estos últimos incluyen valores anteriores y nuevos, campos modificados, UUID de usuario, correo y rol de la sesión, usuario de soporte cuando corresponda, fecha del servidor y un identificador de transacción. Se revierte todo si falla la operación. Reintentos idempotentes no generan nuevos movimientos ni nuevas firmas. Actualizaciones sin cambios reales no generan eventos.
+`guard_record_author` y los triggers `record_author` siguen impidiendo suplantar o reemplazar al creador original. La identidad proviene del Actor verificado y se transmite en la misma transacción. Se mantienen RLS, roles, atomicidad y protección contra reintentos duplicados.
 
-La identidad proviene de `Actor`, verificado por autenticación, y se transmite con `SET LOCAL request.jwt.claims` en la misma conexión y transacción. Las escrituras normales usan `asUser`; las escrituras administrativas de negocio usan `asAdminActor`. El segundo método no debe emplearse para evitar permisos de un módulo: se reserva para onboarding y gestión de membresías que ya requieren autorización en el controlador. La envoltura de idempotencia conserva identidad también durante la asignación de folios.
+`apply_tenant_rls` continúa configurando permisos por taller y ahora instala únicamente `enable_record_author`, sin logging adicional. Los módulos futuros deben mantener `tenant_id`, PK y `created_by` cuando corresponda.
 
-Los triggers son SECURITY INVOKER y no elevan privilegios ni eluden RLS. Las funciones internas no tienen EXECUTE para PUBLIC, anon, authenticated ni erp_api. La aplicación no tiene permisos de UPDATE, DELETE o TRUNCATE sobre la bitácora; triggers rechazan además cambios y vaciados por conexiones administrativas. Un administrador PostgreSQL con capacidad de cambiar DDL sigue siendo parte del perímetro de confianza y puede desactivar esos controles; esto es atribución autenticada, no una firma electrónica fiscal ni evidencia criptográfica externa.
+`platform_audit_log` permanece: es el registro independiente de seguridad de soporte y suplantación administrativa. No es la bitácora de actividad del taller.
 
-Se excluyen `idempotency_keys` e `idempotency_requests` (pueden contener respuestas y tokens), `platform_audit_log` (tiene su propia auditoría de seguridad) y la bitácora misma. Los registros automáticos omiten claves de credenciales y hashes de invitación. Los datos operativos, incluyendo importes y datos de clientes, solo se exponen a dueño y administrador mediante RLS. No se auditan lecturas. El histórico anterior se mantiene sin inventar autores que nunca se registraron; los movimientos antiguos de inventario conservan su `created_by`.
+## Despliegue y eliminación de datos
 
-## Módulos futuros
+Este cambio requiere actualizar API y esquema de forma coordinada. Una API anterior sigue consultando e insertando en `audit_events`, por lo que fallará si se elimina la tabla mientras continúa atendiendo tráfico. Durante el despliegue, detener las instancias anteriores, ejecutar la migración y arrancar la API de esta versión. Después desplegar el frontend para retirar el enlace a la pantalla anterior. El arranque verifica las migraciones, por lo que no se debe iniciar la API nueva contra una base sin migrar.
 
-`apply_tenant_rls` instala los triggers de auditoría en nuevas tablas. Las tablas que no usen ese helper deben incorporar explícitamente `enable_record_audit` en su migración. El helper es exclusivo de las migraciones. Mantener `tenant_id`, PK UUID y `created_by` cuando corresponda. Las nuevas columnas que contengan secretos deben añadirse a la lista de exclusión del trigger antes de desplegarlas.
-
-La consulta de la bitácora usa paginación por fecha y UUID y conserva microsegundos en el cursor. Los índices cubren taller/fecha, entidad y usuario; no se cargan todos los eventos en el navegador. El crecimiento de los snapshots exige monitorizar tamaño y definir, cuando se requiera, archivado protegido conforme a la política de conservación del producto; no borrar eventos como parte de la edición de entidades.
+No usar un pre-deploy con cambio incompatible si todavía hay instancias antiguas atendiendo tráfico. La eliminación del historial no tiene reversión automática; volver al código anterior requiere recrear su esquema, y recrearlo vacío no recupera los eventos eliminados.
 
 ## Verificación
 
-Pruebas de altas/cambios/bajas, anti-suplantación, creador original, inmutabilidad, rollback, roles, aislamiento de talleres, retiro del autor, ocultación de tokens, idempotencia, precisión de paginación y tablas futuras en `apps/api/test/audit.test.ts`. Además se ejecutan las suites operativas de compras, inventario, fabricación, cobros y ventas.
-
-Referencia: [Triggers de PostgreSQL en Supabase](https://supabase.com/docs/guides/database/postgres/triggers).
+`apps/api/test/record-authors.test.ts` comprueba ausencia de la tabla y triggers de actividad, API retirada, conservación de autores, anti-suplantación, aislamiento, atomicidad, idempotencia y permisos de módulos futuros. Las pruebas de compras verifican que las migraciones conservan abonos, inventario e importes históricos. Las demás suites cubren ventas, cobros, fabricación y soporte administrativo.

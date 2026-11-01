@@ -12,10 +12,10 @@ Se impide cancelar si las existencias están reservadas, son insuficientes, exis
 
 La cancelación revierte el valor real de la recepción y sus existencias, sin modificar los costos por defecto de productos, insumos o filamentos en el catálogo ni los costos de las recetas.
 
-Toda la operación —reversa, cancelación de abonos y gasto, auditoría— es transaccional y utiliza el bloqueo de escritura del taller. Si falla una partida, nada queda cancelado ni descontado. Los reintentos no duplican salidas.
+Toda la operación —reversa, cancelación de abonos y gasto— es transaccional y utiliza el bloqueo de escritura del taller. Si falla una partida, nada queda cancelado ni descontado. Los reintentos no duplican salidas.
 
 ## API y base de datos
 
 `POST /api/v1/expenses/:id/cancel`, con `Idempotency-Key` y cuerpo `{ "reason": "Captura duplicada" }`.
 
-Migración: `20261027233946_cancel_expenses_and_payments.sql`. Agrega `canceled_at`, `canceled_by` y `cancellation_reason` a `expenses` y `expense_payments`, con restricciones de consistencia. Las políticas de acceso por taller y la auditoría existentes siguen vigentes. No se eliminan tablas ni registros.
+Migración: `20261027233946_cancel_expenses_and_payments.sql`. Agrega `canceled_at`, `canceled_by` y `cancellation_reason` a `expenses` y `expense_payments`, con restricciones de consistencia. Las políticas de acceso por taller y los autores de los movimientos siguen vigentes. No se eliminan tablas ni registros.

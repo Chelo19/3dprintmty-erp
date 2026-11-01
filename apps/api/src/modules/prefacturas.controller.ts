@@ -1,5 +1,4 @@
 import { loadCompanyProfile } from "./company-profile";
-import { WritableGet } from "../http/read-transaction.interceptor";
 import { Body, Controller, Get, Headers, Param, Post, Query, StreamableFile } from "@nestjs/common";
 import { canIssuePrefactura, formatQty, isValidRfc, Money, qtyFromDb, type SalesOrderState } from "@3dprintmty/domain";
 import { mxCountryPolicy, PREFACTURA_TITLE, type CommercialDraft } from "@3dprintmty/fiscal";
@@ -9,7 +8,6 @@ import { and, asc, desc, eq, gte, lt, lte, sql } from "drizzle-orm";
 import { z } from "zod";
 import { services } from "../container";
 import {
-  auditEvents,
   commercialDocumentLines,
   commercialDocuments,
   customerAddresses,
@@ -20,7 +18,7 @@ import {
 } from "../db/schema";
 import { assertRole, CurrentUser, type Actor, type TenantActor } from "../http/actor";
 import { effectiveLineDiscount, effectiveQty, type OrderLineRow } from "./orders.shared";
-import { allocateFolio, audit, minorToMajor, one, withIdempotency, type Db } from "./support";
+import { allocateFolio, minorToMajor, one, withIdempotency, type Db } from "./support";
 import { createZip } from "./zip";
 
 const READERS = ["owner", "admin", "sales", "operator", "viewer", "warehouse"] as const;
@@ -118,11 +116,6 @@ export class PrefacturasController {
           totalMinor: BigInt(line.totalMinor),
         })),
       );
-      await audit(db, tenant, "prefactura.issued", "commercial_document", document.id, {
-        series: document.series,
-        folio: document.folio,
-        order: order.folio,
-      });
       return loadDocument(db, document.id);
     });
   }
@@ -138,12 +131,10 @@ export class PrefacturasController {
         .update(commercialDocuments)
         .set({ status: "void", voidReason: input.reason, voidedAt: new Date(), voidedBy: tenant.userId, updatedAt: new Date() })
         .where(eq(commercialDocuments.id, document.id));
-      await audit(db, tenant, "prefactura.voided", "commercial_document", document.id, { reason: input.reason });
       return loadDocument(db, document.id);
     });
   }
 
-  @WritableGet()
   @Get("exports/accountant")
   async exportPackage(
     @CurrentUser() actor: Actor,
@@ -170,12 +161,6 @@ export class PrefacturasController {
         .innerJoin(salesOrders, eq(salesOrders.id, payments.salesOrderId))
         .where(and(gte(paymentDay, input.from), lte(paymentDay, input.to)))
         .orderBy(paymentDay, payments.createdAt);
-      await audit(db, tenant, "accountant_package.exported", "export", null, {
-        from: input.from,
-        to: input.to,
-        format: input.format,
-        documents: documents.length,
-      });
       return { company, documents, received };
     });
 
@@ -363,11 +348,6 @@ async function loadDocument(db: Db, id: string) {
     amount: Money.fromMinor(BigInt(row.amountMinor)),
   }));
   const total = Money.fromMinor(BigInt(document.totalMinor));
-  const history = await db
-    .select()
-    .from(auditEvents)
-    .where(and(eq(auditEvents.entityType, "commercial_document"), eq(auditEvents.entityId, document.id)))
-    .orderBy(desc(auditEvents.createdAt));
   return {
     ...mapDocument(document),
     emitter: document.emitter,
@@ -394,11 +374,6 @@ async function loadDocument(db: Db, id: string) {
       amount: minorToMajor(row.amountMinor),
       reference: row.reference,
       createdAt: row.createdAt,
-    })),
-    history: history.map((event: { action: string; createdAt: Date; metadata: unknown }) => ({
-      action: event.action,
-      createdAt: event.createdAt,
-      metadata: event.metadata,
     })),
   };
 }

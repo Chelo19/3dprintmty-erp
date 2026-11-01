@@ -2726,7 +2726,7 @@ function useOrderTransition(client: ReturnType<typeof useQueryClient>, currentOr
   const creditAuthorization = blockedId ? (
     <section className="card" aria-label="Autorización de crédito">
       <h2>El pedido supera el crédito disponible</h2>
-      <p>Puedes autorizar una excepción. El motivo y tu usuario quedarán registrados en la auditoría.</p>
+      <p>Puedes autorizar una excepción. El motivo quedará guardado en el pedido.</p>
       <form onSubmit={async (event) => {
         event.preventDefault();
         if (pending) return;

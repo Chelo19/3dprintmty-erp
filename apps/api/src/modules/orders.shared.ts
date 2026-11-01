@@ -30,7 +30,6 @@ import { amountDue } from "@3dprintmty/payments";
 import { AppError } from "@3dprintmty/shared";
 import { and, asc, eq, inArray } from "drizzle-orm";
 import {
-  auditEvents,
   boms,
   commercialDocuments,
   customers,
@@ -45,7 +44,7 @@ import {
   salesOrders,
 } from "../db/schema";
 import type { TenantActor } from "../http/actor";
-import { audit, availableAt, defaultLocationId, isoDate, one, reserveStock, unwrap, type Db } from "./support";
+import { availableAt, defaultLocationId, isoDate, one, reserveStock, unwrap, type Db } from "./support";
 
 export const SALES_ROLES = ["owner", "admin", "sales"] as const;
 export const SHIPPER_ROLES = ["owner", "admin", "sales", "warehouse"] as const;
@@ -330,7 +329,6 @@ export async function syncOrderState(db: Db, tenant: TenantActor, orderId: strin
     .where(eq(salesOrders.id, order.id))
     .returning();
   if (status !== current) {
-    await audit(db, tenant, "sales_order.status_synced", "sales_order", order.id, { from: current, to: status });
     await orderEvent(db, tenant, order.id, "status_synced", { from: current, to: status });
   }
   return row;
@@ -721,14 +719,6 @@ export async function assertCredit(
       409,
     );
   }
-  await db.insert(auditEvents).values({
-    tenantId: tenant.tenantId,
-    actorUserId: tenant.userId,
-    action: "credit.override",
-    entityType: "sales_order",
-    entityId: order.id,
-    metadata: { reason },
-  });
   return reason;
 }
 

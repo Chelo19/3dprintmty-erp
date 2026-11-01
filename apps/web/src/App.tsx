@@ -1,5 +1,4 @@
 import { PosPage, PosTicketPage } from "./pos";
-import { AuditPage } from "./audit";
 import { AuthPage } from "./auth-page";
 import { OnboardingPage } from "./onboarding";
 import { DashboardPage } from "./dashboard";
@@ -97,7 +96,6 @@ export function App() {
         <Route path="sucursales" element={<LocationsPage />} />
         <Route path="equipo" element={<TeamPage />} />
         <Route path="configuracion" element={<SettingsPage />} />
-        <Route path="configuracion/bitacora" element={<AuditPage />} />
         <Route path="plataforma" element={<PlatformPage />} />
       </Route>
     </Routes>
@@ -196,7 +194,6 @@ function Shell() {
           {canAccessModule(role, "purchasing") ? <Nav to="/app/compras">{t("nav.purchasing")}</Nav> : null}
           <NavGroup label={t("nav.settings")} open={at("/app/configuracion", "/app/sucursales", "/app/equipo", "/app/plataforma")}>
             <Nav to="/app/configuracion">{t("settings.title")}</Nav>
-            {canAccessModule(role, "settings") ? <Nav to="/app/configuracion/bitacora">Bitácora de actividad</Nav> : null}
             <Nav to="/app/sucursales">{t("nav.locations")}</Nav>
             <Nav to="/app/equipo">{t("nav.team")}</Nav>
             {auth.user.platformAdmin && !auth.user.impersonator ? <Nav to="/app/plataforma">{t("nav.platform")}</Nav> : null}

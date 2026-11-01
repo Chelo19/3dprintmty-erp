@@ -1,5 +1,4 @@
 import { PosController } from "./modules/pos.controller";
-import { AuditController } from "./modules/audit.controller";
 import { Module } from "@nestjs/common";
 import { APP_GUARD, APP_INTERCEPTOR } from "@nestjs/core";
 import { OperatorCostsInterceptor } from "./http/operator-costs.interceptor";
@@ -23,7 +22,6 @@ import { TeamController } from "./modules/team.controller";
 
 @Module({
   controllers: [
-    AuditController,
     HealthController,
     AuthController,
     OnboardingController,

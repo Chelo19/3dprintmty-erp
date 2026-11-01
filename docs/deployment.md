@@ -18,6 +18,8 @@ Variables de Render: `NODE_ENV=production`, `DATABASE_URL`, `AUTH_DRIVER=supabas
 
 La API verifica el esquema al iniciar; **el contenedor no aplica migraciones automáticamente**. La preparación de la base y el pre-deploy `npm run db:migrate` corresponden al paso de migraciones. Desde la raíz, con la imagen construida, el comando equivalente es `docker run --rm --env-file /ruta/privada/produccion.env 3dprintnow-api npm run db:migrate`; el archivo privado debe definir `MIGRATION_DATABASE_URL` de esa base.
 
+La migración `20261101053558_remove_activity_audit` elimina `audit_events` y requiere una ventana coordinada: detener las instancias de API anteriores, ejecutar la migración y arrancar esta versión; después actualizar el frontend. No ejecutarla como pre-deploy mientras versiones anteriores siguen recibiendo tráfico. El código anterior depende de la tabla eliminada. Ver `docs/authenticated-audit.md`.
+
 Comprobación local de la imagen, una vez configurada la base:
 
 ```sh

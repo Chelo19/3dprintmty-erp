@@ -29,7 +29,7 @@ import {
   type BomIndex,
   type ProductInfo,
 } from "./manufacturing.shared";
-import { audit, minorToMajor, one, type Db } from "./support";
+import { minorToMajor, one, type Db } from "./support";
 
 const ENGINEERING = ["owner", "admin", "production"] as const;
 
@@ -253,7 +253,6 @@ export class ManufacturingController {
       if (detail.missingCosts) throw new AppError("missing_component_cost", "Completa los costos de materiales y servicios en sus catálogos.", 409);
       const unit = BigInt(new Decimal(detail.unitCostMinor).toDecimalPlaces(0, Decimal.ROUND_HALF_UP).toFixed(0));
       await db.update(products).set({ costMinor: unit, updatedAt: new Date() }).where(eq(products.id, id));
-      await audit(db, tenant, "product.cost_rolled_up", "product", id, { costMinor: unit.toString() });
       return { productId: id, cost: minorToMajor(unit), materialCost: detail.materialCost, laborCost: detail.laborCost };
     });
   }
@@ -370,7 +369,6 @@ async function writeBom(db: Db, tenant: TenantActor, productId: string, lines: B
     tenantId: tenant.tenantId, bomId: bom.id, serviceId: line.serviceId, quantity: formatQty(parseQty(line.quantity)),
   })));
   await syncDependentProductCosts(db, product.id, true);
-  await audit(db, tenant, "bom.saved", "bom", bom.id, { productId: product.id, version: bom.version });
 }
 
 async function writeRouting(

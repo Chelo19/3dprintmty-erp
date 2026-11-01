@@ -210,7 +210,7 @@ describe("compras directas sin OC", () => {
     expect((await request(app.getHttpServer()).post("/api/v1/expenses").set(header).send({ occurredOn: "2026-10-27", lines: [{ kind: "product", itemId: product.body.id, quantity: "1", amount: "10" }] })).status).toBe(404);
   });
 
-  it("cancela un gasto y todos sus abonos conservando importes y auditoría, sin admitir nuevos pagos", async () => {
+  it("cancela un gasto y todos sus abonos conservando importes y autor de cancelación, sin admitir nuevos pagos", async () => {
     const created = await post("/expenses", { kind: "other", description: "Gasto cancelable", amount: "100", occurredOn: "2026-10-27", paidAmount: "40", paidOn: "2026-10-27" });
     await post(`/expenses/${created.body.id}/payments`, { amount: "60", paidOn: "2026-10-27" });
     const body = { reason: "Captura duplicada del comprobante" }; const key = crypto.randomUUID();
@@ -222,9 +222,9 @@ describe("compras directas sin OC", () => {
     expect(result.body.payments.map((payment: { amount: string }) => payment.amount)).toEqual(["40.00", "60.00"]);
     expect((await post(`/expenses/${created.body.id}/cancel`, body, key)).body).toEqual(result.body);
     expect((await post(`/expenses/${created.body.id}/payments`, { amount: "1", paidOn: "2026-10-27" })).status).toBe(409);
-    const audit = await services().database.asAdmin(db => db.execute(sql`select actor_user_id, metadata from audit_events where action='expense.canceled' and entity_id=${created.body.id}::uuid`));
-    expect(audit.rows).toHaveLength(1);
-    expect(audit.rows[0].actor_user_id).toBe(result.body.canceledBy);
+    const actor = await services().auth.verify(token);
+    expect(result.body.canceledBy).toBe(actor.userId);
+
   });
 
   it("revierte existencias y valores de varias partidas una sola vez, y conserva los costos de catálogo", async () => {

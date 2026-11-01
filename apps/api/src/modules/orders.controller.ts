@@ -78,7 +78,7 @@ import {
   type OrderRow,
   type PaymentRow,
 } from "./orders.shared";
-import { allocateFolio, audit, isoDate, one, postStock, reserveStock, unwrap, withIdempotency, type Db } from "./support";
+import { allocateFolio, isoDate, one, postStock, reserveStock, unwrap, withIdempotency, type Db } from "./support";
 
 const lineSchema = z
   .object({
@@ -387,7 +387,6 @@ export class OrdersController {
       await orderEvent(db, tenant, order.id, "edited", {
         note: `Total ${Money.fromMinor(BigInt(order.totalMinor)).toMajor()} → ${Money.fromMinor(total).toMajor()}`,
       });
-      await audit(db, tenant, "sales_order.edited", "sales_order", order.id, { lines: input.lines.length });
       return orderDetail(db, tenant, order.id);
     });
   }
@@ -487,10 +486,6 @@ export class OrdersController {
       await orderEvent(db, tenant, order.id, "closed_short", {
         note: `${reason} · Total ${Money.fromMinor(BigInt(order.totalMinor)).toMajor()} → ${Money.fromMinor(BigInt(repriced.totalMinor)).toMajor()}`,
       });
-      await audit(db, tenant, "sales_order.closed_short", "sales_order", order.id, {
-        reason,
-        lines: plan.map((item) => ({ lineId: item.lineId, closed: formatQty(item.close) })),
-      });
       await syncOrderState(db, tenant, order.id);
     });
   }
@@ -582,7 +577,6 @@ export class OrdersController {
         .set({ status: "completed" })
         .where(and(eq(payments.salesOrderId, order.id), eq(payments.method, "cod"), eq(payments.kind, "payment"), eq(payments.status, "pending")))
         .returning();
-      for (const payment of pending) await audit(db, tenant, "payment.completed", "payment", payment.id, { orderId: order.id, source: "delivery" });
       await db
         .update(salesOrders)
         .set({ fulfillmentStatus: "delivered", deliveredAt: new Date() })
@@ -746,7 +740,6 @@ async function setStatus(
     .where(eq(salesOrders.id, order.id))
     .returning();
   await orderEvent(db, tenant, order.id, kind, { from, to: status, note });
-  await audit(db, tenant, `sales_order.${kind}`, "sales_order", order.id, { from, to: status, note });
   return row;
 }
 

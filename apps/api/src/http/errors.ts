@@ -1,4 +1,4 @@
-import { Catch, type ArgumentsHost, type ExceptionFilter } from "@nestjs/common";
+import { Catch, NotFoundException, type ArgumentsHost, type ExceptionFilter } from "@nestjs/common";
 import { AppError } from "@3dprintmty/shared";
 import { ZodError } from "zod";
 
@@ -8,6 +8,10 @@ export class AllExceptionsFilter implements ExceptionFilter {
     const response = host.switchToHttp().getResponse<{
       status: (code: number) => { json: (body: unknown) => void };
     }>();
+    if (exception instanceof NotFoundException) {
+      response.status(404).json({ code: "not_found", message: "No encontramos esa ruta.", details: null });
+      return;
+    }
     if (exception instanceof ZodError) {
       response.status(400).json({
         code: "validation_error",

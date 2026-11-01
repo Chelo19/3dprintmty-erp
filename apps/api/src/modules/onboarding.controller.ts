@@ -14,7 +14,6 @@ import { z } from "zod";
 import { services } from "../container";
 import type { DatabaseService } from "../db/database.service";
 import {
-  auditEvents,
   companyProfiles,
   defectTypes,
   filaments,
@@ -182,14 +181,6 @@ export class OnboardingController {
           }),
         ]);
       }
-      await db.insert(auditEvents).values({
-        tenantId: tenant.id,
-        actorUserId: actor.userId,
-        action: "tenant.onboarded",
-        entityType: "tenant",
-        entityId: tenant.id,
-        metadata: { rfc, vatRate: input.vatRate, privacyAccepted: true },
-      });
       return tenant;
     }));
 

@@ -12,7 +12,6 @@ import { AppError, type Result } from "@3dprintmty/shared";
 import { and, eq, sql } from "drizzle-orm";
 import type { DatabaseService } from "../db/database.service";
 import {
-  auditEvents,
   idempotencyRequests,
   filaments,
   locations,
@@ -122,24 +121,6 @@ function canonicalJson(value: unknown): string {
 
 function toJson(value: unknown): unknown {
   return JSON.parse(JSON.stringify(value, (_key, item) => (typeof item === "bigint" ? item.toString() : item)));
-}
-
-export async function audit(
-  db: Db,
-  tenant: TenantActor,
-  action: string,
-  entityType: string,
-  entityId: string | null,
-  metadata: Record<string, unknown> = {},
-) {
-  await db.insert(auditEvents).values({
-    tenantId: tenant.tenantId,
-    actorUserId: tenant.userId,
-    action,
-    entityType,
-    entityId,
-    metadata,
-  });
 }
 
 export async function defaultLocationId(db: Db): Promise<string> {

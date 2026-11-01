@@ -2,7 +2,7 @@
 
 ERP operativo para granjas de impresión 3D. México primero: MXN, `America/Mexico_City`, IVA y prefactura. No es un CFDI y no timbra ante el SAT.
 
-La **fase 0** trae talleres, acceso, RLS, alta, i18n, dinero, unidades, sucursales, roles, auditoría y el esqueleto de catálogo y de política fiscal. Encima corren ventas y cobranza, y los módulos de operación:
+La **fase 0** trae talleres, acceso, RLS, alta, i18n, dinero, unidades, sucursales, roles, autores de movimientos y el esqueleto de catálogo y de política fiscal. Encima corren ventas y cobranza, y los módulos de operación:
 
 | Módulo | Pantalla | Qué hace |
 | --- | --- | --- |

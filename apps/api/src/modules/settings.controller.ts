@@ -14,7 +14,6 @@ import { z } from "zod";
 import { services } from "../container";
 import { loadCompanyProfile } from "./company-profile";
 import {
-  auditEvents,
   companyProfiles,
   locations,
   paymentMethodSettings,
@@ -92,14 +91,6 @@ export class SettingsController {
         .update(taxRates)
         .set({ rate: Number(input.vatRate).toFixed(4) })
         .where(and(eq(taxRates.tenantId, tenant.tenantId), eq(taxRates.id, profile.defaultTaxRateId)));
-      await db.insert(auditEvents).values({
-        tenantId: tenant.tenantId,
-        actorUserId: tenant.userId,
-        action: "company.fiscal_updated",
-        entityType: "company",
-        entityId: tenant.tenantId,
-        metadata: { rfc, vatRate: input.vatRate, isrRate: input.isrRate },
-      });
     });
     return this.company(actor);
   }

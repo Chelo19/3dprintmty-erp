@@ -9,7 +9,7 @@ import { customerAddresses, customers, locations, paymentMethodSettings, payment
 import { assertRole, CurrentUser, type Actor, type TenantActor } from "../http/actor";
 import { loadCompanyProfile } from "./company-profile";
 import { orderEvent } from "./orders.shared";
-import { allocateFolio, audit, defaultLocationId, one, postStock, withIdempotency, type Db } from "./support";
+import { allocateFolio, defaultLocationId, one, postStock, withIdempotency, type Db } from "./support";
 import { taxRateSchema } from "./tax-rates";
 
 const ROLES = ["owner", "admin", "sales", "operator"] as const;
@@ -146,8 +146,6 @@ export class PosController {
         }));
         const [payment] = await db.insert(payments).values({ tenantId: tenant.tenantId, salesOrderId: order.id, method: input.method, kind: "payment", status: "completed", amountMinor: total, reference: input.reference || null, note: "Venta en punto de venta", createdBy: tenant.userId }).returning();
         await orderEvent(db, tenant, order.id, "pos_sale", { to: "completed", note: "Cobro y entrega en mostrador" });
-        await audit(db, tenant, "payment.recorded", "payment", payment.id, { orderId: order.id, method: input.method, amountMinor: total.toString() });
-        await audit(db, tenant, "pos.sale", "sales_order", order.id, { paymentId: payment.id, locationId: location.id });
         return { id: order.id, lines, locationId: location.id };
       });
       // Catálogo y sucursal se validaron con RLS; solo se descuentan artículos de esta venta nueva.

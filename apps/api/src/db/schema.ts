@@ -202,17 +202,6 @@ export const productsVisible = pgView("products_visible", {
   qcRigor: text("qc_rigor"),
 }).existing();
 
-export const auditEvents = pgTable("audit_events", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  tenantId: uuid("tenant_id").notNull().references(() => tenants.id),
-  actorUserId: uuid("actor_user_id"),
-  action: text("action").notNull(),
-  entityType: text("entity_type").notNull(),
-  entityId: uuid("entity_id"),
-  metadata: jsonb("metadata").notNull().default({}),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
-
 export const invitations = pgTable("invitations", {
   id: uuid("id").primaryKey().defaultRandom(),
   tenantId: uuid("tenant_id").notNull().references(() => tenants.id),

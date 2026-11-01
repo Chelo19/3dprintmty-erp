@@ -2,7 +2,7 @@ import "reflect-metadata";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { DatabaseService } from "../src/db/database.service";
-import { auditEvents, customers, payments, salesOrders, tenantMemberships, tenants, userAccounts } from "../src/db/schema";
+import { customers, payments, salesOrders, tenantMemberships, tenants, userAccounts } from "../src/db/schema";
 import { assertCredit } from "../src/modules/orders.shared";
 import type { TenantActor } from "../src/http/actor";
 
@@ -57,7 +57,7 @@ it("al editar un pedido se descuenta también su propio anticipo", async () => {
   await expect(database.asUser(actor, (db) => assertCredit(db, actor, { ...current, totalMinor: 180000n }, undefined))).resolves.toBeNull();
   await expect(database.asUser(actor, (db) => assertCredit(db, actor, { ...current, totalMinor: 180001n }, undefined))).rejects.toMatchObject({ code: "credit_limit" });
 });
-it("excluye cancelados y borradores; una excepción requiere rol autorizado y queda auditada", async () => {
+it("excluye cancelados y borradores; una excepción requiere rol autorizado y motivo", async () => {
   const { previous, current } = await fixture();
   for (const status of ["cancelled", "draft"]) {
     await database.asUser(actor, (db) => db.update(salesOrders).set({ status }).where(eq(salesOrders.id, previous.id)));
@@ -67,9 +67,7 @@ it("excluye cancelados y borradores; una excepción requiere rol autorizado y qu
   const sales = { ...actor, role: "sales" as const };
   await expect(database.asUser(sales, (db) => assertCredit(db, sales, current, "Autorizado"))).rejects.toMatchObject({ code: "credit_limit" });
   await expect(database.asUser(actor, (db) => assertCredit(db, actor, current, "Excepción autorizada"))).resolves.toBe("Excepción autorizada");
-  const history = await database.asUser(actor, (db) => db.select().from(auditEvents).where(and(eq(auditEvents.entityId, current.id), eq(auditEvents.action, "credit.override"))));
-  expect(history).toHaveLength(1);
-  expect(history[0]).toMatchObject({ action: "credit.override", actorUserId: actor.userId, metadata: { reason: "Excepción autorizada" } });
+
 });
 it("mantiene la excepción de clientes de contado", async () => {
   const { current } = await fixture("pue");
